@@ -216,5 +216,4 @@ COPY --from=build-image /home/documentdb/code/scripts/* /home/documentdb/scripts
 USER documentdb
 WORKDIR /home/documentdb
 
-
 #ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/scripts/start_oss_server.sh && exec bash"]
