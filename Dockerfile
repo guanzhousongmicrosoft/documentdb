@@ -134,10 +134,10 @@ RUN make \
 
 WORKDIR /
 
-
 #================================================
 # Final image
 #================================================
+
 FROM mcr.microsoft.com/mirror/docker/library/ubuntu:20.04 AS final
 ARG PG_VERSION=
 ENV PG_VERSION=${PG_VERSION}
@@ -155,9 +155,6 @@ RUN apt-get update && apt-get install -y \
 RUN ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime && \
     dpkg-reconfigure --frontend noninteractive tzdata
 
-
-
-
 # Add the PostgreSQL APT repository and import its key
 RUN echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
     wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
@@ -167,7 +164,6 @@ RUN apt-get update && apt-get install -y \
     postgresql-${PG_VERSION}  \
     postgresql-server-dev-${PG_VERSION} \
     sudo vim
-
 
 COPY --from=build-image /usr/lib/postgresql/${PG_VERSION}/lib/ /tmp/postgres-lib/
 RUN (mkdir -p /usr/lib/postgresql/${PG_VERSION}/lib/ || true) && \
@@ -216,4 +212,4 @@ COPY --from=build-image /home/documentdb/code/scripts/* /home/documentdb/scripts
 USER documentdb
 WORKDIR /home/documentdb
 
-#ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/scripts/start_oss_server.sh && exec bash"]
+ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/scripts/start_oss_server.sh && exec bash"]
