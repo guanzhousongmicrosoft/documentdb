@@ -2,8 +2,8 @@ ARG PG_VERSION=16
 
 FROM --platform=linux/amd64 mcr.microsoft.com/mirror/docker/library/ubuntu:20.04 AS build-image
 ARG POSTGRES_INSTALL_ARG=
-ARG PG_VERSION=
-ARG CITUS_VERSION=
+ARG PG_VERSION=16
+ARG CITUS_VERSION="v12.1"
 
 # declare installed PG version and Citus version
 ENV PG_VERSION=${PG_VERSION}
@@ -139,7 +139,7 @@ WORKDIR /
 #================================================
 
 FROM mcr.microsoft.com/mirror/docker/library/ubuntu:20.04 AS final
-ARG PG_VERSION=
+ARG PG_VERSION=16
 ENV PG_VERSION=${PG_VERSION}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
@@ -212,4 +212,4 @@ COPY --from=build-image /home/documentdb/code/scripts/* /home/documentdb/scripts
 USER documentdb
 WORKDIR /home/documentdb
 
-ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/scripts/start_oss_server.sh && exec bash"]
+ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/scripts/start_oss_server.sh -x true && exec bash"]

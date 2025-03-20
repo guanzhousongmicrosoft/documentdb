@@ -11,7 +11,7 @@ postgresDirectory=""
 initSetup="false"
 help="false"
 stop="false"
-allowUnsafeExternalAccess="false"
+enableHostAccess="false"
 while getopts "d:hcsx" opt; do
   case $opt in
     d) postgresDirectory="$OPTARG"
@@ -22,7 +22,7 @@ while getopts "d:hcsx" opt; do
     ;;
     s) stop="true"
     ;;
-    x) allowUnsafeExternalAccess="true"
+    x) enableHostAccess="true"
     ;;
   esac
 
@@ -45,7 +45,7 @@ if [ "$help" == "true" ]; then
     echo "${green}<postgresDir> is the data directory for your postgres instance with extension"
     echo "${green}[-c] - optional argument. removes all existing data if it exists"
     echo "${green}[-s] - optional argument. Stops all servers and exits"
-    echo "${green}[-x] - optional argument. Allows Unsafe external access to the server, test purposes only"
+    echo "${green}[-x] - optional argument. Enabling access to PostgreSQL from outside the container (host access)"
     echo "${green}if postgresDir not specified assumed to be ~/documentdb_test"
     exit 1;
 fi
@@ -86,7 +86,7 @@ if [ "$stop" == "true" ]; then
 fi
 
 if [ "$initSetup" == "true" ]; then
-    InitDatabaseExtended $postgresDirectory "$preloadLibraries" $allowUnsafeExternalAccess
+    InitDatabaseExtended $postgresDirectory "$preloadLibraries" $enableHostAccess
 fi
 
 userName=$(whoami)
