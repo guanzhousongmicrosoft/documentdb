@@ -1,11 +1,11 @@
-FROM --platform=linux/amd64 mcr.microsoft.com/mirror/docker/library/ubuntu:20.04
+FROM mcr.microsoft.com/mirror/docker/library/ubuntu:22.04
 ARG POSTGRES_INSTALL_ARG=
-ARG PG_VERSION=
-ARG CITUS_VERSION=
+ARG PG_VERSION=16
+ARG CITUS_VERSION=12
 
 # declare installed PG version and Citus version
-ENV PG_VERSION=16
-ENV CITUS_VERSION=12
+ENV PG_VERSION=${PG_VERSION}
+ENV CITUS_VERSION=${CITUS_VERSION}
 
 # Install build essentials - Compiler, debugger, make, etc.
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
@@ -20,8 +20,8 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     pkg-config \
     cmake \
     git \
-	locales \
-	gcc \
+    locales \
+    gcc \
     gdb \
     libipc-run-perl \
     unzip \
@@ -35,6 +35,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     libtool \
     libicu-dev \
     libssl-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Add pgdg repo
@@ -100,10 +101,14 @@ RUN add-apt-repository -y ppa:ubuntugis/ppa && apt-get update && \
     libproj-dev \
     libxml2-dev \
     libjson-c-dev \
-    libgeos++-dev libgeos-3.9.1 libgeos-c1v5 libgeos-dev \
+    libgeos-dev \
+    libgeos++-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/install_setup_postgis.sh /tmp/install_setup/
 RUN [ "bin/bash", "-c", "PGVERSION=$PG_VERSION /tmp/install_setup/install_setup_postgis.sh" ]
+
+RUN curl https://downloads.mongodb.com/compass/mongodb-mongosh_1.3.1_amd64.deb -o mongodb-mongosh_1.3.1_amd64.deb \
+         && dpkg -i mongodb-mongosh_1.3.1_amd64.deb && rm mongodb-mongosh_1.3.1_amd64.deb
 
 # locale
 RUN rm -rf /var/lib/apt/lists/* \
@@ -126,3 +131,31 @@ ENV PATH=$PATH:/usr/lib/postgresql/$PG_VERSION/bin
 
 USER documentdb
 WORKDIR /home/documentdb
+
+LABEL org.opencontainers.image.source=https://github.com/microsoft/documentdb
+LABEL org.opencontainers.image.description="DocumentDB ubuntu build image"
+LABEL org.opencontainers.image.licenses=MIT
+
+WORKDIR /home/documentdb/code  
+
+COPY . /home/documentdb/code  
+
+RUN git config --global --add safe.directory /home/DocumentDB/code
+
+RUN sudo chown -R documentdb:documentdb /home/documentdb/code
+
+USER documentdb
+
+# Install rustup (which includes rustc and cargo) in user directory
+ENV RUSTUP_HOME=/home/documentdb/.rustup \
+    CARGO_HOME=/home/documentdb/.cargo \
+    PATH=/home/documentdb/.cargo/bin:$PATH
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path --default-toolchain stable
+
+# Optional: show versions
+RUN rustc --version && cargo --version
+
+RUN make  && sudo make install
+
+ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/code/scripts/gateway_entrypoint.sh & exec /bin/bash"]

@@ -35,6 +35,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     libtool \
     libicu-dev \
     libssl-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Add pgdg repo
@@ -131,3 +132,27 @@ WORKDIR /home/documentdb
 LABEL org.opencontainers.image.source=https://github.com/microsoft/documentdb
 LABEL org.opencontainers.image.description="DocumentDB ubuntu build image"
 LABEL org.opencontainers.image.licenses=MIT
+
+WORKDIR /home/documentdb/code  
+
+COPY . /home/documentdb/code  
+
+RUN git config --global --add safe.directory /home/DocumentDB/code
+
+RUN sudo chown -R documentdb:documentdb /home/documentdb/code
+
+USER documentdb
+
+# Install rustup (which includes rustc and cargo) in user directory
+ENV RUSTUP_HOME=/home/documentdb/.rustup \
+    CARGO_HOME=/home/documentdb/.cargo \
+    PATH=/home/documentdb/.cargo/bin:$PATH
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path --default-toolchain stable
+
+# Optional: show versions
+RUN rustc --version && cargo --version
+
+RUN make  && sudo make install
+
+ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/code/scripts/gateway_entrypoint.sh & exec /bin/bash"]
