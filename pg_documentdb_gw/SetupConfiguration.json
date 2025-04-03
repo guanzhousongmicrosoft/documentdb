@@ -9,6 +9,5 @@
   "TransactionTimeoutSecs": 5,
   "CursorTimeoutSecs": 10,
   "PostgresCommandTimeoutSecs": 10,
-  "EnforceSslTcp": true,
-  "UseLocalHost": false
+  "EnforceSslTcp": true
 }
