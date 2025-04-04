@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/mirror/docker/library/ubuntu:22.04
+FROM --platform=linux/amd64 mcr.microsoft.com/mirror/docker/library/ubuntu:22.04
 ARG POSTGRES_INSTALL_ARG=
 ARG PG_VERSION=16
 ARG CITUS_VERSION=12
@@ -158,4 +158,10 @@ RUN rustc --version && cargo --version
 
 RUN make  && sudo make install
 
-ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/code/scripts/gateway_entrypoint.sh & exec /bin/bash"]
+WORKDIR /home/documentdb/code/pg_documentdb_gw
+
+RUN cargo build
+
+WORKDIR /home/documentdb/code  
+
+ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/code/scripts/gateway_entrypoint.sh && tail -f /dev/null"]
