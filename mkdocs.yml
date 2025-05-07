@@ -3,14 +3,14 @@ theme:
   name: material
 
 nav:
-  - Home: v2/documentdb.md
+  - Home: index.md
   - Version 1.0:
-      - DocumentDB: v1/documentdb.md
-      - Prebuild_Image: v1/prebuild.md
+      - Getting Started: v1/documentdb.md
+      - Prebuild Image: v1/prebuild.md
       - Packaging: v1/packaging.md
   - Version 2.0:
-      - DocumentDB: v2/documentdb.md
-      - Prebuild_Image: v2/prebuild.md
+      - Getting Started: v2/documentdb.md
+      - Prebuild Image: v2/prebuild.md
       - Packaging: v2/packaging.md
 
 plugins:
