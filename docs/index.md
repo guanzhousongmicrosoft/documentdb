@@ -36,3 +36,5 @@ cd documentdb
 docker build -f .devcontainer/Dockerfile -t documentdb .
 docker run -v $(pwd):/home/documentdb/code -it documentdb /bin/bash
 make && sudo make install
+```
+
