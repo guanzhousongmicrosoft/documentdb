@@ -1,0 +1,22 @@
+site_name: DocumentDB
+theme:
+  name: material
+
+nav:
+  - Home: v2/documentdb.md
+  - Version 1.0:
+      - DocumentDB: v1/documentdb.md
+      - Prebuild_Image: v1/prebuild.md
+      - Packaging: v1/packaging.md
+  - Version 2.0:
+      - DocumentDB: v2/documentdb.md
+      - Prebuild_Image: v2/prebuild.md
+      - Packaging: v2/packaging.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
