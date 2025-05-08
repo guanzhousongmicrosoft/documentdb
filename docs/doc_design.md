@@ -107,6 +107,7 @@ The main documentation site will be hosted on GitHub Pages (`github.io`). The Gi
 
 1. Verify whether the Microsoft repository can host a static page at `microsoft.github.io/documentdb`.
 2. Request access to the GitHub repository to test and deploy the MkDocs solution.
+3. (Optional) Multiple languages support
 
 ---
 
