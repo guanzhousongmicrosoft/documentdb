@@ -44,10 +44,12 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    - name: Set And Show Variables
+    - name: Set Default Values
       run: |
         echo "BASE_VERSION=${{ github.event.inputs.base_version || env.DEFAULT_BASE_VERSION }}" >> $GITHUB_ENV
         echo "MANIFEST_TAG=${{ github.event.inputs.manifest_tag || env.DEFAULT_MANIFEST_TAG }}" >> $GITHUB_ENV
+    - name: Show Env Variables
+      run: |
         echo "IMAGE_NAME=${{ env.IMAGE_NAME }}"
         echo "IMAGE_TAG=${{ env.IMAGE_TAG }}"
         echo "ARCH=${{ matrix.arch }}"
