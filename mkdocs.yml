@@ -3,7 +3,7 @@ theme:
   name: material
 
 nav:
-  - Home: index.md
+  - Home: doc-design.md
   - Version 1.0:
       - Getting Started: v1/documentdb.md
       - Prebuild Image: v1/prebuild.md
