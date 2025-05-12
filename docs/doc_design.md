@@ -1,4 +1,4 @@
-# Design Doc: Versioned Documentation with MkDocs and GitHub Pages
+# (TODO: REMOVE) Design Doc: Versioned Documentation with MkDocs and GitHub Pages
 
 ## Overview
 

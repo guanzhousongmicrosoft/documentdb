@@ -22,3 +22,7 @@ Step 2: Connect to psql shell
 ```sh
 psql -p 9712 -d postgres
 ```
+
+## Prebuild Image List
+
+Check the [prebuild image list](./prebuild_image_list.md) for the latest prebuild images.

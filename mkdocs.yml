@@ -9,10 +9,6 @@ nav:
       - Getting Started: v1/documentdb.md
       - Prebuild Image: v1/prebuild.md
       - Packaging: v1/packaging.md
-  - Version 2.0:
-      - Getting Started: v2/documentdb.md
-      - Prebuild Image: v2/prebuild.md
-      - Packaging: v2/packaging.md
 
 plugins:
   - search
