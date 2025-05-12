@@ -4,11 +4,6 @@ theme:
 
 nav:
   - Home: index.md
-  - Design Doc: doc_design.md
-  - Version 1.0:
-      - Getting Started: v1/documentdb.md
-      - Prebuild Image: v1/prebuild.md
-      - Packaging: v1/packaging.md
 
 plugins:
   - search
