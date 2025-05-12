@@ -7,9 +7,12 @@ It supports seamless CRUD operations on BSON data types, full-text search, geosp
 
 ## Get Start Here
 
-[Getting Start with DocumentDB](v1/documentdb.md)
+[Introduction](v1/documentdb.md)
+
 [Prebuild Image](v1/prebuild-image.md)
+
 [Packaging](v1/packaging.md)
+
 [DocumentDB Gateway](v1/gateway.md)
 
 ---
