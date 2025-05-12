@@ -1,6 +1,7 @@
 site_name: DocumentDB
+repo_url: https://github.com/microsoft/documentdb
 theme:
-  name: material
+  name: readthedocs
 
 nav:
   - Version 1.0:
