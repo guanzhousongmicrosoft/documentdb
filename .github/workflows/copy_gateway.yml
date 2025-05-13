@@ -1,0 +1,71 @@
+name: Copy to microsoft/documentdb-local
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'Tag in your repo to copy (e.g. test or 1234-2024-05-13)'
+        required: true
+  push:
+    branches:
+      - 'main' 
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SOURCE_REPO: ghcr.io/${{ github.repository }}/preview
+  TARGET_REPO: ghcr.io/${{ github.repository }}/documentdb-local
+  TARGET_TAG: latest
+
+jobs:
+  copy-and-push-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Inspect manifest and pull/tag/push all images
+        env:
+          SOURCE_IMAGE: ${{ env.SOURCE_REPO }}:${{ github.event.inputs.source_tag }}
+          TARGET_REPO: ${{ env.TARGET_REPO }}
+          TARGET_TAG: ${{ env.TARGET_TAG }}
+        run: |
+          set -e
+          manifest_json=$(docker manifest inspect "$SOURCE_IMAGE")
+          echo "$manifest_json" > manifest.json
+          count=$(jq '.manifests | length' manifest.json)
+          echo "Found $count images in manifest"
+          tags=()
+          for i in $(seq 0 $((count - 1))); do
+            digest=$(jq -r ".manifests[$i].digest" manifest.json)
+            arch=$(jq -r ".manifests[$i].platform.architecture" manifest.json)
+            os=$(jq -r ".manifests[$i].platform.os" manifest.json)
+            # Pull by digest
+            docker pull "$SOURCE_IMAGE@$digest"
+            # Tag for target
+            target_tag="$TARGET_REPO:$TARGET_TAG-$arch"
+            docker tag "$SOURCE_IMAGE@$digest" "$target_tag"
+            docker push "$target_tag"
+            tags+=("$target_tag")
+          done
+          echo "TAGS_TO_MANIFEST=${tags[*]}" >> $GITHUB_ENV
+
+      - name: Create and Push Manifest
+        env:
+          TARGET_REPO: ${{ env.TARGET_REPO }}
+          TARGET_TAG: ${{ env.TARGET_TAG }}
+        run: |
+          set -e
+          # shellcheck disable=SC2206
+          tags=($TAGS_TO_MANIFEST)
+          manifest_args=""
+          for tag in "${tags[@]}"; do
+            manifest_args="$manifest_args --amend $tag"
+          done
+          docker manifest create "$TARGET_REPO:$TARGET_TAG" $manifest_args
+          docker manifest push "$TARGET_REPO:$TARGET_TAG"
