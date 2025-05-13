@@ -8,7 +8,7 @@ on:
         required: true
   push:
     branches:
-      - 'main' 
+      - 'copy' 
 
 permissions:
   contents: read
@@ -31,7 +31,7 @@ jobs:
 
       - name: Inspect manifest and pull/tag/push all images
         env:
-          SOURCE_IMAGE: ${{ env.SOURCE_REPO }}:${{ github.event.inputs.source_tag }}
+          SOURCE_IMAGE: ${{ env.SOURCE_REPO }}:test
           TARGET_REPO: ${{ env.TARGET_REPO }}
           TARGET_TAG: ${{ env.TARGET_TAG }}
         run: |
