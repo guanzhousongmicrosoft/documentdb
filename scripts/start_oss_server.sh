@@ -98,8 +98,40 @@ if [ -z $postgresDirectory ]; then
     postgresDirectory="/home/documentdb/postgresql/data"
 fi
 
+# Handle PostgreSQL data directory setup and permissions
+userName=$(whoami)
+
+# Create directory if it doesn't exist
 if ! [ -d "$postgresDirectory" ]; then
+    echo "${green}Creating postgres data directory: $postgresDirectory${reset}"
+    mkdir -p "$postgresDirectory"
+    # Set proper ownership for the new directory
+    sudo chown -R $userName:$userName "$postgresDirectory"
     initSetup="true"
+else
+    echo "${green}Found existing postgres data directory: $postgresDirectory${reset}"
+    
+    # Fix permissions for Docker volume mounts - this is crucial for containerized environments
+    # Check if the directory is not writable by current user (common with Docker volumes)
+    if ! [ -w "$postgresDirectory" ]; then
+        echo "${green}Fixing ownership of postgres data directory for user: $userName${reset}"
+        sudo chown -R $userName:$userName "$postgresDirectory"
+    fi
+    
+    # Check if directory is empty or doesn't contain valid PostgreSQL data
+    # We check for PG_VERSION file which is always present in initialized PostgreSQL data directory
+    if [ -z "$(ls -A "$postgresDirectory" 2>/dev/null)" ]; then
+        echo "${green}Postgres data directory is empty, will initialize database${reset}"
+        initSetup="true"
+    elif ! [ -f "$postgresDirectory/PG_VERSION" ]; then
+        echo "${green}Postgres data directory exists but is not a valid PostgreSQL data directory, will initialize${reset}"
+        # Clear the directory if it contains non-PostgreSQL files
+        rm -rf "$postgresDirectory"/*
+        initSetup="true"
+    else
+        echo "${green}Using existing PostgreSQL data directory with version: $(cat "$postgresDirectory/PG_VERSION")${reset}"
+        initSetup="false"
+    fi
 fi
 
 # We stop the coordinator first and the worker node servers
@@ -113,7 +145,25 @@ if [ "$stop" == "true" ]; then
 fi
 
 if [ "$initSetup" == "true" ]; then
-    InitDatabaseExtended $postgresDirectory "$preloadLibraries"
+    # Only delete and recreate if directory is empty or contains invalid PostgreSQL data
+    if [ -z "$(ls -A "$postgresDirectory" 2>/dev/null)" ] || ! [ -f "$postgresDirectory/PG_VERSION" ]; then
+        echo "${green}Initializing new PostgreSQL database in: $postgresDirectory${reset}"
+        # Clear any non-PostgreSQL files if directory exists but is invalid
+        if [ -d "$postgresDirectory" ] && ! [ -f "$postgresDirectory/PG_VERSION" ]; then
+            echo "${green}Clearing invalid data from directory${reset}"
+            rm -rf "$postgresDirectory"/*
+        fi
+        
+        # Create directory if it doesn't exist
+        mkdir -p "$postgresDirectory"
+        
+        # Initialize database without deleting existing directory structure
+        echo "${green}Calling initdb for $postgresDirectory${reset}"
+        $(GetInitDB) -D $postgresDirectory
+        SetupPostgresConfigurations $postgresDirectory "$preloadLibraries"
+    else
+        echo "${green}PostgreSQL data directory already contains valid data, skipping initialization${reset}"
+    fi
 fi
 
 # Update PostgreSQL configuration to allow access from any IP
@@ -127,9 +177,31 @@ if [ "$allowExternalAccess" == "true" ]; then
   echo "host all all ::0/0 trust" >> $hbaConfigFile
 fi
 
+# Ensure proper ownership of the data directory for the current user
 userName=$(whoami)
+echo "${green}Ensuring proper ownership of PostgreSQL directories for user: $userName${reset}"
+
+# Fix ownership of PostgreSQL data directory (important for Docker volume mounts)
+if [ -d "$postgresDirectory" ]; then
+    # Check if we need to fix ownership
+    currentOwner=$(stat -c '%U' "$postgresDirectory" 2>/dev/null || echo 'unknown')
+    if [ "$currentOwner" != "$userName" ]; then
+        echo "${green}Fixing ownership of PostgreSQL data directory (current owner: $currentOwner)${reset}"
+        sudo chown -R $userName:$userName "$postgresDirectory"
+    else
+        echo "${green}PostgreSQL data directory ownership is correct for user: $userName${reset}"
+    fi
+fi
+
+# Create and fix ownership of PostgreSQL runtime directory
 sudo mkdir -p /var/run/postgresql
-sudo chown -R $userName:$userName /var/run/postgresql
+currentRuntimeOwner=$(stat -c '%U' /var/run/postgresql 2>/dev/null || echo 'root')
+if [ "$currentRuntimeOwner" != "$userName" ]; then
+    echo "${green}Fixing ownership of PostgreSQL runtime directory (current owner: $currentRuntimeOwner)${reset}"
+    sudo chown -R $userName:$userName /var/run/postgresql
+else
+    echo "${green}PostgreSQL runtime directory ownership is correct for user: $userName${reset}"
+fi
 
 StartServer $postgresDirectory $coordinatorPort
 
