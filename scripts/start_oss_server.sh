@@ -115,7 +115,9 @@ else
     # Check if the directory is not writable by current user (common with Docker volumes)
     if ! [ -w "$postgresDirectory" ]; then
         echo "${green}Fixing ownership of postgres data directory for user: $userName${reset}"
-        sudo chown -R $userName:$userName "$postgresDirectory"
+        sudo chown -R $userName:$userName "$postgresDirectory" || {
+            echo "${red}Warning: Could not change ownership of $postgresDirectory, continuing anyway${reset}"
+        }
     fi
     
     # Check if directory is empty or doesn't contain valid PostgreSQL data
@@ -151,7 +153,9 @@ if [ "$initSetup" == "true" ]; then
         # Clear any non-PostgreSQL files if directory exists but is invalid
         if [ -d "$postgresDirectory" ] && ! [ -f "$postgresDirectory/PG_VERSION" ]; then
             echo "${green}Clearing invalid data from directory${reset}"
-            rm -rf "$postgresDirectory"/*
+            rm -rf "$postgresDirectory"/* || {
+                echo "${red}Warning: Could not clear directory contents, continuing anyway${reset}"
+            }
         fi
         
         # Create directory if it doesn't exist
@@ -187,18 +191,24 @@ if [ -d "$postgresDirectory" ]; then
     currentOwner=$(stat -c '%U' "$postgresDirectory" 2>/dev/null || echo 'unknown')
     if [ "$currentOwner" != "$userName" ]; then
         echo "${green}Fixing ownership of PostgreSQL data directory (current owner: $currentOwner)${reset}"
-        sudo chown -R $userName:$userName "$postgresDirectory"
+        sudo chown -R $userName:$userName "$postgresDirectory" || {
+            echo "${red}Warning: Could not change ownership of $postgresDirectory, continuing anyway${reset}"
+        }
     else
         echo "${green}PostgreSQL data directory ownership is correct for user: $userName${reset}"
     fi
 fi
 
 # Create and fix ownership of PostgreSQL runtime directory
-sudo mkdir -p /var/run/postgresql
+sudo mkdir -p /var/run/postgresql || {
+    echo "${red}Warning: Could not create PostgreSQL runtime directory, continuing anyway${reset}"
+}
 currentRuntimeOwner=$(stat -c '%U' /var/run/postgresql 2>/dev/null || echo 'root')
 if [ "$currentRuntimeOwner" != "$userName" ]; then
     echo "${green}Fixing ownership of PostgreSQL runtime directory (current owner: $currentRuntimeOwner)${reset}"
-    sudo chown -R $userName:$userName /var/run/postgresql
+    sudo chown -R $userName:$userName /var/run/postgresql || {
+        echo "${red}Warning: Could not change ownership of /var/run/postgresql, continuing anyway${reset}"
+    }
 else
     echo "${green}PostgreSQL runtime directory ownership is correct for user: $userName${reset}"
 fi
