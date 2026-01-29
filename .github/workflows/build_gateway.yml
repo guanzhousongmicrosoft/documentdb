@@ -201,25 +201,25 @@ jobs:
         echo "amd64_digest=$AMD64_DIGEST" >> $GITHUB_OUTPUT
         echo "arm64_digest=$ARM64_DIGEST" >> $GITHUB_OUTPUT
 
-    - name: Re-create and push latest manifest
+    - name: Re-create and push latest manifest with updated timestamp
       if: steps.check_latest.outputs.exists == 'true'
       run: |
         IMAGE=ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}
         AMD64="${IMAGE}@${{ steps.check_latest.outputs.amd64_digest }}"
         ARM64="${IMAGE}@${{ steps.check_latest.outputs.arm64_digest }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         
         echo "Re-creating latest manifest from:"
         echo "  AMD64: $AMD64"
         echo "  ARM64: $ARM64"
+        echo "  Timestamp annotation: $TIMESTAMP"
         
-        # Remove any existing manifest to force a fresh creation
-        docker manifest rm "${IMAGE}:latest" 2>/dev/null || true
+        # Use buildx imagetools with annotation to create a new manifest with unique digest
+        # The timestamp annotation forces a new digest, updating GHCR's "Published" time
+        docker buildx imagetools create \
+          --tag "${IMAGE}:latest" \
+          --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+          --annotation "index:org.opencontainers.image.created=${TIMESTAMP}" \
+          "$AMD64" "$ARM64"
         
-        # Create a new manifest - this generates a new digest and timestamp
-        docker manifest create "${IMAGE}:latest" \
-          --amend "$AMD64" \
-          --amend "$ARM64"
-        
-        docker manifest push "${IMAGE}:latest"
-        
-        echo "Successfully refreshed latest tag"
+        echo "Successfully refreshed latest tag with new timestamp"
