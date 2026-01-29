@@ -165,10 +165,10 @@ jobs:
 
   refresh-latest:
     name: Refresh 'latest' tag timestamp
-    # Only run on regular pushes (not tags/workflow_dispatch which already push latest)
-    if: github.event_name == 'push'
+    needs: [build-and-push, create-manifest-latest]
+    # Always run after build-and-push succeeds, regardless of whether create-manifest-latest ran
+    if: always() && needs.build-and-push.result == 'success'
     runs-on: ubuntu-22.04
-    needs: build-and-push
     continue-on-error: true
     steps:
     - name: Login to GHCR
