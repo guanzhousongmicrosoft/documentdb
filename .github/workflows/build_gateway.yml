@@ -57,6 +57,22 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ matrix.arch }}-
+          ${{ runner.os }}-cargo-
     - name: Extract and Format Default Version
       id: extract_version
       run: |
@@ -68,25 +84,37 @@ jobs:
       run: |
         ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts
         ls -R downloaded-artifacts
+    
+    - name: Find DEB package
+      id: find_deb
+      run: |
+        DEB_FILE=$(ls downloaded-artifacts | grep -v 'dbgsym')
+        echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
+    
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+    
     - name: Build ${{ matrix.arch }} Image
-      run: |
-        TAG=${{ env.IMAGE_TAG }}-pg${{ matrix.pg_version }}-${{ matrix.arch }}
-        docker build \
-          --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=debian:trixie-slim \
-          --build-arg POSTGRES_VERSION=${{ matrix.pg_version }} \
-          --build-arg DEB_PACKAGE_REL_PATH=downloaded-artifacts/$(ls downloaded-artifacts | grep -v 'dbgsym')  \
-          -t ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:$TAG \
-          -f .github/containers/Build-Ubuntu/Dockerfile_gateway .
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: .github/containers/Build-Ubuntu/Dockerfile_gateway
+        platforms: linux/${{ matrix.arch }}
+        push: false
+        load: true
+        tags: ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+        build-args: |
+          BASE_IMAGE=debian:trixie-slim
+          POSTGRES_VERSION=${{ matrix.pg_version }}
+          DEB_PACKAGE_REL_PATH=downloaded-artifacts/${{ steps.find_deb.outputs.deb_file }}
+        cache-from: type=gha,scope=build-${{ matrix.arch }}-pg${{ matrix.pg_version }}
+        cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}-pg${{ matrix.pg_version }}
     - name: Push ${{ matrix.arch }} Image
       if: github.event.inputs.push_images == 'true' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
       run: |
         TAG=${{ env.IMAGE_TAG }}-pg${{ matrix.pg_version }}-${{ matrix.arch }}
         echo "Pushing image ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:$TAG"
         docker push ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:$TAG
-    
   create-manifest:
     name: Create, Push, Sign & Verify Manifest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
