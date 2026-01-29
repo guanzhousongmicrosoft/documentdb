@@ -30,6 +30,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_NAME: documentdb-local
   IMAGE_TAG: ${{ github.run_id }}-$(date +'%Y-%m-%d')
@@ -69,7 +73,7 @@ jobs:
           ~/.cargo/registry/index/
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
-        key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('pg_documentdb_gw/Cargo.lock', 'rust-toolchain.toml') }}
         restore-keys: |
           ${{ runner.os }}-cargo-${{ matrix.arch }}-
           ${{ runner.os }}-cargo-
