@@ -44,6 +44,7 @@ jobs:
     strategy:
       matrix:
         arch: [amd64, arm64]
+        pg_version: [15, 16, 17]
         include:
           - arch: amd64
             base_arch: AMD64
@@ -51,10 +52,6 @@ jobs:
           - arch: arm64
             base_arch: ARM64
             runner: ubuntu-22.04-arm
-        pg_version:
-          - 15
-          - 16
-          - 17
     runs-on: ${{ matrix.runner }}
     outputs:
       documentdb_version: ${{ steps.extract_version.outputs.documentdb_version }}
@@ -65,18 +62,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Cache Rust dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-        key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('pg_documentdb_gw/Cargo.lock', 'rust-toolchain.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-${{ matrix.arch }}-
-          ${{ runner.os }}-cargo-
     - name: Extract and Format Default Version
       id: extract_version
       run: |
@@ -92,7 +77,11 @@ jobs:
     - name: Find DEB package
       id: find_deb
       run: |
-        DEB_FILE=$(ls downloaded-artifacts | grep -v 'dbgsym')
+        DEB_FILE=$(ls downloaded-artifacts | grep -v 'dbgsym' | head -n 1)
+        if [ -z "$DEB_FILE" ]; then
+          echo "Error: No DEB file found"
+          exit 1
+        fi
         echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
     
     - name: Login to GHCR

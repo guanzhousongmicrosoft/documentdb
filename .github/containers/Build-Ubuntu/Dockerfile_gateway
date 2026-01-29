@@ -16,16 +16,16 @@ RUN [ -n "${DEB_PACKAGE_REL_PATH}" ] || (echo "ERROR: DEB_PACKAGE_REL_PATH build
 
 # Base tools + locale (single layer)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update; \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         wget \
         gnupg2 \
         lsb-release \
         ca-certificates \
         locales \
-        sudo; \
-    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen; \
+        sudo && \
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
     locale-gen
 
 # Minimal locale env (others inherit)
@@ -33,12 +33,12 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # Add PostgreSQL upstream repo (modern keyring usage) + install extensions
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    install -d -m 0755 /etc/apt/keyrings; \
-    wget -qO /etc/apt/keyrings/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    install -d -m 0755 /etc/apt/keyrings && \
+    wget -qO /etc/apt/keyrings/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
     echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main ${POSTGRES_VERSION}" \
-        > /etc/apt/sources.list.d/pgdg.list; \
-    apt-get update; \
+        > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         postgresql-${POSTGRES_VERSION} \
         postgresql-${POSTGRES_VERSION}-cron \
@@ -59,14 +59,14 @@ ARG BASE_IMAGE
 
 # Install dependencies (conditionally add software-properties-common unless base is debian:trixie-slim)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update; \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
     PKGS="jq curl sudo git make build-essential openssl pkg-config libssl-dev"; \
     if [ "${BASE_IMAGE}" != "debian:trixie-slim" ]; then \
         PKGS="$PKGS software-properties-common"; \
     else \
         echo "Skipping software-properties-common for base ${BASE_IMAGE}"; \
-    fi; \
+    fi && \
     apt-get install -y --no-install-recommends $PKGS
 
 USER documentdb
@@ -100,14 +100,14 @@ ARG POSTGRES_VERSION
 
 RUN sudo groupmod -g 103 postgres && sudo usermod -u 105 -g 103 postgres
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     sudo apt-get update && \
     sudo apt-get install -y --no-install-recommends \
     jq openssl lsof wget gnupg netcat-openbsd && \
     sudo apt-get upgrade -y
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     wget -qO- https://www.mongodb.org/static/pgp/server-8.0.asc | sudo tee /etc/apt/trusted.gpg.d/server-8.0.asc && \
     echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list && \
     sudo apt-get update && \
