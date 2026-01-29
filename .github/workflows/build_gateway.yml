@@ -171,6 +171,9 @@ jobs:
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
+    - name: Wait for GHCR to settle
+      run: sleep 60
+
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
