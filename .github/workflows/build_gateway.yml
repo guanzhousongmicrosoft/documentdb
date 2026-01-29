@@ -165,8 +165,8 @@ jobs:
 
   refresh-latest:
     name: Refresh 'latest' tag timestamp
-    needs: [build-and-push, create-manifest-latest]
-    # Always run after build-and-push succeeds, regardless of whether create-manifest-latest ran
+    needs: [build-and-push, create-manifest, create-manifest-latest]
+    # Always run after build-and-push succeeds, regardless of whether other jobs ran
     if: always() && needs.build-and-push.result == 'success'
     runs-on: ubuntu-22.04
     continue-on-error: true
