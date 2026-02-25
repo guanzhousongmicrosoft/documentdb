@@ -84,7 +84,7 @@ typedef struct UpdateAggregationSpec
 		 *
 		 * replaceWith is rewritten to replaceRoot.
 		 */
-		struct BsonReplaceRootRedactState *replaceRootState;
+		BsonReplaceRootRedactState *replaceRootState;
 	};
 
 	/* Whether or not the state is for a replaceRoot or replaceWith */

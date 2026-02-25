@@ -5296,6 +5296,44 @@ AddSimpleGroupAccumulator(Query *query, const bson_value_t *accumulatorValue,
 
 
 inline static List *
+AddSimpleGroupAccumulatorWithExpr(Query *query, const bson_value_t *accumulatorValue,
+								  List *repathArgs, Const *accumulatorText,
+								  ParseState *parseState, char *identifiers,
+								  Expr *documentExpr, Oid aggregateFunctionOid,
+								  Expr *variableSpec, const char *collationString)
+{
+	Expr *exprConst = (Expr *) MakeBsonConst(BsonValueToDocumentPgbson(accumulatorValue));
+
+	documentExpr = GetDocumentExprForGroupAccumulatorValue(accumulatorValue,
+														   documentExpr);
+
+	Const *collationConst = IsCollationApplicable(collationString) ?
+							MakeTextConst(collationString,
+										  strlen(collationString)) :
+							makeNullConst(TEXTOID, -1, InvalidOid);
+
+	List *aggregateArgs = list_make4(documentExpr, exprConst, variableSpec,
+									 collationConst);
+	List *argTypesList = list_make4_oid(BsonTypeId(), BsonTypeId(), BsonTypeId(),
+										TEXTOID);
+
+	Aggref *aggref = CreateMultiArgAggregate(aggregateFunctionOid,
+											 aggregateArgs,
+											 argTypesList,
+											 parseState);
+
+	repathArgs = lappend(repathArgs, AddGroupExpression((Expr *) accumulatorText,
+														parseState, identifiers,
+														query, TEXTOID, NULL));
+	repathArgs = lappend(repathArgs, AddGroupExpression((Expr *) aggref,
+														parseState, identifiers,
+														query, BsonTypeId(),
+														NULL));
+	return repathArgs;
+}
+
+
+inline static List *
 AddSumGroupAccumulator(Query *query, const bson_value_t *accumulatorValue,
 					   List *repathArgs, Const *accumulatorText,
 					   ParseState *parseState, char *identifiers,
@@ -6003,24 +6041,56 @@ HandleGroup(const bson_value_t *existingValue, Query *query,
 		else if (StringViewEqualsCString(&accumulatorName, "$max"))
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_MAX);
-			repathArgs = AddSimpleGroupAccumulator(query, &accumulatorElement.bsonValue,
-												   repathArgs,
-												   accumulatorText, parseState,
-												   identifiers,
-												   origEntry->expr,
-												   BsonMaxAggregateFunctionOid(),
-												   context->variableSpec);
+
+			if (CanUseWithExprAggregates())
+			{
+				repathArgs = AddSimpleGroupAccumulatorWithExpr(
+					query, &accumulatorElement.bsonValue,
+					repathArgs,
+					accumulatorText, parseState,
+					identifiers, origEntry->expr,
+					BsonMaxWithExprAggregateFunctionOid(),
+					context->variableSpec,
+					context->collationString);
+			}
+			else
+			{
+				repathArgs = AddSimpleGroupAccumulator(query,
+													   &accumulatorElement.bsonValue,
+													   repathArgs,
+													   accumulatorText, parseState,
+													   identifiers,
+													   origEntry->expr,
+													   BsonMaxAggregateFunctionOid(),
+													   context->variableSpec);
+			}
 		}
 		else if (StringViewEqualsCString(&accumulatorName, "$min"))
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_MIN);
-			repathArgs = AddSimpleGroupAccumulator(query, &accumulatorElement.bsonValue,
-												   repathArgs,
-												   accumulatorText, parseState,
-												   identifiers,
-												   origEntry->expr,
-												   BsonMinAggregateFunctionOid(),
-												   context->variableSpec);
+
+			if (CanUseWithExprAggregates())
+			{
+				repathArgs = AddSimpleGroupAccumulatorWithExpr(
+					query, &accumulatorElement.bsonValue,
+					repathArgs,
+					accumulatorText, parseState,
+					identifiers, origEntry->expr,
+					BsonMinWithExprAggregateFunctionOid(),
+					context->variableSpec,
+					context->collationString);
+			}
+			else
+			{
+				repathArgs = AddSimpleGroupAccumulator(query,
+													   &accumulatorElement.bsonValue,
+													   repathArgs,
+													   accumulatorText, parseState,
+													   identifiers,
+													   origEntry->expr,
+													   BsonMinAggregateFunctionOid(),
+													   context->variableSpec);
+			}
 		}
 		else if (StringViewEqualsCString(&accumulatorName, "$count"))
 		{

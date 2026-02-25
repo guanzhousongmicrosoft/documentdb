@@ -885,6 +885,12 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the BSONMIN aggregate function */
 	Oid ApiCatalogBsonMinAggregateFunctionOid;
 
+	/* OID of the BSONMAXWITHEXPR aggregate function */
+	Oid ApiInternalBsonMaxWithExprAggregateFunctionOid;
+
+	/* OID of the BSONMINWITHEXPR aggregate function */
+	Oid ApiInternalBsonMinWithExprAggregateFunctionOid;
+
 	/* OID of the BSONFIRSTONSORTED aggregate function */
 	Oid ApiCatalogBsonFirstOnSortedAggregateFunctionOid;
 
@@ -4211,10 +4217,28 @@ BsonMaxAggregateFunctionOid(void)
 
 
 Oid
+BsonMaxWithExprAggregateFunctionOid(void)
+{
+	return GetAggregateFunctionByName(
+		&Cache.ApiInternalBsonMaxWithExprAggregateFunctionOid,
+		DocumentDBApiInternalSchemaName, "bsonmaxwithexpr");
+}
+
+
+Oid
 BsonMinAggregateFunctionOid(void)
 {
 	return GetAggregateFunctionByName(&Cache.ApiCatalogBsonMinAggregateFunctionOid,
 									  ApiCatalogSchemaName, "bsonmin");
+}
+
+
+Oid
+BsonMinWithExprAggregateFunctionOid(void)
+{
+	return GetAggregateFunctionByName(
+		&Cache.ApiInternalBsonMinWithExprAggregateFunctionOid,
+		DocumentDBApiInternalSchemaName, "bsonminwithexpr");
 }
 
 

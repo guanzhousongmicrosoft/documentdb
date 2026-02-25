@@ -68,16 +68,6 @@ typedef struct
 	FeatureType featureCounterId;
 } DocumentDbOperatorExpression;
 
-
-/*
- * Cached state for bson_expression_get
- */
-typedef struct BsonExpressionGetState
-{
-	AggregationExpressionData *expressionData;
-	ExpressionVariableContext *variableContext;
-} BsonExpressionGetState;
-
 typedef struct BsonExpressionPartitionByFieldsGetState
 {
 	BsonProjectionQueryState *projectionTreeState;
@@ -159,9 +149,6 @@ static int CompareOperatorExpressionByName(const void *a, const void *b);
 static uint32 VariableHashEntryHashFunc(const void *obj, size_t objsize);
 static int VariableHashEntryCompareFunc(const void *obj1, const void *obj2, Size objsize);
 
-static void ParseBsonExpressionGetState(BsonExpressionGetState *getState,
-										const bson_value_t *expressionValue,
-										pgbson *variableSpec);
 static void CreateProjectionTreeStateForPartitionByFields(
 	BsonExpressionPartitionByFieldsGetState *state, pgbson *partitionBy);
 
@@ -606,25 +593,25 @@ bson_expression_get(PG_FUNCTION_ARGS)
 
 	pgbsonelement expressionElement;
 
-	BsonExpressionGetState expressionData;
-	memset(&expressionData, 0, sizeof(BsonExpressionGetState));
+	BsonExpressionState expressionData;
+	memset(&expressionData, 0, sizeof(BsonExpressionState));
 
 	PgbsonToSinglePgbsonElement(expression, &expressionElement);
 
-	const BsonExpressionGetState *state;
+	const BsonExpressionState *state;
 	SetCachedFunctionStateMultiArgs(
 		state,
-		BsonExpressionGetState,
+		BsonExpressionState,
 		argPositions,
 		numArgs,
-		ParseBsonExpressionGetState,
+		ParseBsonExpressionState,
 		&expressionElement.bsonValue,
 		variableSpec);
 
 	if (state == NULL)
 	{
-		ParseBsonExpressionGetState(&expressionData, &expressionElement.bsonValue,
-									variableSpec);
+		ParseBsonExpressionState(&expressionData, &expressionElement.bsonValue,
+								 variableSpec);
 		state = &expressionData;
 	}
 
@@ -701,25 +688,25 @@ bson_expression_partition_get(PG_FUNCTION_ARGS)
 	pgbsonelement expressionElement;
 	pgbson_writer writer;
 
-	BsonExpressionGetState expressionData;
-	memset(&expressionData, 0, sizeof(BsonExpressionGetState));
+	BsonExpressionState expressionData;
+	memset(&expressionData, 0, sizeof(BsonExpressionState));
 
 	PgbsonToSinglePgbsonElement(expression, &expressionElement);
 
-	const BsonExpressionGetState *state;
+	const BsonExpressionState *state;
 	SetCachedFunctionStateMultiArgs(
 		state,
-		BsonExpressionGetState,
+		BsonExpressionState,
 		argPositions,
 		numArgs,
-		ParseBsonExpressionGetState,
+		ParseBsonExpressionState,
 		&expressionElement.bsonValue,
 		variableSpec);
 
 	if (state == NULL)
 	{
-		ParseBsonExpressionGetState(&expressionData, &expressionElement.bsonValue,
-									variableSpec);
+		ParseBsonExpressionState(&expressionData, &expressionElement.bsonValue,
+								 variableSpec);
 		state = &expressionData;
 	}
 
@@ -935,9 +922,9 @@ bson_expression_map(PG_FUNCTION_ARGS)
 /*
  * Parses the shared state for bson_expression_get
  */
-static void
-ParseBsonExpressionGetState(BsonExpressionGetState *getState,
-							const bson_value_t *expressionValue, pgbson *variableSpec)
+void
+ParseBsonExpressionState(BsonExpressionState *getState,
+						 const bson_value_t *expressionValue, pgbson *variableSpec)
 {
 	getState->expressionData = (AggregationExpressionData *) palloc0(
 		sizeof(AggregationExpressionData));

@@ -1,4 +1,9 @@
 #include "rbac/extension_schema_setup--0.110-0.sql"
+#include "types/bsonaggvalue--0.110-0.sql"
+
+-- New optimized group aggregate implementations
+#include "udfs/aggregation/group_aggregates_support--0.110-0.sql"
+#include "udfs/aggregation/group_aggregates--0.110-0.sql"
 
 #include "udfs/commands_crud/delete--0.110-0.sql"
 #include "udfs/commands_crud/find_and_modify--0.110-0.sql"

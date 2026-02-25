@@ -178,6 +178,10 @@ bool EnableNewCountAggregates = DEFAULT_ENABLE_NEW_COUNT_AGGREGATES;
 #define DEFAULT_ENABLE_EXTENDED_EXPLAIN_ON_ANALYZEOFF true
 bool EnableExtendedExplainOnAnalyzeOff = DEFAULT_ENABLE_EXTENDED_EXPLAIN_ON_ANALYZEOFF;
 
+/* Remove after v113 */
+#define DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS false
+bool EnableNewMinMaxAccumulators = DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS;
+
 
 /*
  * SECTION: Aggregation & Query feature flags
@@ -862,5 +866,13 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to always create TTL indexes as composite indexes by default."),
 		NULL, &CreateTTLIndexAsCompositeByDefault,
 		DEFAULT_CREATE_TTL_INDEX_AS_COMPOSITE,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableNewMinMaxAccumulators", newGucPrefix),
+		gettext_noop(
+			"Whether to enable new min and max aggregate optimizations."),
+		NULL, &EnableNewMinMaxAccumulators,
+		DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 }
