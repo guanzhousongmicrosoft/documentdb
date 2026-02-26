@@ -252,10 +252,10 @@ InvalidateCollectionByRelationId(Oid relationId)
 						HASH_REMOVE, &foundInCache);
 
 		/*
-		 * We currently always create entries together and only
-		 * call this function with a valid cache.
+		 * The name-hash entry may not exist if the collection was
+		 * only loaded via GetMongoCollectionByColId (which only
+		 * populates RelationIdToCollectionHash, not NameToCollectionHash).
 		 */
-		Assert(foundInCache);
 
 		if (foundInCache)
 		{

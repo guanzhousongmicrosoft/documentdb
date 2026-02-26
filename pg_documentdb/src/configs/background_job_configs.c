@@ -90,6 +90,7 @@ bool ForceIndexScanForTTLTask = DEFAULT_FORCE_INDEX_SCAN_TTL_TASK;
 #define DEFAULT_USE_INDEX_HINTS_TTL_TASK true
 bool UseIndexHintsForTTLTask = DEFAULT_USE_INDEX_HINTS_TTL_TASK;
 
+
 void
 InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPrefix)
 {
