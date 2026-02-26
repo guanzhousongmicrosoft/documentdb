@@ -6,22 +6,14 @@
  *-------------------------------------------------------------------------
  */
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
-};
+use std::{collections::HashMap, path::Path, sync::Arc, time::SystemTime};
 
 use arc_swap::ArcSwap;
 use bson::{rawbson, RawBson};
-use notify::{event::ModifyKind, Error, Event, EventKind, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::{
-    runtime::Handle,
-    time::{sleep, Duration, Instant},
+    task::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -43,17 +35,17 @@ pub struct HostConfig {
 /// Inner struct that holds the dependencies needed for loading configurations.
 #[derive(Debug, Clone)]
 struct PgConfigurationInner {
-    dynamic_config_file: String,
+    dynamic_config_path: String,
     settings_prefixes: Vec<String>,
     pool_manager: Arc<PoolManager>,
 }
 
 impl PgConfigurationInner {
     /// Loads configurations from the database and config file using the provided connection.
-    pub async fn load_configurations(&self) -> Result<HashMap<String, String>> {
+    async fn load_configurations(&self) -> Result<HashMap<String, String>> {
         let mut configs = HashMap::new();
 
-        match Self::load_host_config(&self.dynamic_config_file).await {
+        match Self::load_host_config(&self.dynamic_config_path).await {
             Ok(host_config) => {
                 configs.insert(
                     "IsPrimary".to_string(),
@@ -120,9 +112,9 @@ impl PgConfigurationInner {
         Ok(configs)
     }
 
-    async fn load_host_config(dynamic_config_file: &str) -> Result<HostConfig> {
+    async fn load_host_config(dynamic_config_path: &str) -> Result<HostConfig> {
         let config: HostConfig = serde_json::from_str(
-            &tokio::fs::read_to_string(dynamic_config_file).await?,
+            &tokio::fs::read_to_string(dynamic_config_path).await?,
         )
         .map_err(|e| DocumentDBError::internal_error(format!("Failed to read config file: {e}")))?;
         Ok(config)
@@ -135,15 +127,22 @@ pub struct PgConfiguration {
     values: ArcSwap<HashMap<String, String>>,
     last_update_at: ArcSwap<Instant>,
     topology_bson: ArcSwap<RawBson>,
+    refresh_task: Option<JoinHandle<()>>,
+    watch_task: Option<JoinHandle<()>>,
 }
 
-static DEBOUNCE_RELOAD_SCHEDULED: AtomicBool = AtomicBool::new(false);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WatchedFileState {
+    exists: bool,
+    modified_at: Option<SystemTime>,
+    len: Option<u64>,
+}
 
 impl PgConfiguration {
     fn start_dynamic_configuration_refresh_thread(
         configuration: Arc<PgConfiguration>,
         refresh_interval: u32,
-    ) {
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval as u64));
             interval.tick().await;
@@ -151,14 +150,29 @@ impl PgConfiguration {
             loop {
                 interval.tick().await;
 
-                Self::reload_configuration(Arc::clone(&configuration)).await;
+                Self::reload_configuration(&configuration).await;
             }
-        });
+        })
     }
 
-    async fn reload_configuration(configuration: Arc<PgConfiguration>) {
+    async fn reload_configuration(configuration: &PgConfiguration) {
         if let Err(e) = configuration.refresh_configuration().await {
             tracing::error!("Config reload failed! {e}");
+        }
+    }
+
+    async fn get_file_state(path: &Path) -> WatchedFileState {
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) => WatchedFileState {
+                exists: true,
+                modified_at: metadata.modified().ok(),
+                len: Some(metadata.len()),
+            },
+            Err(_) => WatchedFileState {
+                exists: false,
+                modified_at: None,
+                len: None,
+            },
         }
     }
 
@@ -168,7 +182,7 @@ impl PgConfiguration {
         settings_prefixes: Vec<String>,
     ) -> Result<Arc<Self>> {
         let inner = PgConfigurationInner {
-            dynamic_config_file: setup_configuration.dynamic_configuration_file(),
+            dynamic_config_path: setup_configuration.dynamic_configuration_file(),
             settings_prefixes,
             pool_manager,
         };
@@ -177,15 +191,28 @@ impl PgConfiguration {
         let last_update_at = ArcSwap::from_pointee(Instant::now());
         let topology_bson = ArcSwap::from_pointee(Self::load_topology(&inner.pool_manager).await);
 
-        let configuration = Arc::new(PgConfiguration {
+        let mut configuration = Arc::new(PgConfiguration {
             inner,
             values,
             last_update_at,
             topology_bson,
+            refresh_task: None,
+            watch_task: None,
         });
 
         let refresh_interval = setup_configuration.dynamic_configuration_refresh_interval_secs();
-        Self::start_dynamic_configuration_refresh_thread(configuration.clone(), refresh_interval);
+        let watch_interval_ms = setup_configuration.host_configuration_watch_interval_ms();
+
+        let refresh_task = Self::start_dynamic_configuration_refresh_thread(
+            Arc::clone(&configuration),
+            refresh_interval,
+        );
+        let watch_task = Self::start_config_watcher(Arc::clone(&configuration), watch_interval_ms);
+
+        if let Some(config) = Arc::get_mut(&mut configuration) {
+            config.refresh_task = Some(refresh_task);
+            config.watch_task = Some(watch_task);
+        }
 
         Ok(configuration)
     }
@@ -212,82 +239,38 @@ impl PgConfiguration {
         Ok(())
     }
 
-    pub fn start_config_watcher(
-        dynamic_config_file: String,
+    fn start_config_watcher(
         configuration: Arc<PgConfiguration>,
-        handle: Handle,
-    ) -> notify::Result<notify::RecommendedWatcher> {
-        let (tx, rx) = mpsc::channel::<std::result::Result<Event, Error>>();
+        watch_interval_ms: u64,
+    ) -> JoinHandle<()> {
+        let dynamic_config_path = configuration.inner.dynamic_config_path.clone();
+        let file_path = Path::new(&dynamic_config_path).to_path_buf();
+        let poll_interval = Duration::from_millis(watch_interval_ms);
 
-        let dynamic_config_file_path = Path::new(&dynamic_config_file);
+        tracing::info!(
+            "Config file polling watcher enabled on: {} ({}ms)",
+            dynamic_config_path,
+            poll_interval.as_millis()
+        );
 
-        let mut watcher = notify::recommended_watcher(move |res| {
-            let _ = tx.send(res);
-        })?;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(poll_interval);
+            let mut previous_state = Self::get_file_state(&file_path).await;
 
-        watcher.watch(dynamic_config_file_path, RecursiveMode::NonRecursive)?;
+            loop {
+                interval.tick().await;
+                let current_state = Self::get_file_state(&file_path).await;
 
-        tracing::info!("Config monitoring on: {}", dynamic_config_file);
-
-        std::thread::spawn(move || {
-            for res in rx {
-                match res {
-                    Ok(event) => {
-                        if Self::is_relevant_event(&event) {
-                            Self::on_fs_watcher_notify(
-                                &event,
-                                configuration.clone(),
-                                handle.clone(),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Config monitoring failed! {:?}", e);
-                    }
+                if current_state != previous_state {
+                    tracing::info!(
+                        "Config file state changed for {}. Reloading dynamic configuration.",
+                        file_path.display()
+                    );
+                    Self::reload_configuration(&configuration).await;
+                    previous_state = current_state;
                 }
             }
-        });
-
-        Ok(watcher)
-    }
-
-    fn is_relevant_event(event: &Event) -> bool {
-        matches!(
-            event.kind,
-            // Created (CreationTime, FileName)
-            EventKind::Create(_)
-            // Deleted (FileName)
-            | EventKind::Remove(_)
-            // LastWrite / Size
-            | EventKind::Modify(ModifyKind::Data(_))
-            // Attributes
-            | EventKind::Modify(ModifyKind::Metadata(_))
-        )
-    }
-
-    fn on_fs_watcher_notify(event: &Event, configuration: Arc<PgConfiguration>, handle: Handle) {
-        // Debounce multiple events in quick succession
-        if DEBOUNCE_RELOAD_SCHEDULED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        tracing::info!("Config file changed ({:?})! Reloading.", event.kind);
-
-        handle.spawn(async move {
-            struct ResetFlagGuard;
-
-            impl Drop for ResetFlagGuard {
-                fn drop(&mut self) {
-                    DEBOUNCE_RELOAD_SCHEDULED.store(false, Ordering::SeqCst);
-                }
-            }
-
-            let _guard = ResetFlagGuard;
-
-            // debounce window
-            sleep(Duration::from_millis(300)).await;
-            Self::reload_configuration(configuration).await;
-        });
+        })
     }
 
     async fn load_topology(pool_manager: &PoolManager) -> RawBson {
@@ -399,5 +382,17 @@ impl DynamicConfiguration for PgConfiguration {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl Drop for PgConfiguration {
+    fn drop(&mut self) {
+        if let Some(refresh_task) = &self.refresh_task {
+            refresh_task.abort();
+        }
+
+        if let Some(watch_task) = &self.watch_task {
+            watch_task.abort();
+        }
     }
 }

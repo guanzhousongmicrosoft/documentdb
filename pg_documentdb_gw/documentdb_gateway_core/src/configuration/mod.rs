@@ -32,6 +32,9 @@ pub trait SetupConfiguration: DynClone + Send + Sync + Debug {
     /// Returns the refresh interval (in seconds) for reloading the dynamic configuration.
     fn dynamic_configuration_refresh_interval_secs(&self) -> u32;
 
+    /// Returns the polling interval (in milliseconds) for watching host config file changes.
+    fn host_configuration_watch_interval_ms(&self) -> u64;
+
     /// Returns the name of the backend PostgreSQL database.
     fn postgres_database(&self) -> &str;
 

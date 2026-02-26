@@ -18,7 +18,6 @@ documentdb_macros.workspace = true
 dyn-clone.workspace = true
 either.workspace = true
 hex.workspace = true
-notify.workspace = true
 once_cell.workspace = true
 openssl.workspace = true
 rand.workspace = true
