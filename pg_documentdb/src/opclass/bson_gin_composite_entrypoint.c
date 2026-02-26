@@ -2138,6 +2138,8 @@ gin_bson_composite_index_term_transform(PG_FUNCTION_ARGS)
 	 * nothing more there needs to be scanned.
 	 */
 	bytea *indexTermDatums[INDEX_MAX_KEYS] = { 0 };
+	bytea *serializedIndexterms[INDEX_MAX_KEYS] = { 0 };
+	InitializeSerializedCompositeIndexTerm(compareKeyValue, serializedIndexterms);
 	for (int i = 0; i < runData->metaInfo->numIndexPaths; i++)
 	{
 		singlePathMetadata.isDescending = IsIndexTermValueDescending(&compareTerm[i]);
@@ -2169,9 +2171,11 @@ gin_bson_composite_index_term_transform(PG_FUNCTION_ARGS)
 		}
 		else
 		{
-			/* Use the current prefix */
-			serialized = SerializeBsonIndexTerm(&compareTerm[i].element,
-												&singlePathMetadata).indexTermVal;
+			/* Use the current prefix, we need to use the original index term for it to have the metadata set instead of reconstructing from the value.
+			 * i.e we have different $undefined: true terms but the metadata gives us distinction between them.
+			 * Also, we do the PointerGetDatum and DatumGetByteaP to make sure that if it is a 1 byte header value it gets copied into a 4 byte header value.
+			 * This is ok, given that this function is called on a memory context that lives for the duration of the call. */
+			serialized = DatumGetByteaP(PointerGetDatum(serializedIndexterms[i]));
 		}
 
 		indexTermDatums[i] = serialized;
