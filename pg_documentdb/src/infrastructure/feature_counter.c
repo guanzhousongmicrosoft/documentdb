@@ -475,11 +475,6 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_UPDATE_OPERATOR_SET_ON_INSERT] = "update_operator_set_on_insert",
 	[FEATURE_UPDATE_OPERATOR_UNSET] = "update_operator_unset",
 
-	/* Feature usage stats */
-	[FEATURE_USAGE_TTL_PURGER_CALLS] = "ttl_purger_calls",
-	[FEATURE_USAGE_TTL_SATURATED_BATCHES] = "ttl_saturated_batches",
-	[FEATURE_USAGE_TTL_SLOW_BATCHES] = "ttl_slow_batches",
-
 	/* Feature mapping region - User CRUD*/
 	[FEATURE_USER_CREATE] = "user_create",
 	[FEATURE_USER_DROP] = "user_drop",

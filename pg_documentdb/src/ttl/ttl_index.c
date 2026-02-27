@@ -41,10 +41,8 @@ extern bool EnableTtlJobsOnReadOnly;
 extern bool UseIndexHintsForTTLTask;
 extern bool EnableTTLDescSort;
 extern bool EnableIndexOrderbyPushdown;
-extern double TTLDeleteSaturationThreshold;
-extern int TTLSlowBatchDeleteThresholdInMS;
-extern bool EnableSelectiveTTLLogging;
 extern bool EnableTTLBatchObservability;
+
 extern bool TTLSkipCaughtUpIndexes;
 
 bool UseV2TTLIndexPurger = true;
@@ -822,9 +820,6 @@ DeleteExpiredRowsForIndexCore(char *tableName, TtlIndexEntry *indexEntry, int64
 	double saturationRatio = 0.0;
 	double batchDeleteElapsedTime = 0.0;
 
-	/* selectiveLogging determines if also emit a log entry in addition to feature counters */
-	bool logFeatureCounterEvent = false;
-
 	if (IsTaskTimeBudgetExceeded(startTime, &batchDeleteElapsedTime, budget))
 	{
 		*isTaskTimeBudgetExceeded = true;
@@ -847,28 +842,6 @@ DeleteExpiredRowsForIndexCore(char *tableName, TtlIndexEntry *indexEntry, int64
 		 */
 		saturationRatio = (ttlDeleteBatchSize > 0) ?
 						  (double) rowsCount / ttlDeleteBatchSize : 0;
-
-
-		/*
-		 *  We emit a `ttl_saturated_batches` feature counter if the saturation ratio is
-		 *  > 0.9 (default threshold).
-		 */
-		if (saturationRatio >= TTLDeleteSaturationThreshold)
-		{
-			ReportFeatureUsage(FEATURE_USAGE_TTL_SATURATED_BATCHES);
-			logFeatureCounterEvent = EnableSelectiveTTLLogging;
-		}
-
-		/*
-		 *  We emit a `ttl_slow_batches` feature counter if the a TTL delete query on a shard
-		 *  has timed out or taken more than 10 seconds (default threshold).
-		 */
-		if (*isTaskTimeBudgetExceeded ||
-			batchDeleteElapsedTime >= TTLSlowBatchDeleteThresholdInMS)
-		{
-			ReportFeatureUsage(FEATURE_USAGE_TTL_SLOW_BATCHES);
-			logFeatureCounterEvent = EnableSelectiveTTLLogging;
-		}
 	}
 
 	/* Compute shardId for metrics and logging */
@@ -886,30 +859,24 @@ DeleteExpiredRowsForIndexCore(char *tableName, TtlIndexEntry *indexEntry, int64
 		}
 	}
 
-	if (*isTaskTimeBudgetExceeded || logFeatureCounterEvent || LogTTLProgressActivity)
+	if (*isTaskTimeBudgetExceeded || LogTTLProgressActivity)
 	{
 		elog_unredacted(
 			"Number of rows deleted: %ld, collectionId = %lu, shardId=%lu, index_id=%lu, "
 			"batch_size=%d, expiry_cutoff=%ld, "
-			"LogTTLProgressActivity=%d,TTLSlowBatchDeleteThresholdInMS=%d, TTLDeleteSaturationThreshold=%.2f, "
-			"has_pfe=%d, isTaskTimeBudgetExceeded=%d, logFeatureCounterEvent=%d, "
+			"LogTTLProgressActivity=%d, "
+			"has_pfe=%d, isTaskTimeBudgetExceeded=%d, "
 			"duration= %.2f, saturation_ratio=%.2f, "
 			"statement_timeout=%d, lock_timeout=%d, used_hints=%d, "
 			"index_is_ordered=%d, use_desc_sort=%d",
 			(int64) rowsCount, indexEntry->collectionId,
 			shardId, indexEntry->indexId, ttlDeleteBatchSize,
 			currentTime - indexExpiryMilliseconds, LogTTLProgressActivity,
-			TTLSlowBatchDeleteThresholdInMS, TTLDeleteSaturationThreshold,
-			indexPfe != NULL, *isTaskTimeBudgetExceeded, logFeatureCounterEvent,
+			indexPfe != NULL, *isTaskTimeBudgetExceeded,
 			batchDeleteElapsedTime, saturationRatio,
 			TTLPurgerStatementTimeout, TTLPurgerLockTimeout,
 			useIndexHintsForTTLQuery,
 			indexEntry->indexIsOrdered, useDescendingSort);
-	}
-
-	if (rowsCount > 0)
-	{
-		ReportFeatureUsage(FEATURE_USAGE_TTL_PURGER_CALLS);
 	}
 
 	/* Record TTL metric via the hook if metrics context is provided */

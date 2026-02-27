@@ -237,10 +237,6 @@ CALL documentdb_api_internal.delete_expired_rows(3);
 CALL documentdb_api_internal.delete_expired_rows(3);
 
 SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
-SET documentdb.TTLSlowBatchDeleteThresholdInMS to 0; /* 0 makes all batches slow*/
-CALL documentdb_api_internal.delete_expired_rows(300);
-SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true); /* 8 shards each for 2 indexes*/
-RESET documentdb.TTLSlowBatchDeleteThresholdInMS;
 
 -- Feature counter for _internalInhibitOptimization
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_usage_inhibit", "pipeline": [ { "$addFields": { "e": {  "f": "$a.b" } } }, { "$_internalInhibitOptimization": 1 }, { "$replaceWith": "$e" } ], "cursor": {} }');

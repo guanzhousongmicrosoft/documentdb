@@ -44,12 +44,6 @@ int SingleTTLTaskTimeBudget = DEFAULT_SINGLE_TTL_TASK_TIME_BUDGET;
 #define DEFAULT_TTL_TASK_MAX_RUNTIME_IN_MS 60000
 int TTLTaskMaxRunTimeInMS = DEFAULT_TTL_TASK_MAX_RUNTIME_IN_MS;
 
-#define DEFAULT_TTL_DELETE_SATURATION_RATIO_THRESHOLD 0.9
-double TTLDeleteSaturationThreshold = DEFAULT_TTL_DELETE_SATURATION_RATIO_THRESHOLD;
-
-#define DEFAULT_SLOW_TTL_BATCH_DELETE_THRESHOLD_IN_MS 10000
-int TTLSlowBatchDeleteThresholdInMS = DEFAULT_SLOW_TTL_BATCH_DELETE_THRESHOLD_IN_MS;
-
 #define DEFAULT_REPEAT_PURGE_INDEXES_FOR_TTL_TASK true
 bool RepeatPurgeIndexesForTTLTask = DEFAULT_REPEAT_PURGE_INDEXES_FOR_TTL_TASK;
 
@@ -77,9 +71,6 @@ int LatchTimeOutSec = DEFAULT_BG_LATCH_TIMEOUT_SEC;
 
 #define DEFAULT_LOG_TTL_PROGRESS_ACTIVITY false
 bool LogTTLProgressActivity = DEFAULT_LOG_TTL_PROGRESS_ACTIVITY;
-
-#define DEFAULT_ENABLE_SELECTIVE_TTL_LOGGING true
-bool EnableSelectiveTTLLogging = DEFAULT_ENABLE_SELECTIVE_TTL_LOGGING;
 
 #define DEFAULT_ENABLE_TTL_BATCH_OBSERVABILITY true
 bool EnableTTLBatchObservability = DEFAULT_ENABLE_TTL_BATCH_OBSERVABILITY;
@@ -113,16 +104,9 @@ InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPref
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
-		psprintf("%s.enableSelectiveTTLLogging", prefix),
-		gettext_noop(
-			"Whether to log highly saturated or slow ttl batches. It's turned off by default to reduce noise."),
-		NULL, &EnableSelectiveTTLLogging, DEFAULT_ENABLE_SELECTIVE_TTL_LOGGING,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
 		psprintf("%s.enableTTLBatchObservability", prefix),
 		gettext_noop(
-			"Whether to calculate and emit feature counters ttl_saturated_batches and ttl_slow_batches."),
+			"Whether to calculate and emit TTL batch observability metrics."),
 		NULL, &EnableTTLBatchObservability, DEFAULT_ENABLE_TTL_BATCH_OBSERVABILITY,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
@@ -181,28 +165,6 @@ InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPref
 		NULL,
 		&TTLSkipCaughtUpIndexes,
 		DEFAULT_SKIP_CAUGHT_UP_TTL_INDEXES,
-		PGC_USERSET,
-		0,
-		NULL, NULL, NULL);
-
-	DefineCustomRealVariable(
-		psprintf("%s.TTLDeleteSaturationThreshold", prefix),
-		gettext_noop(
-			"Logging threshold for ttl delete saturation ratio defined as total rows deleted in an invocation divided by the batch size."),
-		NULL,
-		&TTLDeleteSaturationThreshold,
-		DEFAULT_TTL_DELETE_SATURATION_RATIO_THRESHOLD, 0.0, 1.0,
-		PGC_USERSET,
-		0,
-		NULL, NULL, NULL);
-
-	DefineCustomIntVariable(
-		psprintf("%s.TTLSlowBatchDeleteThresholdInMS", prefix),
-		gettext_noop(
-			"Threshold for considering a single batch of ttl deletes to be slow."),
-		NULL,
-		&TTLSlowBatchDeleteThresholdInMS,
-		DEFAULT_SLOW_TTL_BATCH_DELETE_THRESHOLD_IN_MS, 0, INT_MAX,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
