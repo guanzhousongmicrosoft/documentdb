@@ -1,3 +1,5 @@
+### documentdb v0.111-0 (Unreleased) ###
+
 ### documentdb v0.110-0 (Unreleased) ###
 * Add support for keyword `description` in `$jsonSchema` *[Feature]*
 * Integrate cargo tools to identify dependencies for pg_documentdb_gw *[Feature]* (#263)
