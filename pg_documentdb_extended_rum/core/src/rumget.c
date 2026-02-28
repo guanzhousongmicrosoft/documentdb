@@ -841,10 +841,6 @@ restartScanEntry:
 			entry->isFinished = false;
 		}
 	}
-	else if (entry->curKeyCategory == RUM_CAT_ORDER_ITEM)
-	{
-		ereport(ERROR, (errmsg("Unsupported call startScanEntry on order item key")));
-	}
 	else if (btreeEntry.findItem(&btreeEntry, stackEntry) ||
 			 (entry->queryCategory == RUM_CAT_EMPTY_QUERY &&
 			  entry->scanWithAddInfo))

@@ -65,10 +65,6 @@ PGDLLEXPORT bool RumPreferOrderedIndexScan = RUM_DEFAULT_PREFER_ORDERED_INDEX_SC
 PGDLLEXPORT bool RumEnableSkipIntermediateEntry =
 	RUM_DEFAULT_ENABLE_SKIP_INTERMEDIATE_ENTRY;
 
-/* ruminsert.c */
-#define RUM_DEFAULT_ENABLE_PARALLEL_INDEX_BUILD true
-PGDLLEXPORT bool RumEnableParallelIndexBuild = RUM_DEFAULT_ENABLE_PARALLEL_INDEX_BUILD;
-
 #define RUM_DEFAULT_PARALLEL_INDEX_WORKERS_OVERRIDE -1
 PGDLLEXPORT int RumParallelIndexWorkersOverride =
 	RUM_DEFAULT_PARALLEL_INDEX_WORKERS_OVERRIDE;
@@ -172,15 +168,6 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 		NULL,
 		&RumDisableFastScan,
 		RUM_DEFAULT_DISABLE_FAST_SCAN,
-		PGC_USERSET, 0,
-		NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enable_parallel_index_build", documentDBRumGucPrefix),
-		"Sets whether or not to enable parallel index build",
-		NULL,
-		&RumEnableParallelIndexBuild,
-		RUM_DEFAULT_ENABLE_PARALLEL_INDEX_BUILD,
 		PGC_USERSET, 0,
 		NULL, NULL, NULL);
 
