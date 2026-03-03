@@ -42,6 +42,8 @@ extern bool UseIndexHintsForTTLTask;
 extern bool EnableTTLDescSort;
 extern bool EnableIndexOrderbyPushdown;
 extern bool EnableTTLBatchObservability;
+extern bool SkipRepeatDeleteForUnOrderedIndex;
+extern int MaxTTLBatchSizeUnorderedIndex;
 
 extern bool TTLSkipCaughtUpIndexes;
 
@@ -588,6 +590,13 @@ delete_expired_rows(PG_FUNCTION_ARGS)
 				}
 				continue;
 			}
+
+			/* For non-ordered indexes, skip repeat delete since they use a single large batch */
+			if (SkipRepeatDeleteForUnOrderedIndex && !ttlIndexEntry->indexIsOrdered)
+			{
+				ttlIndexEntries = foreach_delete_current(ttlIndexEntries, ttlEntryCell);
+				continue;
+			}
 		}
 
 		if (rowsDeletedInCurrentLoop == 0 || !RepeatPurgeIndexesForTTLTask)
@@ -674,8 +683,11 @@ DeleteExpiredRowsForIndexCore(char *tableName, TtlIndexEntry *indexEntry, int64
 							  budget, bool *isTaskTimeBudgetExceeded,
 							  void *ttlMetricsContext)
 {
+	int32 defaultBatchSize = (SkipRepeatDeleteForUnOrderedIndex &&
+							  !indexEntry->indexIsOrdered) ?
+							 MaxTTLBatchSizeUnorderedIndex : MaxTTLDeleteBatchSize;
 	int32 ttlDeleteBatchSize = (batchSize != -1) ? batchSize :
-							   MaxTTLDeleteBatchSize;
+							   defaultBatchSize;
 	pgbson *indexKeyDocument = DatumGetPgBson(indexEntry->indexKeyDatum);
 	pgbson *indexPfe = (indexEntry->indexPfeDatum != (Datum) 0) ?
 					   DatumGetPgBson(indexEntry->indexPfeDatum) : NULL;

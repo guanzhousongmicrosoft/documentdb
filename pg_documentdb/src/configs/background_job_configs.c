@@ -50,6 +50,12 @@ bool RepeatPurgeIndexesForTTLTask = DEFAULT_REPEAT_PURGE_INDEXES_FOR_TTL_TASK;
 #define DEFAULT_SKIP_CAUGHT_UP_TTL_INDEXES true
 bool TTLSkipCaughtUpIndexes = DEFAULT_SKIP_CAUGHT_UP_TTL_INDEXES;
 
+#define DEFAULT_SKIP_REPEAT_DELETE_FOR_UNORDERED_INDEX true
+bool SkipRepeatDeleteForUnOrderedIndex = DEFAULT_SKIP_REPEAT_DELETE_FOR_UNORDERED_INDEX;
+
+#define DEFAULT_MAX_TTL_BATCH_SIZE_UNORDERED_INDEX 10000
+int MaxTTLBatchSizeUnorderedIndex = DEFAULT_MAX_TTL_BATCH_SIZE_UNORDERED_INDEX;
+
 
 #define DEFAULT_ENABLE_TTL_DESC_SORT false
 bool EnableTTLDescSort = DEFAULT_ENABLE_TTL_DESC_SORT;
@@ -165,6 +171,28 @@ InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPref
 		NULL,
 		&TTLSkipCaughtUpIndexes,
 		DEFAULT_SKIP_CAUGHT_UP_TTL_INDEXES,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.skipRepeatDeleteForUnOrderedIndex", newGucPrefix),
+		gettext_noop(
+			"Whether to skip repeat delete and use a larger batch size for non-ordered TTL indexes."),
+		NULL,
+		&SkipRepeatDeleteForUnOrderedIndex,
+		DEFAULT_SKIP_REPEAT_DELETE_FOR_UNORDERED_INDEX,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		psprintf("%s.maxTTLBatchSizeUnorderedIndex", newGucPrefix),
+		gettext_noop(
+			"The max batch size for TTL deletes on non-ordered indexes."),
+		NULL,
+		&MaxTTLBatchSizeUnorderedIndex,
+		DEFAULT_MAX_TTL_BATCH_SIZE_UNORDERED_INDEX, 1, INT_MAX,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);

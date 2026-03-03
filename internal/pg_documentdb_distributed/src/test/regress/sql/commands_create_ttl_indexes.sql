@@ -567,3 +567,72 @@ JOIN documentdb_api_catalog.collections c
 ON  c.collection_id = ci.collection_id 
 where (index_spec).index_expire_after_seconds > 0
 AND c.database_name = 'ttl_default_composite';
+
+
+-- 22. Test skipRepeatDeleteForUnOrderedIndex GUC
+-- This tests that for non-ordered TTL indexes, repeat delete is skipped when the GUC is on (default)
+-- and repeat delete is active when the GUC is off.
+
+-- Drop collections from previous tests to avoid flakiness
+SELECT documentdb_api.drop_collection('db', 'ttlCompositeOrderedScan');
+SELECT documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll2'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll3'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll4'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll5'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll6'),
+       documentdb_api.drop_collection('ttl_default_composite', 'ttlcoll7');
+
+-- make sure ttl schedule is disabled
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname LIKE '%ttl_task%';
+
+-- Delete all other indexes from previous tests to reduce flakiness
+WITH deleted AS (
+  DELETE FROM documentdb_api_catalog.collection_indexes
+  WHERE collection_id < 20100
+  RETURNING 1
+) SELECT true FROM deleted UNION ALL SELECT true LIMIT 1;
+
+-- Populate collection with expired documents
+SELECT COUNT(documentdb_api.insert_one('db', 'ttlSkipRepeat', FORMAT('{ "_id": %s, "ttl": { "$date": { "$numberLong": "100" } } }', i)::documentdb_core.bson)) FROM generate_series(1, 200) AS i;
+-- Add some non-expired docs
+SELECT documentdb_api.insert_one('db','ttlSkipRepeat', '{ "_id" : 500, "ttl" : { "$date": { "$numberLong": "2657899731608" } } }', NULL);
+SELECT documentdb_api.insert_one('db','ttlSkipRepeat', '{ "_id" : 501, "ttl" : { "$date": { "$numberLong": "2657899731608" } } }', NULL);
+
+-- Create a non-ordered TTL index (regular single-field, no enableCompositeTerm)
+BEGIN;
+SET LOCAL documentdb.createTTLIndexAsCompositeByDefault TO off;
+SET LOCAL documentdb.defaultUseCompositeOpClass TO off;
+SELECT documentdb_api_internal.create_indexes_non_concurrently('db', '{"createIndexes": "ttlSkipRepeat", "indexes": [{"key": {"ttl": 1}, "name": "ttl_skip_repeat_idx", "expireAfterSeconds": 5}]}', true);
+END;
+
+-- Verify index is_ordered is false
+\d+ documentdb_data.documents_20015;
+
+-- 22a. Test with skipRepeatDeleteForUnOrderedIndex = on (default)
+-- With repeat mode on but skipRepeatDeleteForUnOrderedIndex on, the non-ordered index
+-- should only be processed once (one batch of 10 deleted), not repeatedly.
+SELECT count(*) FROM documentdb_api.collection('db', 'ttlSkipRepeat');
+
+BEGIN;
+SET LOCAL documentdb.TTLTaskMaxRunTimeInMS to 3000;
+SET LOCAL documentdb.RepeatPurgeIndexesForTTLTask to on;
+SET LOCAL documentdb.skipRepeatDeleteForUnOrderedIndex to on;
+CALL documentdb_api_internal.delete_expired_rows(10);
+END;
+
+-- Should have deleted exactly 10 (one batch), because repeat was skipped for unordered index
+SELECT count(*) FROM documentdb_api.collection('db', 'ttlSkipRepeat');
+
+-- 22b. Test with skipRepeatDeleteForUnOrderedIndex = off
+-- With repeat mode on and skipRepeatDeleteForUnOrderedIndex off, repeat delete should be active
+-- and delete significantly more than one batch.
+BEGIN;
+SET LOCAL documentdb.TTLTaskMaxRunTimeInMS to 3000;
+SET LOCAL documentdb.RepeatPurgeIndexesForTTLTask to on;
+SET LOCAL documentdb.skipRepeatDeleteForUnOrderedIndex to off;
+CALL documentdb_api_internal.delete_expired_rows(10);
+END;
+
+-- Should have deleted all remaining expired docs (repeat was active), leaving only the 2 non-expired
+SELECT count(*) <= 172 FROM documentdb_api.collection('db', 'ttlSkipRepeat');
