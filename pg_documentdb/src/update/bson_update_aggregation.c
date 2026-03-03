@@ -170,7 +170,8 @@ static MongoUpdateAggregationOperator AggregationOperators[] =
  */
 struct AggregationPipelineUpdateState *
 GetAggregationPipelineUpdateState(const bson_value_t *updateSpec,
-								  const bson_value_t *variableSpec)
+								  const bson_value_t *variableSpec,
+								  bool *isReplaceStagePresent)
 {
 	if (updateSpec->value_type != BSON_TYPE_ARRAY)
 	{
@@ -181,6 +182,7 @@ GetAggregationPipelineUpdateState(const bson_value_t *updateSpec,
 	bson_iter_t updateIterator;
 	BsonValueInitIterator(updateSpec, &updateIterator);
 	List *aggregationStages = NIL;
+	*isReplaceStagePresent = false;
 	while (bson_iter_next(&updateIterator))
 	{
 		bson_iter_t aggregationIterator;
@@ -230,6 +232,8 @@ GetAggregationPipelineUpdateState(const bson_value_t *updateSpec,
 
 			AggregationOperators[i].populateFunc(&aggregationElement.bsonValue,
 												 &stageData->state);
+			*isReplaceStagePresent = (*isReplaceStagePresent ||
+									  stageData->state.isReplaceStage);
 			aggregationStages = lappend(aggregationStages, stageData);
 
 			break;

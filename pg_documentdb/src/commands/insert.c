@@ -1363,6 +1363,12 @@ InsertOrReplaceDocument(uint64 collectionId, const char *shardTableName, int64
 	{
 		planId = QUERY_ID_INSERT_OR_REPLACE_NEW;
 
+		char *additionalArgs = "";
+		if (IsClusterVersionAtleast(DocDB_V0, 111, 0))
+		{
+			additionalArgs = ", ctid, tableoid";
+		}
+
 		if (shardTableName != NULL && shardTableName[0] != '\0')
 		{
 			/* Direct shard - we need to extract tableId_shardId as a suffix */
@@ -1372,12 +1378,12 @@ InsertOrReplaceDocument(uint64 collectionId, const char *shardTableName, int64
 			appendStringInfo(&query, " ON CONFLICT ON CONSTRAINT collection_pk_%s"
 									 " DO UPDATE SET document ="
 									 " COALESCE(%s.update_bson_document("
-									 " %s.documents_%s.document, %s.bson_from_bytea($4), '{}'::%s.bson, NULL::%s.bson, NULL::%s.bson, NULL::TEXT),"
+									 " %s.documents_%s.document, %s.bson_from_bytea($4), '{}'::%s.bson, NULL::%s.bson, NULL::%s.bson, NULL::TEXT%s),"
 									 " %s.documents_%s.document)",
 							 shardSuffix, ApiInternalSchemaNameV2, ApiDataSchemaName,
 							 shardSuffix, CoreSchemaName, CoreSchemaName, CoreSchemaName,
-							 CoreSchemaName, ApiDataSchemaName,
-							 shardSuffix);
+							 CoreSchemaName, additionalArgs,
+							 ApiDataSchemaName, shardSuffix);
 		}
 		else
 		{
@@ -1385,12 +1391,13 @@ InsertOrReplaceDocument(uint64 collectionId, const char *shardTableName, int64
 							 " ON CONFLICT ON CONSTRAINT collection_pk_" UINT64_FORMAT
 							 " DO UPDATE SET document ="
 							 " COALESCE(%s.update_bson_document(%s.documents_"UINT64_FORMAT
-							 ".document, %s.bson_from_bytea($4), '{}'::%s.bson, NULL::%s.bson, NULL::%s.bson, NULL::TEXT),"
+							 ".document, %s.bson_from_bytea($4), '{}'::%s.bson, NULL::%s.bson, NULL::%s.bson, NULL::TEXT%s),"
 							 " %s.documents_"UINT64_FORMAT ".document)",
 							 collectionId, ApiInternalSchemaNameV2, ApiDataSchemaName,
 							 collectionId,
 							 CoreSchemaName, CoreSchemaName, CoreSchemaName,
-							 CoreSchemaName, ApiDataSchemaName, collectionId);
+							 CoreSchemaName, additionalArgs,
+							 ApiDataSchemaName, collectionId);
 		}
 	}
 	else

@@ -315,6 +315,10 @@ bool InlineChangeStreamMatchStage = DEFAULT_INLINE_CHANGESTREAM_MATCH_STAGES;
 #define DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS true
 bool RemoveMatchNamespaceFilters = DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS;
 
+/* Remove after 113 */
+#define DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED true
+bool MultiplePositionalNotAllowed = DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED;
+
 /* FEATURE FLAGS END */
 
 void
@@ -866,6 +870,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to always create TTL indexes as composite indexes by default."),
 		NULL, &CreateTTLIndexAsCompositeByDefault,
 		DEFAULT_CREATE_TTL_INDEX_AS_COMPOSITE,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.multipleDollarPositionalNotAllowed", newGucPrefix),
+		gettext_noop(
+			"Determines whether to throw error when multiple $ positional operators are provided in the same path e.g. 'a.b.$.c.$'"),
+		NULL, &MultiplePositionalNotAllowed,
+		DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

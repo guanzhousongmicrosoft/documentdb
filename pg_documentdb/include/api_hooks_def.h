@@ -20,6 +20,7 @@
 #include <utils/memutils.h>
 
 #include "metadata/collection.h"
+#include "update/update_hooks.h"
 
 
 /* Section: General Extension points */
@@ -176,15 +177,6 @@ typedef const char *(*TryGetShardNameForUnshardedCollection_HookType)(Oid relati
 extern TryGetShardNameForUnshardedCollection_HookType
 	try_get_shard_name_for_unsharded_collection_hook;
 
-/*
- * Hook for creating an update tracker if tracking is enabled.
- */
-typedef BsonUpdateTracker *(*CreateBsonUpdateTracker_HookType)(void);
-extern CreateBsonUpdateTracker_HookType create_update_tracker_hook;
-
-typedef pgbson *(*BuildUpdateDescription_HookType)(BsonUpdateTracker *);
-extern BuildUpdateDescription_HookType build_update_description_hook;
-
 typedef const char *(*GetDistributedApplicationName_HookType)(void);
 extern GetDistributedApplicationName_HookType get_distributed_application_name_hook;
 
@@ -258,7 +250,6 @@ extern GetOperationCancellationQuery_HookType get_operation_cancellation_query_h
 
 typedef bool (*DefaultEnableCompositeOpClass_HookType)(void);
 extern DefaultEnableCompositeOpClass_HookType default_enable_composite_op_class_hook;
-
 
 /*
  * Hook for creating a TTL metrics aggregation context before the TTL purge loop.

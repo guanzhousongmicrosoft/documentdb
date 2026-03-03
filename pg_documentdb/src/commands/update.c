@@ -132,6 +132,9 @@ typedef struct
  */
 typedef struct
 {
+	/* Source table oid */
+	Oid tableOid;
+
 	/* TID of the document */
 	ItemPointer tid;
 
@@ -1831,6 +1834,12 @@ UpdateAllMatchingDocuments(MongoCollection *collection,
 	int validationLevelArgIndex = -1;
 
 	uint64 preparedQueryKey = 0;
+	char *additionalArgs = "";
+	if (IsClusterVersionAtleast(DocDB_V0, 111, 0))
+	{
+		additionalArgs = ", ctid, tableoid";
+	}
+
 	if (EnableSchemaValidation && schemaValidationExprEvalState != NULL)
 	{
 		/*
@@ -1886,10 +1895,11 @@ UpdateAllMatchingDocuments(MongoCollection *collection,
 						 "WITH filtered_documents AS ("
 						 "SELECT object_id, shard_key_value, document,"
 						 " COALESCE(%s.update_bson_document(document, $1::%s, "
-						 "$2::%s, $3::%s, %s::%s, NULL::TEXT), document) as newDocument FROM %s.%s ",
+						 "$2::%s, $3::%s, %s::%s, NULL::TEXT%s), document) as newDocument FROM %s.%s ",
 						 ApiInternalSchemaNameV2, FullBsonTypeName,
 						 FullBsonTypeName, FullBsonTypeName,
 						 applyVariablSpec ? "$4" : "NULL", FullBsonTypeName,
+						 additionalArgs,
 						 ApiDataSchemaName, tableName
 						 );
 
@@ -1967,10 +1977,11 @@ UpdateAllMatchingDocuments(MongoCollection *collection,
 		appendStringInfo(&updateQuery,
 						 "WITH u AS (UPDATE %s.%s"
 						 " SET document = COALESCE(%s.update_bson_document(document, $1::%s,"
-						 " $2::%s, $3::%s, %s::%s, NULL::TEXT), document) ",
+						 " $2::%s, $3::%s, %s::%s, NULL::TEXT%s), document) ",
 						 ApiDataSchemaName, tableName, ApiInternalSchemaNameV2,
 						 FullBsonTypeName, FullBsonTypeName, FullBsonTypeName,
-						 applyVariablSpec ? "$4" : "NULL", FullBsonTypeName);
+						 applyVariablSpec ? "$4" : "NULL", FullBsonTypeName,
+						 additionalArgs);
 
 
 		if (applyVariablSpec)
@@ -3188,6 +3199,11 @@ UpdateOneInternal(MongoCollection *collection, UpdateOneParams *updateOneParams,
 		if (updateOneParams->isUpsert)
 		{
 			pgbson *emptyDocument = PgbsonInitEmpty();
+
+			/*
+			 * Perform regular bson update document because this is an upsert case without
+			 * update change tracking
+			 */
 			pgbson *newDoc = BsonUpdateDocument(emptyDocument, updateOneParams->update,
 												updateOneParams->query,
 												updateOneParams->arrayFilters,
@@ -3366,7 +3382,7 @@ SelectUpdateCandidate(MongoCollection *collection, int64 shardKeyHash,
 	StringInfoData updateQuery;
 	initStringInfo(&updateQuery);
 
-	appendStringInfo(&updateQuery, "SELECT ctid, object_id, document FROM");
+	appendStringInfo(&updateQuery, "SELECT ctid, object_id, document, tableoid FROM");
 
 	if (collection->shardTableName[0] != '\0')
 	{
@@ -3591,12 +3607,21 @@ SelectUpdateCandidate(MongoCollection *collection, int64 shardKeyHash,
 													columnNumber, &isNull);
 		Assert(!isNull);
 
+		columnNumber = 4;
+		Datum tableOidDatum = SPI_getbinval(SPI_tuptable->vals[rowIndex],
+											SPI_tuptable->tupdesc,
+											columnNumber, &isNull);
+		Assert(!isNull);
+		updateCandidate->tableOid = DatumGetObjectId(tableOidDatum);
+
 		/* Do this inside the SPI context so that the memory gets cleaned up once we close the SPI session. */
 		pgbson *originalDoc = DatumGetPgBson(originalDocumentDatum);
-		pgbson *updatedDocument = BsonUpdateDocument(originalDoc, updateOneParams->update,
-													 updateOneParams->query,
-													 updateOneParams->arrayFilters,
-													 updateOneParams->variableSpec);
+		pgbson *updatedDocument =
+			BsonUpdateDocumentWithSource(originalDoc, updateOneParams->update,
+										 updateOneParams->query,
+										 updateOneParams->arrayFilters,
+										 updateOneParams->variableSpec,
+										 updateCandidate->tid, updateCandidate->tableOid);
 
 		if (updatedDocument != NULL)
 		{
@@ -3836,6 +3861,11 @@ UpsertDocument(MongoCollection *collection, const bson_value_t *update,
 			   bool hasOnlyObjectIdFilter, const bson_value_t *variableSpec)
 {
 	pgbson *emptyDocument = PgbsonInitEmpty();
+
+	/*
+	 * Perform regular bson update document because this is an upsert case without
+	 * update change tracking
+	 */
 	pgbson *newDoc = BsonUpdateDocument(emptyDocument, update, query, arrayFilters,
 										variableSpec);
 
