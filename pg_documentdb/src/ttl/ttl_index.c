@@ -47,7 +47,6 @@ extern int MaxTTLBatchSizeUnorderedIndex;
 
 extern bool TTLSkipCaughtUpIndexes;
 
-bool UseV2TTLIndexPurger = true;
 
 /* --------------------------------------------------------- */
 /* Data-types */
@@ -104,82 +103,8 @@ static bool IsTaskTimeBudgetExceeded(instr_time startTime, double *elapsedTime, 
 /* Top level exports */
 /* --------------------------------------------------------- */
 
-PG_FUNCTION_INFO_V1(delete_expired_rows_for_index);
 PG_FUNCTION_INFO_V1(delete_expired_rows);
 PG_FUNCTION_INFO_V1(delete_expired_rows_background);
-
-/*
- * delete_expired_rows deletes a batch of expired documents for an input ttl index.
- * It returns the total number of documents selected for deletion. Note that the actual
- * number of documents deleted might be different (more details in the function body).
- *
- * The function also logs the number of rows selected and the number of rows deleted per
- * invocation.
- *
- * Here is the full SQL query we use to delete and to log the number of deleted rows.
- *
- *  WITH deleted_rows as
- *  (
- *      DELETE FROM ApiDataSchemaName.documents_collectionId_shardId
- *      WHERE ctid IN
- *      (
- *          SELECT ctid FROM ApiDataSchemaName.documents_collectionId_shardId
- *          WHERE ApiCatalogSchemaName.bson_dollar_lt(document, '{ "ttl" : { "$date" : { "$numberLong" : "100" } } }'::ApiCatalogSchemaName.bson)
- *          LIMIT 100
- *      )
- *      RETURNING ctid
- *  )
- *  SELECT count(*) FROM deleted_rows;
- *
- */
-Datum
-delete_expired_rows_for_index(PG_FUNCTION_ARGS)
-{
-	if (PG_NARGS() < 8)
-	{
-		/* This can happen if the binary version is 1.8+
-		 * but ALTER EXTENSION hasn't been called yet.
-		 */
-		ereport(LOG, (errmsg("Skipping TTL Purge because of binary/schema mismatch")));
-		PG_RETURN_INT64(0);
-	}
-
-	uint64 collectionId = DatumGetInt64(PG_GETARG_DATUM(0));
-
-	uint64 indexId = DatumGetInt64(PG_GETARG_DATUM(1));
-	Datum indexKeyDatum = PG_GETARG_DATUM(2);
-	Datum partialFilterDatum = PG_ARGISNULL(3) ? (Datum) 0 : PG_GETARG_DATUM(3);
-	int64 currentTime = DatumGetInt64(PG_GETARG_DATUM(4));
-
-	int32 indexExpiry = DatumGetInt32(PG_GETARG_DATUM(5));
-	int ttlDeleteBatchSize = DatumGetInt32(PG_GETARG_DATUM(6));
-	uint64 shardId = DatumGetInt64(PG_GETARG_DATUM(7));
-
-	char tableName[NAMEDATALEN];
-	sprintf(tableName, DOCUMENT_DATA_TABLE_NAME_FORMAT "_" UINT64_FORMAT, collectionId,
-			shardId);
-
-	TtlIndexEntry indexEntry = {
-		.collectionId = collectionId,
-		.shardId = shardId,
-		.indexId = indexId,
-		.indexKeyDatum = indexKeyDatum,
-		.indexPfeDatum = partialFilterDatum,
-		.indexExpireAfterSeconds = indexExpiry
-	};
-
-	instr_time startTime;
-	INSTR_TIME_SET_CURRENT(startTime);
-	bool isTimeBudgetExceeded = false;
-	void *ttlMetricsContextLegacyUnused = NULL;
-	uint64 rowsCount = DeleteExpiredRowsForIndexCore(tableName, &indexEntry, currentTime,
-													 ttlDeleteBatchSize, startTime,
-													 SingleTTLTaskTimeBudget,
-													 &isTimeBudgetExceeded,
-													 ttlMetricsContextLegacyUnused);
-
-	PG_RETURN_INT64((int64) rowsCount);
-}
 
 
 /* Function to randomize the list of ttl indexes in order to avoid starvation.
@@ -206,11 +131,6 @@ shuffle_list(List *list)
 Datum
 delete_expired_rows(PG_FUNCTION_ARGS)
 {
-	if (!UseV2TTLIndexPurger)
-	{
-		PG_RETURN_VOID();
-	}
-
 	int32_t batchSize = PG_GETARG_INT32(0);
 
 	StringInfo cmdGetIndexes = makeStringInfo();
@@ -580,7 +500,6 @@ delete_expired_rows(PG_FUNCTION_ARGS)
 			 */
 			if (TTLSkipCaughtUpIndexes && rowsDeletedForCurrentIndex == 0)
 			{
-				ttlIndexEntries = foreach_delete_current(ttlIndexEntries, ttlEntryCell);
 				if (LogTTLProgressActivity)
 				{
 					ereport(LOG, errmsg(
@@ -588,6 +507,8 @@ delete_expired_rows(PG_FUNCTION_ARGS)
 								ttlIndexEntry->indexId,
 								ttlIndexEntry->collectionId));
 				}
+				ttlIndexEntries = foreach_delete_current(ttlIndexEntries, ttlEntryCell);
+
 				continue;
 			}
 
