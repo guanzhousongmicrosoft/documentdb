@@ -71,4 +71,8 @@ impl RequestTracker {
     pub fn get_interval_elapsed_time(&self, interval: RequestIntervalKind) -> i64 {
         self.request_interval_metrics_array[interval as usize].load(Ordering::Relaxed)
     }
+
+    pub fn get_interval_elapsed_time_ms(&self, interval: RequestIntervalKind) -> i64 {
+        self.get_interval_elapsed_time(interval) / 1_000_000
+    }
 }

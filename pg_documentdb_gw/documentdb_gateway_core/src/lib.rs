@@ -690,10 +690,7 @@ where
         None
     };
 
-    if connection_context
-        .dynamic_configuration()
-        .enable_verbose_logging_in_gateway()
-    {
+    if should_log_verbose_latency(connection_context, &request_context) {
         log_verbose_latency(connection_context, &request_context, command_error.as_ref());
     }
 
@@ -805,6 +802,30 @@ where
     }
 
     Ok(command_error)
+}
+
+fn should_log_verbose_latency(
+    connection_context: &ConnectionContext,
+    request_context: &RequestContext<'_>,
+) -> bool {
+    if connection_context
+        .dynamic_configuration()
+        .enable_verbose_logging_in_gateway()
+    {
+        return true;
+    }
+
+    let slow_query_threshold_ms = connection_context
+        .dynamic_configuration()
+        .slow_query_log_interval_ms();
+    if slow_query_threshold_ms > 0 {
+        let duration_ms = request_context
+            .tracker
+            .get_interval_elapsed_time_ms(RequestIntervalKind::HandleMessage);
+        return duration_ms >= i64::from(slow_query_threshold_ms);
+    }
+
+    false
 }
 
 fn log_verbose_latency(

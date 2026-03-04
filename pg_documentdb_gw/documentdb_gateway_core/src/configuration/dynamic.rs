@@ -137,6 +137,10 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
         )
     }
 
+    fn slow_query_log_interval_ms(&self) -> i32 {
+        self.get_i32("slowQueryLogIntervalInMilliseconds", -1)
+    }
+
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "")
     }
