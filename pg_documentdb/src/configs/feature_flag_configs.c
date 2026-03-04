@@ -238,6 +238,9 @@ bool EnableAddToSetAggregationRewrite = DEFAULT_ENABLE_ADD_TO_SET_AGGREGATION_RE
 bool EnableIdIndexPushdownForQueryOp =
 	DEFAULT_ENABLE_ID_INDEX_PUSHDOWN_FOR_QUERY_OP;
 
+#define DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE true
+bool EnableBinarySearchForOrderedMove = DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE;
+
 /*
  * SECTION: Let support feature flags
  */
@@ -814,6 +817,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to enable index push down for _id index."),
 		NULL, &EnableIdIndexPushdownForQueryOp,
 		DEFAULT_ENABLE_ID_INDEX_PUSHDOWN_FOR_QUERY_OP,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableBinarySearchForOrderedMove", newGucPrefix),
+		gettext_noop(
+			"Whether to enable binary search for ordered move."),
+		NULL, &EnableBinarySearchForOrderedMove,
+		DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

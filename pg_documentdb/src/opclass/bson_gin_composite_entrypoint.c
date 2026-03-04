@@ -88,6 +88,14 @@ typedef struct
 	int32_t numTerms[INDEX_MAX_KEYS];
 } MergedTermSet;
 
+
+typedef struct CompareMetadata
+{
+	bool isBackwardScan;
+	bool isWildcardScan;
+} CompareMetadata;
+
+
 #define MAX_STRATEGIES (8)
 PGDLLIMPORT typedef struct RumConfig
 {
@@ -122,6 +130,7 @@ extern bool EnableCompositeWildcardIndex;
 extern int MaxWildcardIndexKeySize;
 extern bool EnableCompositeWildcardSkipEmptyEntries;
 extern int MaxNonOrderedTermScanThreshold;
+extern bool EnableBinarySearchForOrderedMove;
 
 static void ValidateCompositePathSpec(const char *prefix);
 static Size FillCompositePathSpec(const char *prefix, void *buffer);
@@ -159,7 +168,6 @@ static int32_t RunCompareOnBounds(CompositeIndexBounds *bounds,
 								  bool *priorMatchesEquality, bool *hasUnspecifiedPrefix);
 static int AdvanceOrderedScanData(CompositeQueryRunData *runData,
 								  const BsonIndexTerm *currentTermsSet,
-								  bool isEqualityPrefix,
 								  int compareIndex, bool *hasNoScalarArrayBounds);
 static void OptimizeVariableBoundsForQuery(CompositeQueryRunData *runData,
 										   VariableIndexBounds *variableBounds,
@@ -738,14 +746,30 @@ ProcessOrderedCompositeQueryEntries(int32_t totalPathTerms,
 			/* Build the terms for the bound up front. This way they're allocated in the
 			 * RumScanKeyContext. This ensures that they only survive for the current scan call.
 			 */
+			bool hasAllEquality = true;
 			for (int i = 0; i < set->numBounds; i++)
 			{
 				CompositeIndexBounds *bound = &set->bounds[i];
+
+				bool isComparisonValidIgnore = false;
+				if (bound->lowerBound.isBoundInclusive &&
+					bound->upperBound.isBoundInclusive &&
+					bound->lowerBound.bound.value_type != BSON_TYPE_EOD &&
+					CompareBsonValueAndType(&bound->lowerBound.bound,
+											&bound->upperBound.bound,
+											&isComparisonValidIgnore) == 0)
+				{
+					bound->isEqualityBound = true;
+				}
+
+				hasAllEquality = hasAllEquality && bound->isEqualityBound;
 
 				/* If any of the bounds are unsatisfiable, then the whole query is unsatisfiable */
 				UpdateSingleBoundForTruncation(runData, set->indexAttribute, bound,
 											   &metadata[set->indexAttribute]);
 			}
+
+			entry->isBoundsAllEquality = hasAllEquality;
 		}
 
 		/* Now data points to a per path set of variable bounds. each boundset is an equivalent of an SAOP
@@ -1244,10 +1268,8 @@ RunCompareOnOrderedIndexSet(CompositeQueryRunData *runData,
 		{
 			/* We exhausted everything for the current bounds this path.
 			 * Try to advance this path forward to its next bounds */
-			hasOrderedEqualityPrefix = true;
 			bool hasNoScalarArrayBounds = false;
 			int advanceResult = AdvanceOrderedScanData(runData, currentTermsSet,
-													   hasOrderedEqualityPrefix,
 													   compareIndex,
 													   &hasNoScalarArrayBounds);
 			if (advanceResult == 1)
@@ -1402,10 +1424,69 @@ MoveUnsatisfiableBoundForward(CompositeQueryRunData *runData, int compareIndex)
 }
 
 
+/*
+ * Modified binary search where on mismatch returns the position.
+ * returns index if item is found;
+ * otherwise, a negative number that is the bitwise complement of the index of the next element that is larger than item or,
+ * if there is no larger element, the bitwise complement of length.
+ * See https://github.com/dotnet/runtime/blob/4fa917e666f88701785d0ed5e801fded279ee2a8/src/libraries/System.Private.CoreLib/src/System/Array.cs#L1254-L1279
+ */
+static int32
+BinarySearchBoundsArray(void *pointer, int startIndex, int length,
+						int elemSize, const void *toFind,
+						int (*compar)(const void *, const void *, void *),
+						void *arg)
+{
+	const char *base = (const char *) pointer;
+	int lo = startIndex;
+	int hi = length - 1;
+	while (lo <= hi)
+	{
+		int i = lo + ((hi - lo) >> 1);
+
+		const char *p = base + (i * elemSize);
+		int c = compar(p, toFind, arg);
+		if (c == 0)
+		{
+			return i;
+		}
+		if (c < 0)
+		{
+			lo = i + 1;
+		}
+		else
+		{
+			hi = i - 1;
+		}
+	}
+
+	return ~lo;
+}
+
+
+static int
+CompareOnBoundsForSearch(const void *a, const void *b, void *arg)
+{
+	CompositeIndexBounds *bound = (CompositeIndexBounds *) a;
+	BsonIndexTerm *term = (BsonIndexTerm *) b;
+	CompareMetadata *metadata = (CompareMetadata *) arg;
+
+	bool allowSkipScansOnBoundary = true;
+	bool isEqualityPrefix = true;
+	bool priorMatchesEquality = true;
+	int compareResult = RunCompareOnBounds(
+		bound, term, isEqualityPrefix,
+		metadata->isBackwardScan,
+		metadata->isWildcardScan, &priorMatchesEquality,
+		&allowSkipScansOnBoundary);
+
+	return compareResult == 0 ? 0 : (compareResult < 0 ? 1 : -1);
+}
+
+
 static int
 AdvanceOrderedScanData(CompositeQueryRunData *runData,
 					   const BsonIndexTerm *currentTermsSet,
-					   bool isEqualityPrefix,
 					   int compareIndex,
 					   bool *hasNoScalarArrayBounds)
 {
@@ -1445,7 +1526,8 @@ advance_ordered_scan_data_start:
 	{
 		CompositeProcessedPerPathEntry *entry = (CompositeProcessedPerPathEntry *) lfirst(
 			pathCell);
-		bool priorMatchesEquality = isEqualityPrefix;
+		bool isEqualityPrefixOrdered = true;
+		bool priorMatchesEquality = isEqualityPrefixOrdered;
 		bool allowSkipScansOnBoundary = true;
 		if (entry->currentOperatorIndex >= entry->boundsSet->numBounds)
 		{
@@ -1455,14 +1537,39 @@ advance_ordered_scan_data_start:
 
 		int compareResult = RunCompareOnBounds(
 			&entry->boundsSet->bounds[entry->currentOperatorIndex],
-			&currentTermsSet[compareIndex], isEqualityPrefix,
+			&currentTermsSet[compareIndex], isEqualityPrefixOrdered,
 			runData->metaInfo->isBackwardScan,
 			entry->boundsSet->wildcardPath != NULL, &priorMatchesEquality,
 			&allowSkipScansOnBoundary);
 		if (compareResult == 1)
 		{
-			/* This particular bound is exhausted - move to the next one */
-			entry->currentOperatorIndex++;
+			/* This particular bound is exhausted - move to the next one
+			 * We find the next possible bound for this path.
+			 */
+			if (entry->isBoundsAllEquality && EnableBinarySearchForOrderedMove)
+			{
+				CompareMetadata searchMetadata = {
+					.isBackwardScan = runData->metaInfo->isBackwardScan,
+					.isWildcardScan = entry->boundsSet->wildcardPath != NULL
+				};
+				int foundIndex = BinarySearchBoundsArray(
+					entry->boundsSet->bounds, entry->currentOperatorIndex + 1,
+					entry->boundsSet->numBounds, sizeof(CompositeIndexBounds),
+					&currentTermsSet[compareIndex],
+					CompareOnBoundsForSearch, &searchMetadata);
+				if (foundIndex >= 0)
+				{
+					entry->currentOperatorIndex = foundIndex;
+				}
+				else
+				{
+					entry->currentOperatorIndex = ~foundIndex;
+				}
+			}
+			else
+			{
+				entry->currentOperatorIndex++;
+			}
 
 			if (entry->currentOperatorIndex >= entry->boundsSet->numBounds)
 			{

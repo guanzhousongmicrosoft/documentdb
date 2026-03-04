@@ -83,6 +83,7 @@ typedef struct CompositeProcessedPerPathEntry
 {
 	CompositeIndexBoundsSet *boundsSet;
 	int32_t currentOperatorIndex;
+	bool isBoundsAllEquality;
 } CompositeProcessedPerPathEntry;
 
 /* A list of CompositeProcessedPerPathEntry associated for a given index path */

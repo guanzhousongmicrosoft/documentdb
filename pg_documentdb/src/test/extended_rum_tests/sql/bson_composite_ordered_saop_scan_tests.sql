@@ -467,3 +467,44 @@ SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
     '{ "filter": { "a": { "$in": [ 999999, 888888, 777777 ] }, "b": { "$in": [ 999999, 888888, 777777 ] } } }'::bson
 );
 
+TRUNCATE documentdb_data.documents_1201;
+TRUNCATE documentdb_data.documents_1202;
+TRUNCATE documentdb_data.documents_1203;
+TRUNCATE documentdb_data.documents_1204;
+
+-- now insert "a" going from 1 to 10, and b going from 1 to 10 for every value of a
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_scan_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_reverse_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_mixed_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
+
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 1, 2, 3 ] }, "b": { "$in": [ 1, 4, 7 ] } } }'::bson
+);
+
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 4, 11, 3 ] }, "b": { "$in": [ 7, 1, 9 ] } } }'::bson
+);
+
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 4, 11, 3 ] }, "b": { "$in": [ 17, -1, 9 ] } } }'::bson
+);
+
+-- now form an incredibly large query to handle the $in scenarios of cross-product in a path
+TRUNCATE documentdb_data.documents_1201;
+TRUNCATE documentdb_data.documents_1202;
+TRUNCATE documentdb_data.documents_1203;
+TRUNCATE documentdb_data.documents_1204;
+
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_scan_coll', bson_build_document('_id', i, 'a', 'avalue' || i, 'b', 'bvalue' || i))) FROM generate_series(1, 10000) AS i;
+
+INSERT INTO documentdb_data.documents_1202 SELECT 1202, object_id, document FROM documentdb_data.documents_1201;
+INSERT INTO documentdb_data.documents_1203 SELECT 1203, object_id, document FROM documentdb_data.documents_1201;
+INSERT INTO documentdb_data.documents_1204 SELECT 1204, object_id, document FROM documentdb_data.documents_1201;
+
+-- now form a large $in query.
+WITH raw_values AS (SELECT ARRAY_AGG( 'avalue' || i ) as a_values, ARRAY_AGG( 'bvalue' || i ) as b_values FROM generate_series(1, 5000) AS i)
+SELECT bson_build_document('filter', bson_build_document('a', bson_build_document('$in', a_values), 'b', bson_build_document('$in', b_values)))::bson AS query_spec FROM raw_values \gset
+WITH r1 AS (SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    :'query_spec'
+)) SELECT COUNT(*) FROM r1;
