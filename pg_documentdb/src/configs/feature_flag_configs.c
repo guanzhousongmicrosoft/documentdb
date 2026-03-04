@@ -86,10 +86,6 @@ bool EnableCompositeIndexPlanner = DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER;
 #define DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR true
 bool EnableOrderedCostEstimator = DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR;
 
-/* Ready to remove */
-#define DEFAULT_ENABLE_INDEX_ORDERBY_PUSHDOWN true
-bool EnableIndexOrderbyPushdown = DEFAULT_ENABLE_INDEX_ORDERBY_PUSHDOWN;
-
 /* We can enable by default once we stabilize by moving it's creation to the cost estimate. */
 #define DEFAULT_ENABLE_INDEX_ONLY_SCAN false
 bool EnableIndexOnlyScan = DEFAULT_ENABLE_INDEX_ONLY_SCAN;
@@ -570,13 +566,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		gettext_noop(
 			"Whether to enable the new ordered cost estimator for composite indexes. Requires enableCompositeIndexPlanner"),
 		NULL, &EnableOrderedCostEstimator, DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enableIndexOrderbyPushdown", newGucPrefix),
-		gettext_noop(
-			"Whether to enable the sort on the new experimental composite index opclass"),
-		NULL, &EnableIndexOrderbyPushdown, DEFAULT_ENABLE_INDEX_ORDERBY_PUSHDOWN,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

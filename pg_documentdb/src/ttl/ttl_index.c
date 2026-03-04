@@ -40,7 +40,6 @@ extern int TTLTaskMaxRunTimeInMS;
 extern bool EnableTtlJobsOnReadOnly;
 extern bool UseIndexHintsForTTLTask;
 extern bool EnableTTLDescSort;
-extern bool EnableIndexOrderbyPushdown;
 extern bool EnableTTLBatchObservability;
 extern bool SkipRepeatDeleteForUnOrderedIndex;
 extern int MaxTTLBatchSizeUnorderedIndex;
@@ -680,7 +679,6 @@ DeleteExpiredRowsForIndexCore(char *tableName, TtlIndexEntry *indexEntry, int64
 	}
 
 	bool useDescendingSort = EnableTTLDescSort &&
-							 EnableIndexOrderbyPushdown &&
 							 indexEntry->indexIsOrdered;
 
 	/* Fetch the entries to be deleted in descending order if the index is ordered */

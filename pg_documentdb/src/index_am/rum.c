@@ -43,7 +43,6 @@
 #include "utils/error_utils.h"
 
 extern bool ForceUseIndexIfAvailable;
-extern bool EnableIndexOrderbyPushdown;
 extern bool EnableIndexOnlyScan;
 extern bool EnableCompositeIndexPlanner;
 extern bool DisableExtendedRumExplainPlans;
@@ -1111,16 +1110,13 @@ extension_rumrescan_core(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 
 		ScanKey innerOrderBy = NULL;
 		int32_t nInnerorderbys = 0;
-		if (EnableIndexOrderbyPushdown)
-		{
-			innerOrderBy = orderbys;
-			nInnerorderbys = norderbys;
+		innerOrderBy = orderbys;
+		nInnerorderbys = norderbys;
 
-			outerScanState->scanDirection =
-				DetermineCompositeScanDirection(
-					scan->indexRelation->rd_opcoptions[0],
-					orderbys, norderbys);
-		}
+		outerScanState->scanDirection =
+			DetermineCompositeScanDirection(
+				scan->indexRelation->rd_opcoptions[0],
+				orderbys, norderbys);
 
 		ScanKey innerScanKey = scankey;
 		int32_t nInnerScanKeys = nscankeys;

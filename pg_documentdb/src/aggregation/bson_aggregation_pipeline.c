@@ -77,7 +77,6 @@ extern bool EnableCursorsOnAggregationQueryRewrite;
 extern bool EnableCollation;
 extern bool DefaultInlineWriteOperations;
 extern int MaxAggregationStagesAllowed;
-extern bool EnableIndexOrderbyPushdown;
 extern bool EnableConversionStreamableToSingleBatch;
 extern bool EnableFindProjectionAfterOffset;
 extern bool EnableNewCountAggregates;
@@ -5002,7 +5001,7 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 										 InvalidOid, InvalidOid,
 										 COERCE_EXPLICIT_CALL);
 
-			if (EnableIndexOrderbyPushdown && !isSortByMeta)
+			if (!isSortByMeta)
 			{
 				/*
 				 * If there's an orderby pushdown to the index, add a full scan clause iff
@@ -5889,8 +5888,7 @@ HandleGroup(const bson_value_t *existingValue, Query *query,
 
 	/* Push prior stuff to a subquery first since we're gonna aggregate our way */
 	if (list_length(query->targetList) > 1 || query->hasAggs ||
-		list_length(query->groupClause) > 0 || list_length(query->sortClause) > 0 ||
-		!EnableIndexOrderbyPushdown)
+		list_length(query->groupClause) > 0 || list_length(query->sortClause) > 0)
 	{
 		query = MigrateQueryToSubQuery(query, context);
 	}
@@ -6512,39 +6510,36 @@ HandleGroup(const bson_value_t *existingValue, Query *query,
 	grpcl->hashable = true;
 	query->groupClause = list_make1(grpcl);
 
-	if (EnableIndexOrderbyPushdown)
-	{
-		/* Group by is valid for pushdown iff it's a string expression of a path that's not a variable */
-		bool isGroupByValidForIndexPushdown =
-			idValue.value_type == BSON_TYPE_UTF8 &&
-			idValue.value.v_utf8.len > 1 &&
-			idValue.value.v_utf8.str[0] == '$' &&
-			idValue.value.v_utf8.str[1] != '$';
+	/* Group by is valid for pushdown iff it's a string expression of a path that's not a variable */
+	bool isGroupByValidForIndexPushdown =
+		idValue.value_type == BSON_TYPE_UTF8 &&
+		idValue.value.v_utf8.len > 1 &&
+		idValue.value.v_utf8.str[0] == '$' &&
+		idValue.value.v_utf8.str[1] != '$';
 
-		/*
-		 * If there's an orderby pushdown to the index, add a full scan clause iff
-		 * the query has no filters yet.
-		 */
-		if (isGroupByValidForIndexPushdown &&
-			CanPushSortFilterToIndex(query, context))
-		{
-			pgbsonelement sortElement = { 0 };
-			sortElement.path = idValue.value.v_utf8.str + 1;
-			sortElement.pathLength = idValue.value.v_utf8.len - 1;
-			sortElement.bsonValue.value_type = BSON_TYPE_INT32;
-			sortElement.bsonValue.value.v_int32 = 1;
-			pgbson *sortSpec = PgbsonElementToPgbson(&sortElement);
-			Const *sortConst = MakeBsonConst(sortSpec);
-			List *rangeArgs = list_make2(origEntry->expr, sortConst);
-			Expr *fullScanExpr = (Expr *) makeFuncExpr(
-				BsonFullScanFunctionOid(), BOOLOID, rangeArgs,
-				InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
-			List *currentQuals = make_ands_implicit(
-				(Expr *) query->jointree->quals);
-			currentQuals = lappend(currentQuals, fullScanExpr);
-			query->jointree->quals = (Node *) make_ands_explicit(
-				currentQuals);
-		}
+	/*
+	 * If there's an orderby pushdown to the index, add a full scan clause iff
+	 * the query has no filters yet.
+	 */
+	if (isGroupByValidForIndexPushdown &&
+		CanPushSortFilterToIndex(query, context))
+	{
+		pgbsonelement sortElement = { 0 };
+		sortElement.path = idValue.value.v_utf8.str + 1;
+		sortElement.pathLength = idValue.value.v_utf8.len - 1;
+		sortElement.bsonValue.value_type = BSON_TYPE_INT32;
+		sortElement.bsonValue.value.v_int32 = 1;
+		pgbson *sortSpec = PgbsonElementToPgbson(&sortElement);
+		Const *sortConst = MakeBsonConst(sortSpec);
+		List *rangeArgs = list_make2(origEntry->expr, sortConst);
+		Expr *fullScanExpr = (Expr *) makeFuncExpr(
+			BsonFullScanFunctionOid(), BOOLOID, rangeArgs,
+			InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+		List *currentQuals = make_ands_implicit(
+			(Expr *) query->jointree->quals);
+		currentQuals = lappend(currentQuals, fullScanExpr);
+		query->jointree->quals = (Node *) make_ands_explicit(
+			currentQuals);
 	}
 
 	/* Now that the group + accumulators are done, push to a subquery

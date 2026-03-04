@@ -347,7 +347,6 @@ extern bool EnableGeonearForceIndexPushdown;
 extern bool EnableNewOperatorSelectivityMode;
 extern bool EnableCompositeIndexPlanner;
 extern bool LowSelectivityForLookup;
-extern bool EnableIndexOrderbyPushdown;
 extern bool EnableExprLookupIndexPushdown;
 extern bool EnableUnifyPfeOnIndexInfo;
 extern bool EnableIdIndexPushdown;
@@ -2626,7 +2625,6 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 
 	if (getMultiKeyStatusFunc != NULL &&
 		indexPath->indexinfo->amcanorderbyop &&
-		EnableIndexOrderbyPushdown &&
 		list_length(root->query_pathkeys) > 0)
 	{
 		Relation indexRel = index_open(indexPath->indexinfo->indexoid, NoLock);

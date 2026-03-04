@@ -35,7 +35,6 @@ set enable_seqscan to off;
 EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_find('comp_db', '{ "find": "query_orderby", "filter": { "a": { "$exists": true }}, "sort": { "a": 1 } }');
 
 -- now the order by succeeds with an index scan
-SET documentdb.enableIndexOrderbyPushdown to on;
 EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_find('comp_db', '{ "find": "query_orderby", "filter": { "a": { "$exists": true }}, "sort": { "a": 1 } }');
 
 -- point read on _id with order by was broken initially and was fixed in 108 
@@ -233,7 +232,6 @@ SELECT COUNT(documentdb_api.insert_one('comp_db', 'query_orderby_perf2', FORMAT(
 
 ANALYZE documentdb_data.documents_68004;
 
-SET documentdb.enableIndexOrderbyPushdown to on;
 set documentdb.forceUseIndexIfAvailable to on;
 set enable_bitmapscan to off;
 EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": 1 } } ] }');
@@ -294,7 +292,6 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('comp_db', '{ "cr
 
 BEGIN;
 set local documentdb.forceDisableSeqScan to on;
-set local documentdb.enableIndexOrderbyPushdown to on;
 set local documentdb.enableExtendedExplainPlans to on;
 EXPLAIN (COSTS OFF, ANALYZE ON, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "a.b": 1 } } ] }');
 ROLLBACK;
@@ -302,13 +299,11 @@ ROLLBACK;
 
 BEGIN;
 set local documentdb.forceDisableSeqScan to on;
-set local documentdb.enableIndexOrderbyPushdown to on;
 SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "a.b": 1 } } ] }');
 SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "a.b": -1 } } ] }');
 ROLLBACK;
 
 set documentdb.forceDisableSeqScan to on;
-set documentdb.enableIndexOrderbyPushdown to on;
 set documentdb.enableExtendedExplainPlans to on;
 
 -- can't push this down (no equality prefix)
@@ -431,7 +426,6 @@ select COUNT(documentdb_api.insert_one('comp_db', 'ordering_groups', FORMAT('{ "
 ANALYZE documentdb_data.documents_68009;
 
 set documentdb.forceDisableSeqScan to on;
-set documentdb.enableIndexOrderbyPushdown to on;
 EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
 SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
 
@@ -500,7 +494,6 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('comp_db', '{ "cr
 SELECT COUNT(*) FROM ( SELECT documentdb_api.insert_one('comp_db', 'index_orderby_selection',
     FORMAT('{ "_id": %s, "filter1": "filter1-%s", "filter2": "filter2-%s", "filter3": %s, "orderKey": %s, "otherPath": "somePath-%s" }', i, i % 10, i, i % 100, i, i)::bson) FROM generate_series(1, 10000) i) j;
 
-set documentdb.enableIndexOrderbyPushdown to on;
 reset enable_sort;
 
 -- this has all the paths matching.

@@ -5,7 +5,6 @@ SET documentdb.next_collection_id TO 68500;
 SET documentdb.next_collection_index_id TO 68500;
 
 set documentdb.enableExtendedExplainPlans to on;
-set documentdb.enableIndexOrderbyPushdown to on;
 
 -- if documentdb_extended_rum exists, set alternate index handler
 SELECT pg_catalog.set_config('documentdb.alternate_index_handler_name', 'extended_rum', false), extname FROM pg_extension WHERE extname = 'documentdb_extended_rum';

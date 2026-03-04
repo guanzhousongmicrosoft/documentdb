@@ -130,7 +130,6 @@ extern bool ForceRUMIndexScanToBitmapHeapScan;
 extern bool EnableCollation;
 extern bool EnableLetAndCollationForQueryMatch;
 extern bool EnableVariablesSupportForWriteCommands;
-extern bool EnableIndexOrderbyPushdown;
 extern bool ForceDisableSeqScan;
 extern bool EnableExtendedExplainPlans;
 extern bool EnableExplainScanIndexCosts;
@@ -146,45 +145,6 @@ planner_hook_type ExtensionPreviousPlannerHook = NULL;
 set_rel_pathlist_hook_type ExtensionPreviousSetRelPathlistHook = NULL;
 explain_get_index_name_hook_type ExtensionPreviousIndexNameHook = NULL;
 get_relation_info_hook_type ExtensionPreviousGetRelationInfoHook = NULL;
-
-
-/*
- * Checks if for the given query we need to consider bitmap heap conversion.
- * Few places where we do not consider bitmap heap conversion:
- * - If the query is a $merge outer query.
- * - If the query is a $lookup query and has join RTEs.
- */
-static inline bool
-IsBitmapHeapConversionSupported(PlannerInfo *root, RelOptInfo *rel)
-{
-	if (!ForceRUMIndexScanToBitmapHeapScan)
-	{
-		return false;
-	}
-
-	if (EnableIndexOrderbyPushdown || EnableIndexOnlyScan)
-	{
-		return false;
-	}
-
-	/*
-	 * Determine if the current relation is the outer query of a $merge stage.
-	 * We do not push this relation to the bitmap index.
-	 * For the outer relation, the relid will always be 1 since $merge is the last stage of the pipeline.
-	 */
-	if (root->parse->commandType == CMD_MERGE && rel->relid == 1)
-	{
-		return false;
-	}
-
-	/* Not supported for lookup, check if no JOIN RTEs */
-	if (!ForceBitmapScanForLookup && root->hasJoinRTEs)
-	{
-		return false;
-	}
-
-	return true;
-}
 
 
 /*
@@ -522,10 +482,7 @@ ExtensionRelPathlistHookCoreNew(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	ReplaceExtensionFunctionOperatorsInPaths(root, rel, rel->pathlist, PARENTTYPE_NONE,
 											 &indexContext);
 
-	if (EnableIndexOrderbyPushdown)
-	{
-		ConsiderIndexOrderByPushdownForId(root, rel, rte, rti, &indexContext);
-	}
+	ConsiderIndexOrderByPushdownForId(root, rel, rte, rti, &indexContext);
 
 	if (EnableIndexOnlyScan)
 	{
@@ -548,11 +505,7 @@ ExtensionRelPathlistHookCoreNew(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	if (!updatedPaths)
 	{
-		if (IsBitmapHeapConversionSupported(root, rel))
-		{
-			UpdatePathsToForceRumIndexScanToBitmapHeapScan(root, rel);
-		}
-		else if (indexContext.forceIndexQueryOpData.type == ForceIndexOpType_Text)
+		if (indexContext.forceIndexQueryOpData.type == ForceIndexOpType_Text)
 		{
 			/* Text indexes require bitmap paths since we leverage bitmapquals
 			 * to run the meta_qual.

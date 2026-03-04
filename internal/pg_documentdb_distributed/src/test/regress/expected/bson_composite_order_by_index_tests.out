@@ -105,7 +105,6 @@ EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bs
 (11 rows)
 
 -- now the order by succeeds with an index scan
-SET documentdb.enableIndexOrderbyPushdown to on;
 EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_find('comp_db', '{ "find": "query_orderby", "filter": { "a": { "$exists": true }}, "sort": { "a": 1 } }');
                                        QUERY PLAN                                        
 ---------------------------------------------------------------------
@@ -1073,7 +1072,6 @@ SELECT COUNT(documentdb_api.insert_one('comp_db', 'query_orderby_perf2', FORMAT(
 (1 row)
 
 ANALYZE documentdb_data.documents_68004;
-SET documentdb.enableIndexOrderbyPushdown to on;
 set documentdb.forceUseIndexIfAvailable to on;
 set enable_bitmapscan to off;
 EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": 1 } } ] }');
@@ -1296,7 +1294,6 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('comp_db', '{ "cr
 -- now sort manually (we can't rely on the index pushdown feature yet since that requires a filter)
 BEGIN;
 set local documentdb.forceDisableSeqScan to on;
-set local documentdb.enableIndexOrderbyPushdown to on;
 set local documentdb.enableExtendedExplainPlans to on;
 EXPLAIN (COSTS OFF, ANALYZE ON, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "a.b": 1 } } ] }');
                                                                            QUERY PLAN                                                                           
@@ -1325,7 +1322,6 @@ EXPLAIN (COSTS OFF, ANALYZE ON, SUMMARY OFF, TIMING OFF) SELECT document FROM bs
 ROLLBACK;
 BEGIN;
 set local documentdb.forceDisableSeqScan to on;
-set local documentdb.enableIndexOrderbyPushdown to on;
 SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "a.b": 1 } } ] }');
                                                             document                                                             
 ---------------------------------------------------------------------
@@ -1380,7 +1376,6 @@ SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortc
 
 ROLLBACK;
 set documentdb.forceDisableSeqScan to on;
-set documentdb.enableIndexOrderbyPushdown to on;
 set documentdb.enableExtendedExplainPlans to on;
 -- can't push this down (no equality prefix)
 EXPLAIN (COSTS OFF, ANALYZE ON, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "sortcoll", "pipeline": [ { "$sort": { "_id": 1 } } ] }');
@@ -2012,7 +2007,6 @@ select COUNT(documentdb_api.insert_one('comp_db', 'ordering_groups', FORMAT('{ "
 
 ANALYZE documentdb_data.documents_68009;
 set documentdb.forceDisableSeqScan to on;
-set documentdb.enableIndexOrderbyPushdown to on;
 EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
                                                                            QUERY PLAN                                                                            
 ---------------------------------------------------------------------
@@ -2312,7 +2306,6 @@ SELECT COUNT(*) FROM ( SELECT documentdb_api.insert_one('comp_db', 'index_orderb
  10000
 (1 row)
 
-set documentdb.enableIndexOrderbyPushdown to on;
 reset enable_sort;
 -- this has all the paths matching.
 EXPLAIN (COSTS OFF, ANALYZE ON, SUMMARY OFF, TIMING OFF)
