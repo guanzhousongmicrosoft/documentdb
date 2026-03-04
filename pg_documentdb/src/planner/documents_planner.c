@@ -52,6 +52,7 @@
 #include "query/bson_compare.h"
 #include "planner/documents_custom_planner.h"
 #include "index_am/index_am_utils.h"
+#include "index_am/documentdb_rum.h"
 
 
 typedef enum DocumentDbQueryFlag
@@ -132,6 +133,7 @@ extern bool EnableVariablesSupportForWriteCommands;
 extern bool EnableIndexOrderbyPushdown;
 extern bool ForceDisableSeqScan;
 extern bool EnableExtendedExplainPlans;
+extern bool EnableExplainScanIndexCosts;
 extern bool EnableLogRelationIndexesOrder;
 extern bool ForceBitmapScanForLookup;
 extern bool EnableIndexOnlyScan;
@@ -582,7 +584,7 @@ ExtensionRelPathlistHookCoreNew(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (EnableExtendedExplainPlans)
 	{
 		/* Finally: Add the custom scan wrapper for explain plans */
-		AddExplainCustomScanWrapper(root, rel, rte);
+		AddExplainCustomScanWrapper(root, rel, rte, indexContext.inputData.collectionId);
 	}
 
 	if (ForceParallelScanIfAvailable)
@@ -826,6 +828,11 @@ ExtensionGetRelationInfoHookCore(PlannerInfo *root, Oid relationObjectId,
 	if (EnableLogRelationIndexesOrder)
 	{
 		LogRelationIndexesOrder(rel);
+	}
+
+	if (EnableExtendedExplainPlans && EnableExplainScanIndexCosts)
+	{
+		ResetReportedIndexCosts();
 	}
 }
 

@@ -322,10 +322,12 @@ extension_documentdb_extended_rumcostestimate(PlannerInfo *root, IndexPath *path
 {
 	/* Do not force index cost to zero unless explicitly requested */
 	bool forceIndexCostToZero = !EnableCompositeIndexPlanner;
+	OrderedCostEstimateCoreFunc orderedCostEstimateFunc =
+		DocumentDBRumOrderedCostEstimate;
 	extension_rumcostestimate_core(root, path, loop_count, indexStartupCost,
 								   indexTotalCost, indexSelectivity, indexCorrelation,
 								   indexPages, &core_rum_routine,
-								   forceIndexCostToZero);
+								   forceIndexCostToZero, orderedCostEstimateFunc);
 }
 
 

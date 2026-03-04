@@ -1339,6 +1339,11 @@ fn query_planner(
     if plan.distributed_plan.is_none() && !is_aggregation_stage {
         writer.append("namespace", collection_path)
     }
+
+    // Collect indexCosts from the entire plan tree before walking stages.
+    let mut index_costs_by_ns: Vec<(String, Vec<RawDocumentBuf>)> = Vec::new();
+    collect_index_costs(&plan, collection_path, &mut index_costs_by_ns);
+
     let result = walk_plan_stage(
         plan,
         None,
@@ -1347,6 +1352,10 @@ fn query_planner(
             let mut doc = rawdoc! {
                 "stage": stage_name,
             };
+
+            if let Some(namespace_name) = plan.namespace_name.as_deref() {
+                doc.append("ns", namespace_name);
+            }
 
             if stage_name != "FETCH" {
                 if let Some(index_name) = plan.index_name.as_deref() {
@@ -1526,6 +1535,18 @@ fn query_planner(
         },
     );
     writer.append("winningPlan", result);
+
+    if !index_costs_by_ns.is_empty() {
+        let mut top_arr = RawArrayBuf::new();
+        for (ns, cost_docs) in index_costs_by_ns {
+            let mut ns_doc = rawdoc! {};
+            ns_doc.append("namespace", ns.as_str());
+            ns_doc.append("costs", RawArrayBuf::from_iter(cost_docs));
+            top_arr.push(ns_doc);
+        }
+        writer.append("indexCosts", top_arr);
+    }
+
     writer
 }
 
@@ -1602,8 +1623,8 @@ fn execution_stats(plan: ExplainPlan, query_catalog: &QueryCatalog) -> RawDocume
                         continue;
                     }
                     let mut index_doc = rawdoc! {};
-                    if let Some(index_name) = detail.index_name.as_deref() {
-                        index_doc.append("indexName", index_name);
+                    if let Some(index_key) = detail.index_key.as_deref() {
+                        index_doc.append("indexKeyString", index_key);
                     }
 
                     if let Some(inner_scan_loops) = detail.inner_scan_loops {
@@ -1751,6 +1772,85 @@ fn distribute_index_details(plan: &mut ExplainPlan, index_details: Option<Vec<In
     }
 }
 
+fn build_index_cost_doc(cost: &IndexCost) -> RawDocumentBuf {
+    let mut cost_doc = rawdoc! {};
+    if let Some(index_name) = cost.index_name.as_deref() {
+        cost_doc.append("indexName", index_name);
+    } else {
+        return cost_doc;
+    }
+    if let Some(v) = cost.startup_cost.filter(|v| *v != 0.0) {
+        cost_doc.append("startupCost", v);
+    }
+    if let Some(v) = cost.total_cost.filter(|v| *v != 0.0) {
+        cost_doc.append("totalCost", v);
+    }
+    if let Some(v) = cost.selectivity.filter(|v| *v != 0.0) {
+        cost_doc.append("selectivity", v);
+    }
+    if let Some(v) = cost.correlation.filter(|v| *v != 0.0) {
+        cost_doc.append("correlation", v);
+    }
+    if let Some(v) = cost
+        .estimated_percent_index_pages_loaded
+        .filter(|v| *v != 0.0)
+    {
+        cost_doc.append("estimatedPercentIndexPagesLoaded", v);
+    }
+    if let Some(v) = cost.estimated_total_index_entries.filter(|v| *v != 0) {
+        cost_doc.append("estimatedTotalIndexEntries", smallest_from_i64(v));
+    }
+    if let Some(v) = cost.boundary_selectivity.filter(|v| *v != 0.0) {
+        cost_doc.append("boundarySelectivity", v);
+    }
+    if let Some(v) = cost
+        .estimated_data_pages_loaded_percent
+        .filter(|v| *v != 0.0)
+    {
+        cost_doc.append("estimatedDataPagesLoadedPercent", v);
+    }
+    if let Some(v) = cost.num_boundaries.filter(|v| *v != 0) {
+        cost_doc.append("numBoundaries", smallest_from_i64(v));
+    }
+    cost_doc
+}
+
+/// Recursively collects index costs from the plan tree, grouped by namespace.
+fn collect_index_costs(
+    plan: &ExplainPlan,
+    namespace: &str,
+    result: &mut Vec<(String, Vec<RawDocumentBuf>)>,
+) {
+    let effective_ns = plan.namespace_name.as_deref().unwrap_or(namespace);
+
+    if let Some(index_costs) = plan.index_costs.as_ref() {
+        let cost_docs: Vec<RawDocumentBuf> = index_costs.iter().map(build_index_cost_doc).collect();
+        if !cost_docs.is_empty() {
+            if let Some(entry) = result.iter_mut().find(|(ns, _)| ns == effective_ns) {
+                entry.1.extend(cost_docs);
+            } else {
+                result.push((effective_ns.to_string(), cost_docs));
+            }
+        }
+    }
+
+    if let Some(inner_plans) = plan.inner_plans.as_ref() {
+        for inner_plan in inner_plans {
+            collect_index_costs(inner_plan, effective_ns, result);
+        }
+    }
+
+    if let Some(distributed_plan) = plan.distributed_plan.as_ref() {
+        for task in &distributed_plan.job.tasks {
+            for worker_plans in &task.worker_plans {
+                for pg_explain in worker_plans {
+                    collect_index_costs(&pg_explain.plan, effective_ns, result);
+                }
+            }
+        }
+    }
+}
+
 fn skip_stage(plan: ExplainPlan, query_catalog: &QueryCatalog) -> ExplainPlan {
     if plan.node_type == "Subquery Scan"
         && plan.output.as_ref().is_some_and(|o| {
@@ -1771,6 +1871,10 @@ fn skip_stage(plan: ExplainPlan, query_catalog: &QueryCatalog) -> ExplainPlan {
     {
         let mut new_plan = plan.inner_plans.expect("Checked").remove(0);
         new_plan.output = plan.output;
+        if new_plan.namespace_name.is_none() {
+            new_plan.namespace_name = plan.namespace_name.clone();
+        }
+
         distribute_index_details(&mut new_plan, plan.index_details.clone());
         new_plan
     } else {

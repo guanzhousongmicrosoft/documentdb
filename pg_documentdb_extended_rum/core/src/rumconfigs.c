@@ -110,10 +110,6 @@ PGDLLEXPORT bool RumEnableSupportDeadIndexItems =
 PGDLLEXPORT bool RumEnableOrderedOperatorScans =
 	RUM_DEFAULT_ENABLE_ORDERED_OPERATOR_SCANS;
 
-/* rumselfuncs.c */
-#define RUM_DEFAULT_ENABLE_CUSTOM_COST_ESTIMATE true
-PGDLLEXPORT bool RumEnableCustomCostEstimate = RUM_DEFAULT_ENABLE_CUSTOM_COST_ESTIMATE;
-
 PGDLLEXPORT rum_format_log_hook rum_unredacted_log_emit_hook = NULL;
 
 
@@ -230,15 +226,6 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 		NULL,
 		&RumInjectPageSplitIncomplete,
 		RUM_DEFAULT_ENABLE_INJECT_PAGE_SPLIT_INCOMPLETE,
-		PGC_USERSET, 0,
-		NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enable_custom_cost_estimate", documentDBRumGucPrefix),
-		"Temporary flag to enable using the custom rum cost estimate logic",
-		NULL,
-		&RumEnableCustomCostEstimate,
-		RUM_DEFAULT_ENABLE_CUSTOM_COST_ESTIMATE,
 		PGC_USERSET, 0,
 		NULL, NULL, NULL);
 

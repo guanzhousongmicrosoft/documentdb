@@ -221,6 +221,7 @@ $cmd$);
                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                         
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=2 loops=1)
+   namespaceName: ordered_saop_scan_test.ordered_saop_index_coll
    indexName: a_1_b_1
    indexKey: {"a": 1,"b": 1}
    isMultiKey: false
@@ -231,7 +232,7 @@ $cmd$);
    scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 1)]
    ->  Index Scan using a_1_b_1 on documents_1202 collection (actual rows=2 loops=1)
          Index Cond: ((document @*= '{ "a" : [ { "$numberInt" : "5" }, { "$numberInt" : "16" }, { "$numberInt" : "2005" }, { "$numberInt" : "3001" } ] }'::bson) AND (document @*= '{ "b" : [ { "$numberInt" : "8" }, { "$numberInt" : "6" }, { "$numberInt" : "2005" }, { "$numberInt" : "2995" }, { "$numberInt" : "2996" }, { "$numberInt" : "4000" } ] }'::bson))
-(11 rows)
+(12 rows)
 
 -- TODO: This should not take 2999 loops
 SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
@@ -242,6 +243,7 @@ $cmd$);
                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                         
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=2 loops=1)
+   namespaceName: ordered_saop_scan_test.ordered_saop_index_coll
    indexName: a_1_b_1
    indexKey: {"a": 1,"b": 1}
    isMultiKey: false
@@ -254,7 +256,7 @@ $cmd$);
    ->  Index Scan using a_1_b_1 on documents_1202 collection (actual rows=2 loops=1)
          Index Cond: ((document @*= '{ "a" : [ { "$numberInt" : "5" }, { "$numberInt" : "16" }, { "$numberInt" : "2005" }, { "$numberInt" : "3001" } ] }'::bson) AND (document @*= '{ "b" : [ { "$numberInt" : "8" }, { "$numberInt" : "6" }, { "$numberInt" : "2005" }, { "$numberInt" : "2995" }, { "$numberInt" : "2996" }, { "$numberInt" : "4000" } ] }'::bson))
          Order By: (document OPERATOR(documentdb_api_internal.<>-|) '{ "a" : { "$numberInt" : "-1" } }'::bson)
-(13 rows)
+(14 rows)
 
 SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
     '{ "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } } }'::bson

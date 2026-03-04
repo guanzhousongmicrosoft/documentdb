@@ -21,6 +21,8 @@
 #include "math.h"
 #include <commands/explain.h>
 #include <access/gin.h>
+#include <parser/parsetree.h>
+#include <optimizer/pathnode.h>
 
 #if PG_VERSION_NUM >= 180000
 #include <commands/explain_state.h>
@@ -37,6 +39,7 @@
 #include "opclass/bson_gin_index_term.h"
 #include "opclass/bson_gin_private.h"
 #include "utils/documentdb_errors.h"
+#include "planner/documentdb_planner.h"
 #include "utils/error_utils.h"
 
 extern bool ForceUseIndexIfAvailable;
@@ -44,6 +47,9 @@ extern bool EnableIndexOrderbyPushdown;
 extern bool EnableIndexOnlyScan;
 extern bool EnableCompositeIndexPlanner;
 extern bool DisableExtendedRumExplainPlans;
+extern bool EnableOrderedCostEstimator;
+extern bool EnableExtendedExplainPlans;
+extern bool EnableExplainScanIndexCosts;
 
 extern const RumIndexArrayStateFuncs RoaringStateFuncs;
 
@@ -87,6 +93,30 @@ typedef struct DocumentDBRumIndexState
 
 	ScanDirection scanDirection;
 } DocumentDBRumIndexState;
+
+
+/* Collected data for index stats */
+typedef struct IndexCostsData
+{
+	Oid indexOid;
+	Oid relOid;
+	Cost indexStartupCost;
+	Cost indexTotalCost;
+	Selectivity indexSelectivity;
+	double indexCorrelation;
+	double indexPages;
+	double totalIndexPages;
+	double totalIndexEntries;
+	Selectivity boundarySelectivity;
+	int numBoundaryQuals;
+	double dataPagesProportionFetched;
+} IndexCostsData;
+
+
+#define MAX_EXPLAIN_COSTS_SIZE 100
+#define MAX_LOGGED_PLANS 8
+static IndexCostsData IndexExplainCosts[MAX_EXPLAIN_COSTS_SIZE] = { 0 };
+static int IndexExplainCostsIndex = 0;
 
 
 const char *DocumentdbRumCorePath = "$libdir/pg_documentdb_extended_rum_core";
@@ -171,6 +201,7 @@ typedef enum RumFunctionCatalog
 	RumFunction_RumGetMultiKeyStatus,
 	RumFunction_RumUpdateMultiKeyStatus,
 	RumFunction_SetUnredactedLogHook,
+	RumFunction_RumOrderedCostEstimate,
 	RumFunction_Max,
 } RumFunctionCatalog;
 
@@ -189,7 +220,8 @@ static const char *RumFunctionArray[RumFunction_Max] =
 	[RumFunction_CanRumIndexScanOrdered] = "can_rum_index_scan_ordered",
 	[RumFunction_RumGetMultiKeyStatus] = "rum_get_multi_key_status",
 	[RumFunction_RumUpdateMultiKeyStatus] = "rum_update_multi_key_status",
-	[RumFunction_SetUnredactedLogHook] = "SetRumUnredactedLogEmitHook"
+	[RumFunction_SetUnredactedLogHook] = "SetRumUnredactedLogEmitHook",
+	[RumFunction_RumOrderedCostEstimate] = "RumOrderedCostEstimate",
 };
 
 
@@ -209,6 +241,7 @@ static const char *DocumentDBRumFunctionArray[RumFunction_Max] =
 	[RumFunction_RumGetMultiKeyStatus] = "documentdb_rum_get_multi_key_status",
 	[RumFunction_RumUpdateMultiKeyStatus] = "documentdb_rum_update_multi_key_status",
 	[RumFunction_SetUnredactedLogHook] = "DocumentDBSetRumUnredactedLogEmitHook",
+	[RumFunction_RumOrderedCostEstimate] = "DocumentDBRumOrderedCostEstimate",
 };
 
 
@@ -225,10 +258,13 @@ PG_FUNCTION_INFO_V1(documentdb_rum_ts_join_pos);
 PG_FUNCTION_INFO_V1(documentdb_rum_extract_tsvector);
 
 
-extern void SetDocumentDBFunctionNames(const char *explainRumIndexFunc, const
-									   char *canRumIndexScanOrdered,
-									   const char *getMultiKeyStatus, const
-									   char *updateMultiKeyStatus);
+extern void SetDocumentDBFunctionNames(const char *explainRumIndexFunc,
+									   const char *canRumIndexScanOrdered,
+									   const char *getMultiKeyStatus,
+									   const char *updateMultiKeyStatus,
+									   const char *orderedCostEstimateFunc);
+
+static OrderedCostEstimateCoreFunc RumOrderedCostEstimate = NULL;
 
 
 /*
@@ -304,15 +340,17 @@ documentdb_rum_extract_tsvector(PG_FUNCTION_ARGS)
 
 
 void
-SetDocumentDBFunctionNames(const char *explainRumIndexFunc, const
-						   char *canRumIndexScanOrdered,
-						   const char *getMultiKeyStatus, const
-						   char *updateMultiKeyStatus)
+SetDocumentDBFunctionNames(const char *explainRumIndexFunc,
+						   const char *canRumIndexScanOrdered,
+						   const char *getMultiKeyStatus,
+						   const char *updateMultiKeyStatus,
+						   const char *orderedCostEstimateFunc)
 {
 	RumFunctionArray[RumFunction_TryExplainRumIndex] = explainRumIndexFunc;
 	RumFunctionArray[RumFunction_CanRumIndexScanOrdered] = canRumIndexScanOrdered;
 	RumFunctionArray[RumFunction_RumGetMultiKeyStatus] = getMultiKeyStatus;
 	RumFunctionArray[RumFunction_RumUpdateMultiKeyStatus] = updateMultiKeyStatus;
+	RumFunctionArray[RumFunction_RumOrderedCostEstimate] = orderedCostEstimateFunc;
 }
 
 
@@ -519,6 +557,16 @@ LoadRumRoutine(void)
 		RumIndexAmEntry.can_order_in_index_scans = scanOrderedFunc;
 	}
 
+	OrderedCostEstimateCoreFunc costEstimateFunc =
+		load_external_function(rumLibPath,
+							   functionCatalog[RumFunction_RumOrderedCostEstimate],
+							   !missingOk,
+							   ignoreLibFileHandle);
+	if (costEstimateFunc != NULL)
+	{
+		RumOrderedCostEstimate = costEstimateFunc;
+	}
+
 	void (*setRumUnredactedLogEmitHookFunc)(format_log_hook hook) = NULL;
 	setRumUnredactedLogEmitHookFunc =
 		load_external_function(rumLibPath,
@@ -554,9 +602,11 @@ LoadRumRoutine(void)
 							   !missingOk,
 							   ignoreLibFileHandle);
 
-	ereport(LOG, (errmsg("rum library has update func %d, get func %d",
-						 rum_index_multi_key_update_func != NULL,
-						 rum_index_multi_key_get_func != NULL)));
+	ereport(LOG, (errmsg(
+					  "rum library has update func %d, get func %d, cost estimate func %d",
+					  rum_index_multi_key_update_func != NULL,
+					  rum_index_multi_key_get_func != NULL,
+					  RumOrderedCostEstimate != NULL)));
 	loaded_rum_routine = true;
 	pfree(indexRoutine);
 }
@@ -586,7 +636,8 @@ extension_rumcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	extension_rumcostestimate_core(root, path, loop_count, indexStartupCost,
 								   indexTotalCost,
 								   indexSelectivity, indexCorrelation, indexPages,
-								   &rum_index_routine, forceIndexPushdownCostToZero);
+								   &rum_index_routine, forceIndexPushdownCostToZero,
+								   RumOrderedCostEstimate);
 }
 
 
@@ -595,7 +646,8 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 							   Cost *indexStartupCost, Cost *indexTotalCost,
 							   Selectivity *indexSelectivity, double *indexCorrelation,
 							   double *indexPages, IndexAmRoutine *coreRoutine,
-							   bool forceIndexPushdownCostToZero)
+							   bool forceIndexPushdownCostToZero,
+							   OrderedCostEstimateCoreFunc orderedCostEstimateCoreFunc)
 {
 	if (!IsIndexIsValidForQuery(path))
 	{
@@ -611,8 +663,14 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 		return;
 	}
 
-	if (IsCompositeOpFamilyOid(path->indexinfo->relam,
-							   path->indexinfo->opfamily[0]))
+	double totalNumTuples = 0;
+	Selectivity boundarySelectivity = 0;
+	int numBoundaryQuals = 0;
+	double dataPagesProportionFetched = 0;
+
+	bool isCompositeOpFamily = IsCompositeOpFamilyOid(path->indexinfo->relam,
+													  path->indexinfo->opfamily[0]);
+	if (isCompositeOpFamily)
 	{
 		bool firstColumnSpecified = TraverseIndexPathForCompositeIndex(path, root);
 
@@ -632,9 +690,25 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 		}
 	}
 
-	coreRoutine->amcostestimate(
-		root, path, loop_count, indexStartupCost, indexTotalCost,
-		indexSelectivity, indexCorrelation, indexPages);
+	if (EnableCompositeIndexPlanner && EnableOrderedCostEstimator &&
+		orderedCostEstimateCoreFunc != NULL && isCompositeOpFamily)
+	{
+		orderedCostEstimateCoreFunc(root, path, loop_count, indexStartupCost,
+									indexTotalCost, indexSelectivity,
+									indexCorrelation,
+									indexPages, &totalNumTuples,
+									&boundarySelectivity, &numBoundaryQuals,
+									&dataPagesProportionFetched,
+									ExtractBoundaryQualsForOrderedIndexPath);
+	}
+	else
+	{
+		totalNumTuples = path->indexinfo->tuples;
+		coreRoutine->amcostestimate(
+			root, path, loop_count, indexStartupCost, indexTotalCost,
+			indexSelectivity, indexCorrelation, indexPages);
+		boundarySelectivity = *indexSelectivity;
+	}
 
 	/* Do a pass to check for text indexes (We force push down with cost == 0) */
 	if (IsTextIndexMatch(path))
@@ -646,6 +720,19 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 	{
 		*indexTotalCost = 0;
 		*indexStartupCost = 0;
+	}
+
+	if (EnableExplainScanIndexCosts && EnableExtendedExplainPlans)
+	{
+		RangeTblEntry *rte = planner_rt_fetch(path->indexinfo->rel->relid, root);
+		RecordCostEstimateForIndex(path->indexinfo->indexoid,
+								   rte->relid,
+								   *indexStartupCost,
+								   *indexTotalCost,
+								   *indexSelectivity, *indexCorrelation, *indexPages,
+								   path->indexinfo->pages, totalNumTuples,
+								   boundarySelectivity, numBoundaryQuals,
+								   dataPagesProportionFetched);
 	}
 }
 
@@ -1579,4 +1666,175 @@ ExplainRegularIndexScan(IndexScanDesc scan, struct ExplainState *es)
 		/* See if there's a hook to explain more in this index */
 		TryExplainByIndexAm(scan, es);
 	}
+}
+
+
+void
+RecordCostEstimateForIndex(Oid indexOid, Oid relOid, Cost indexStartupCost, Cost
+						   indexTotalCost,
+						   Selectivity indexSelectivity,
+						   double indexCorrelation, double indexPages, double
+						   totalIndexPages, double totalIndexTuples,
+						   double boundarySelectivity, int numBoundaryQuals, double
+						   dataPagesProportionFetched)
+{
+	if (!EnableExtendedExplainPlans || !EnableExplainScanIndexCosts ||
+		!EnableCompositeIndexPlanner)
+	{
+		return;
+	}
+
+	IndexCostsData *costData = NULL;
+	for (int i = 0; i < IndexExplainCostsIndex; i++)
+	{
+		if (IndexExplainCosts[i].indexOid == indexOid)
+		{
+			/* We already have an entry for this index - update it with the new cost */
+			costData = &IndexExplainCosts[i];
+			break;
+		}
+	}
+
+	if (costData == NULL && IndexExplainCostsIndex < MAX_EXPLAIN_COSTS_SIZE)
+	{
+		costData = &IndexExplainCosts[IndexExplainCostsIndex++];
+	}
+
+	if (costData != NULL)
+	{
+		costData->indexOid = indexOid;
+		costData->relOid = relOid;
+		costData->indexStartupCost = indexStartupCost;
+		costData->indexTotalCost = indexTotalCost;
+		costData->indexSelectivity = indexSelectivity;
+		costData->indexCorrelation = indexCorrelation;
+		costData->indexPages = indexPages;
+		costData->totalIndexPages = totalIndexPages;
+		costData->totalIndexEntries = totalIndexTuples;
+		costData->boundarySelectivity = boundarySelectivity;
+		costData->numBoundaryQuals = numBoundaryQuals;
+		costData->dataPagesProportionFetched = dataPagesProportionFetched;
+	}
+}
+
+
+static int32_t
+CompareIndexCostsByTotalCost(const void *left, const void *right)
+{
+	IndexCostsData *leftData = (IndexCostsData *) left;
+	IndexCostsData *rightData = (IndexCostsData *) right;
+
+	/* Sort by cost ascending */
+	return leftData->indexTotalCost - rightData->indexTotalCost;
+}
+
+
+void
+LogReportedIndexCosts(Oid relOid, struct ExplainState *es)
+{
+	if (!EnableExtendedExplainPlans || !EnableCompositeIndexPlanner ||
+		!EnableExplainScanIndexCosts)
+	{
+		return;
+	}
+
+	if (IndexExplainCostsIndex >= MAX_EXPLAIN_COSTS_SIZE)
+	{
+		IndexExplainCostsIndex = MAX_EXPLAIN_COSTS_SIZE;
+	}
+
+	/* Sort the costs by total cost ascending so that we report the most relevant plans first */
+	qsort(IndexExplainCosts, IndexExplainCostsIndex, sizeof(IndexCostsData),
+		  CompareIndexCostsByTotalCost);
+
+	/* Log the costs that we have reported for index scans */
+	StringInfoData buf;
+	initStringInfo(&buf);
+	int numPlansLogged = 0;
+	for (int i = 0; i < IndexExplainCostsIndex && i < MAX_EXPLAIN_COSTS_SIZE &&
+		 numPlansLogged < MAX_LOGGED_PLANS; i++)
+	{
+		if (IndexExplainCosts[i].indexOid == InvalidOid)
+		{
+			continue;
+		}
+
+		if (IndexExplainCosts[i].relOid != relOid)
+		{
+			continue;
+		}
+
+		const char *indexName = ExtensionExplainGetIndexName(
+			IndexExplainCosts[i].indexOid);
+		if (indexName == NULL)
+		{
+			continue;
+		}
+
+		numPlansLogged++;
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf,
+							 "(startup cost=%.3f, total cost=%.3f, selectivity=%g, correlation=%.3f, estimated index pages loaded=%.2f%%, estimated total index entries=%.0f, boundary selectivity=%g, num boundaries=%d, estimated data pages loaded=%.2f%%)",
+							 IndexExplainCosts[i].indexStartupCost,
+							 IndexExplainCosts[i].indexTotalCost,
+							 IndexExplainCosts[i].indexSelectivity,
+							 IndexExplainCosts[i].indexCorrelation,
+							 IndexExplainCosts[i].indexPages /
+							 IndexExplainCosts[i].totalIndexPages * 100,
+							 IndexExplainCosts[i].totalIndexEntries,
+							 IndexExplainCosts[i].boundarySelectivity,
+							 IndexExplainCosts[i].numBoundaryQuals,
+							 IndexExplainCosts[i].dataPagesProportionFetched * 100);
+			ExplainPropertyText(indexName, buf.data, es);
+		}
+		else
+		{
+			ExplainOpenGroup("indexScanCost", NULL, true, es);
+			ExplainPropertyText("indexName", indexName, es);
+			ExplainPropertyFloat("startupCost", "", IndexExplainCosts[i].indexStartupCost,
+								 3, es);
+			ExplainPropertyFloat("totalCost", "", IndexExplainCosts[i].indexTotalCost, 3,
+								 es);
+			ExplainPropertyFloat("selectivity", "", IndexExplainCosts[i].indexSelectivity,
+								 9, es);
+			if (IndexExplainCosts[i].indexCorrelation != 0)
+			{
+				ExplainPropertyFloat("correlation", "",
+									 IndexExplainCosts[i].indexCorrelation, 3, es);
+			}
+
+			double percentIndexPagesLoaded = IndexExplainCosts[i].totalIndexPages == 0 ?
+											 0 :
+											 IndexExplainCosts[i].indexPages /
+											 IndexExplainCosts[i].totalIndexPages * 100;
+			ExplainPropertyFloat("estimatedPercentIndexPagesLoaded", "",
+								 percentIndexPagesLoaded,
+								 2, es);
+			ExplainPropertyFloat("estimatedTotalIndexEntries", "",
+								 IndexExplainCosts[i].totalIndexEntries, 0, es);
+			ExplainPropertyFloat("boundarySelectivity", "",
+								 IndexExplainCosts[i].boundarySelectivity, 9, es);
+			ExplainPropertyInteger("numBoundaries", "",
+								   IndexExplainCosts[i].numBoundaryQuals, es);
+
+			if (IndexExplainCosts[i].dataPagesProportionFetched >= 0)
+			{
+				ExplainPropertyFloat("estimatedDataPagesLoadedPercent", "",
+									 IndexExplainCosts[i].dataPagesProportionFetched *
+									 100, 2, es);
+			}
+
+			ExplainCloseGroup("indexScanCost", NULL, true, es);
+		}
+	}
+}
+
+
+void
+ResetReportedIndexCosts(void)
+{
+	IndexExplainCostsIndex = 0;
+	memset(IndexExplainCosts, 0, sizeof(IndexExplainCosts));
 }

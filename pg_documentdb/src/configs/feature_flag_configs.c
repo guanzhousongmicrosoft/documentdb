@@ -83,6 +83,9 @@ bool DefaultUseCompositeOpClass = DEFAULT_USE_NEW_COMPOSITE_INDEX_OPCLASS;
 #define DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER false
 bool EnableCompositeIndexPlanner = DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER;
 
+#define DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR true
+bool EnableOrderedCostEstimator = DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR;
+
 /* Ready to remove */
 #define DEFAULT_ENABLE_INDEX_ORDERBY_PUSHDOWN true
 bool EnableIndexOrderbyPushdown = DEFAULT_ENABLE_INDEX_ORDERBY_PUSHDOWN;
@@ -132,6 +135,12 @@ bool EnableCompositeReducedCorrelatedTerms = DEFAULT_ENABLE_REDUCED_CORRELATED_T
 #define DEFAULT_ENABLE_UNIQUE_REDUCED_CORRELATED_TERMS false
 bool EnableUniqueCompositeReducedCorrelatedTerms =
 	DEFAULT_ENABLE_UNIQUE_REDUCED_CORRELATED_TERMS;
+
+#define DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS true
+bool EnableExplainScanIndexCosts = DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS;
+
+#define DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME true
+bool EnableExplainScanNamespaceName = DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME;
 
 /* Longer term feature flag to track older cluster data: Move to testing_configs when convenient */
 #define DEFAULT_ENABLE_COMPOSITE_SHARD_DOCUMENT_TERMS true
@@ -557,6 +566,13 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
+		psprintf("%s.enableOrderedCostEstimator", newGucPrefix),
+		gettext_noop(
+			"Whether to enable the new ordered cost estimator for composite indexes. Requires enableCompositeIndexPlanner"),
+		NULL, &EnableOrderedCostEstimator, DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
 		psprintf("%s.enableIndexOrderbyPushdown", newGucPrefix),
 		gettext_noop(
 			"Whether to enable the sort on the new experimental composite index opclass"),
@@ -881,6 +897,22 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to always create TTL indexes as composite indexes by default."),
 		NULL, &CreateTTLIndexAsCompositeByDefault,
 		DEFAULT_CREATE_TTL_INDEX_AS_COMPOSITE,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableExplainScanIndexCosts", newGucPrefix),
+		gettext_noop(
+			"Whether to include index costs in explain output for index scans. requires enableextendedexplainplans"),
+		NULL, &EnableExplainScanIndexCosts,
+		DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableExplainScanNamespaceName", newGucPrefix),
+		gettext_noop(
+			"Whether to include namespace name in explain output for index scans. requires enableextendedexplainplans"),
+		NULL, &EnableExplainScanNamespaceName,
+		DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

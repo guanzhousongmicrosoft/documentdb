@@ -22,6 +22,7 @@
 #include <nodes/nodeFuncs.h>
 #include <catalog/pg_am.h>
 #include <optimizer/paths.h>
+#include <parser/parsetree.h>
 #include <optimizer/pathnode.h>
 #include "nodes/pg_list.h"
 #include <pg_config_manual.h>
@@ -30,6 +31,8 @@
 #include <optimizer/cost.h>
 #include <access/genam.h>
 #include <utils/index_selfuncs.h>
+#include <access/gin.h>
+#include <catalog/pg_collation.h>
 
 #include "metadata/index.h"
 #include "query/query_operator.h"
@@ -38,6 +41,7 @@
 #include "planner/mongo_query_operator.h"
 #include "opclass/bson_index_support.h"
 #include "opclass/bson_gin_index_mgmt.h"
+#include "opclass/bson_gin_composite_scan.h"
 #include "opclass/bson_text_gin.h"
 #include "metadata/metadata_cache.h"
 #include "utils/documentdb_errors.h"
@@ -49,6 +53,7 @@
 #include "query/bson_dollar_selectivity.h"
 #include "planner/documentdb_planner.h"
 #include "aggregation/bson_query_common.h"
+#include "index_am/documentdb_rum.h"
 
 typedef struct
 {
@@ -194,6 +199,8 @@ typedef struct IndexElemmatchState
 	List *pathStates;
 } IndexElemmatchState;
 
+extern bool EnableExtendedExplainPlans;
+extern bool EnableExplainScanIndexCosts;
 
 /* --------------------------------------------------------- */
 /* Forward declaration */
@@ -1855,6 +1862,17 @@ documentdb_btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 
 	btcostestimate(root, path, loop_count, indexStartupCost, indexTotalCost,
 				   indexSelectivity, indexCorrelation, indexPages);
+
+	if (EnableExtendedExplainPlans && EnableExplainScanIndexCosts)
+	{
+		RangeTblEntry *rte = planner_rt_fetch(path->indexinfo->rel->relid, root);
+		RecordCostEstimateForIndex(path->indexinfo->indexoid, rte->relid,
+								   *indexStartupCost,
+								   *indexTotalCost, *indexSelectivity,
+								   *indexCorrelation, *indexPages,
+								   path->indexinfo->pages, path->indexinfo->tuples,
+								   *indexSelectivity, 0, 0);
+	}
 }
 
 
@@ -2350,14 +2368,143 @@ PopulateQueryPathAndValueFromOpExpr(OpExpr *opExpr, const char **queryPathString
 }
 
 
+static void
+IndexStrategyClassify(int32_t indexStrategy, bool *equalityPrefixes,
+					  bool *nonEqualityPrefixes,
+					  Oid opNo, bool isPartialFilterExpr, const
+					  bson_value_t *optionalQueryValue,
+					  int8_t *orderScanDirection, int32_t *outputIndexStrategy)
+{
+	*outputIndexStrategy = indexStrategy;
+	switch (indexStrategy)
+	{
+		case BSON_INDEX_STRATEGY_DOLLAR_EQUAL:
+		{
+			*equalityPrefixes = true;
+			break;
+		}
+
+		case BSON_INDEX_STRATEGY_DOLLAR_GREATER_EQUAL:
+		{
+			/* this is not a full scan (only exists: true is allowed) */
+			if (optionalQueryValue->value_type != BSON_TYPE_MINKEY)
+			{
+				*nonEqualityPrefixes = true;
+			}
+
+			break;
+		}
+
+		case BSON_INDEX_STRATEGY_DOLLAR_LESS_EQUAL:
+		{
+			/* this is not a full scan (only <= MaxKey is allowed) */
+			if (optionalQueryValue->value_type != BSON_TYPE_MAXKEY)
+			{
+				*nonEqualityPrefixes = true;
+			}
+
+			break;
+		}
+
+		case BSON_INDEX_STRATEGY_INVALID:
+		{
+			if (opNo == BsonRangeMatchOperatorOid() &&
+				optionalQueryValue->value_type != BSON_TYPE_EOD)
+			{
+				*outputIndexStrategy = BSON_INDEX_STRATEGY_DOLLAR_RANGE;
+				DollarRangeParams rangeParams = { 0 };
+				InitializeQueryDollarRange(optionalQueryValue, &rangeParams);
+
+				if (rangeParams.isElemMatch)
+				{
+					ElemMatchIndexOpStrategyClassify(&rangeParams, outputIndexStrategy,
+													 equalityPrefixes,
+													 nonEqualityPrefixes);
+				}
+				else if (!rangeParams.isFullScan)
+				{
+					*nonEqualityPrefixes = true;
+				}
+
+				*orderScanDirection = rangeParams.orderScanDirection;
+			}
+			else if (isPartialFilterExpr && opNo == BsonEqualMatchRuntimeOperatorId())
+			{
+				*equalityPrefixes = true;
+			}
+			else
+			{
+				*nonEqualityPrefixes = true;
+			}
+
+			break;
+		}
+
+		default:
+		{
+			/* Track the filters as being a non-equality (range predicate) */
+			*nonEqualityPrefixes = true;
+			break;
+		}
+	}
+}
+
+
+void
+ElemMatchIndexOpStrategyClassify(DollarRangeParams *params,
+								 int32_t *queryStrategy,
+								 bool *equalityPrefixes,
+								 bool *nonEqualityPrefixes)
+{
+	bson_iter_t elemMatchIter;
+	bool hasStrategies = false;
+	BsonValueInitIterator(&params->elemMatchValue, &elemMatchIter);
+	while (bson_iter_next(&elemMatchIter))
+	{
+		bson_iter_t innerIter;
+		if (bson_iter_recurse(&elemMatchIter, &innerIter))
+		{
+			BsonIndexStrategy strat = BSON_INDEX_STRATEGY_INVALID;
+			bson_value_t queryValue = { 0 };
+			while (bson_iter_next(&innerIter))
+			{
+				const char *key = bson_iter_key(&innerIter);
+				const bson_value_t *value = bson_iter_value(&innerIter);
+				if (strcmp(key, "op") == 0)
+				{
+					strat = (BsonIndexStrategy) BsonValueAsInt32(value);
+				}
+				else if (strcmp(key, "value") == 0)
+				{
+					queryValue = *value;
+				}
+			}
+
+			bool isPartialFilterExpr = false;
+			int8_t indexSortDirection = 0;
+			hasStrategies = true;
+			IndexStrategyClassify(strat, equalityPrefixes, nonEqualityPrefixes,
+								  InvalidOid, isPartialFilterExpr, &queryValue,
+								  &indexSortDirection, queryStrategy);
+		}
+	}
+
+	if (!hasStrategies)
+	{
+		*nonEqualityPrefixes = true;
+	}
+}
+
+
 static int32_t
 UpdateEqualityPrefixesAndGetSortOrder(const char *queryPath, bytea *opClassOptions,
 									  OpExpr *expr, bool isPartialFilterExpr,
-									  bson_value_t *optionalQueryValue,
+									  const bson_value_t *optionalQueryValue,
 									  bool equalityPrefixes[INDEX_MAX_KEYS],
 									  bool nonEqualityPrefixes[INDEX_MAX_KEYS],
 									  int32_t *outputColumnNumber,
-									  int8_t *indexSortDirection)
+									  int8_t *indexSortDirection,
+									  int32_t *indexStrategy)
 {
 	int columnNumber = GetCompositeOpClassColumnNumber(queryPath,
 													   opClassOptions,
@@ -2371,75 +2518,53 @@ UpdateEqualityPrefixesAndGetSortOrder(const char *queryPath, bytea *opClassOptio
 		return 0;
 	}
 
-	int32_t orderScanDirection = 0;
+	int8_t orderScanDirection = 0;
 	const MongoIndexOperatorInfo *info =
 		GetMongoIndexOperatorByPostgresOperatorId(expr->opno);
-	switch (info->indexStrategy)
-	{
-		case BSON_INDEX_STRATEGY_DOLLAR_EQUAL:
-		{
-			equalityPrefixes[columnNumber] = true;
-			break;
-		}
-
-		case BSON_INDEX_STRATEGY_DOLLAR_GREATER_EQUAL:
-		{
-			/* this is not a full scan (only exists: true is allowed) */
-			if (optionalQueryValue->value_type != BSON_TYPE_MINKEY)
-			{
-				nonEqualityPrefixes[columnNumber] = true;
-			}
-
-			break;
-		}
-
-		case BSON_INDEX_STRATEGY_DOLLAR_LESS_EQUAL:
-		{
-			/* this is not a full scan (only <= MaxKey is allowed) */
-			if (optionalQueryValue->value_type != BSON_TYPE_MAXKEY)
-			{
-				nonEqualityPrefixes[columnNumber] = true;
-			}
-
-			break;
-		}
-
-		case BSON_INDEX_STRATEGY_INVALID:
-		{
-			if (expr->opno == BsonRangeMatchOperatorOid() &&
-				optionalQueryValue->value_type != BSON_TYPE_EOD)
-			{
-				DollarRangeParams rangeParams = { 0 };
-				InitializeQueryDollarRange(optionalQueryValue, &rangeParams);
-				if (!rangeParams.isFullScan)
-				{
-					nonEqualityPrefixes[columnNumber] = true;
-				}
-
-				orderScanDirection = rangeParams.orderScanDirection;
-			}
-			else if (isPartialFilterExpr && expr->opno ==
-					 BsonEqualMatchRuntimeOperatorId())
-			{
-				equalityPrefixes[columnNumber] = true;
-			}
-			else
-			{
-				nonEqualityPrefixes[columnNumber] = true;
-			}
-
-			break;
-		}
-
-		default:
-		{
-			/* Track the filters as being a non-equality (range predicate) */
-			nonEqualityPrefixes[columnNumber] = true;
-			break;
-		}
-	}
+	IndexStrategyClassify(info->indexStrategy, &equalityPrefixes[columnNumber],
+						  &nonEqualityPrefixes[columnNumber],
+						  expr->opno, isPartialFilterExpr, optionalQueryValue,
+						  &orderScanDirection, indexStrategy);
 
 	return orderScanDirection;
+}
+
+
+static int
+ProcessSingleCompositeFilter(Node *predQual, bytea *opClassOptions,
+							 bool equalityPrefixes[INDEX_MAX_KEYS],
+							 bool nonEqualityPrefixes[INDEX_MAX_KEYS],
+							 int32_t *indexStrategy)
+{
+	/* walk the index predicates and check if they match the index */
+	if (!IsA(predQual, OpExpr))
+	{
+		return -1;
+	}
+
+	OpExpr *expr = (OpExpr *) predQual;
+
+	const char *queryPath = NULL;
+	bson_value_t optionalQueryValue = { 0 };
+	if (!PopulateQueryPathAndValueFromOpExpr(expr, &queryPath, &optionalQueryValue))
+	{
+		return -1;
+	}
+
+	if (queryPath == NULL)
+	{
+		return -1;
+	}
+
+	int columnNumber = -1;
+	int8_t indexSortDirection = -1;
+	bool isPartialFilterExpr = true;
+	UpdateEqualityPrefixesAndGetSortOrder(
+		queryPath, opClassOptions, expr, isPartialFilterExpr,
+		&optionalQueryValue, equalityPrefixes, nonEqualityPrefixes, &columnNumber,
+		&indexSortDirection, indexStrategy);
+
+	return columnNumber;
 }
 
 
@@ -2469,32 +2594,15 @@ ProcessCompositePartialFilter(List *indexPredicate, bytea *opClassOptions,
 		Node *predQual = (Node *) lfirst(cell);
 
 		/* walk the index predicates and check if they match the index */
-		if (!IsA(predQual, OpExpr))
+		int indexStrategyIgnore = 0;
+		int columnNumber = ProcessSingleCompositeFilter(predQual, opClassOptions,
+														equalityPrefixes,
+														nonEqualityPrefixes,
+														&indexStrategyIgnore);
+		if (columnNumber < 0)
 		{
 			continue;
 		}
-
-		OpExpr *expr = (OpExpr *) predQual;
-
-		const char *queryPath = NULL;
-		bson_value_t optionalQueryValue = { 0 };
-		if (!PopulateQueryPathAndValueFromOpExpr(expr, &queryPath, &optionalQueryValue))
-		{
-			continue;
-		}
-
-		if (queryPath == NULL)
-		{
-			continue;
-		}
-
-		int columnNumber = -1;
-		int8_t indexSortDirection = -1;
-		bool isPartialFilterExpr = true;
-		UpdateEqualityPrefixesAndGetSortOrder(
-			queryPath, opClassOptions, expr, isPartialFilterExpr,
-			&optionalQueryValue, equalityPrefixes, nonEqualityPrefixes, &columnNumber,
-			&indexSortDirection);
 
 		if (columnNumber == 0)
 		{
@@ -2566,11 +2674,11 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 			int columnNumber = -1;
 			int8_t indexSortDirection = 0;
 			bool isPartialFilterExpr = false;
+			int32_t indexStrategy = BSON_INDEX_STRATEGY_INVALID;
 			int8_t orderScanDirection = UpdateEqualityPrefixesAndGetSortOrder(
 				queryPath, indexPath->indexinfo->opclassoptions[0],
 				expr, isPartialFilterExpr, &optionalQueryValue, equalityPrefixes,
-				nonEqualityPrefixes, &columnNumber, &indexSortDirection);
-
+				nonEqualityPrefixes, &columnNumber, &indexSortDirection, &indexStrategy);
 			if (columnNumber < 0)
 			{
 				continue;
@@ -2643,6 +2751,127 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 
 	/* Valid if we pushed some order by or a filter path was found on at least the first column */
 	return firstFilterColumnFound || indexPath->indexorderbys != NIL;
+}
+
+
+/*
+ * Extracts the boundary qualifiers for an index path. This basically includes
+ * all the equality prefixes fully specified for a path and the *first* inequality prefix.
+ * These will be the quals that will filter out portions of the index in a composite index.
+ * e.g. given an index a, b, c, d
+ * for a query that specifies a && d -> the boundary is "a"
+ * for a query that has EQ(A), RANGE(B), EQ(C) -> the boundary is "A, RANGE(B)"
+ * for a query that has RANGE(A), EQ(B), EQ(C) -> the boundary is "RANGE(A)"
+ * for a query that has EQ(A), EQ(B), RANGE(C) -> the boundary is "EQ(A), EQ(B), RANGE(C)"
+ * for a query that has EQ(A), EQ(C) -> the boundary is "EQ(A)"
+ */
+List *
+ExtractBoundaryQualsForOrderedIndexPath(IndexPath *indexPath, int *num_sa_scans)
+{
+	List *validRestrictInfos[INDEX_MAX_KEYS] = { 0 };
+	bool equalityPrefixesGlobal[INDEX_MAX_KEYS] = { 0 };
+	int32_t numSaopScans[INDEX_MAX_KEYS] = { 0 };
+	int maxGlobalColumnNumber = -1;
+	*num_sa_scans = 1;
+
+	ListCell *cell;
+	foreach(cell, indexPath->indexclauses)
+	{
+		bool equalityPrefixes[INDEX_MAX_KEYS] = { 0 };
+		bool nonEqualityPrefixes[INDEX_MAX_KEYS] = { 0 };
+
+		IndexClause *iclause = (IndexClause *) lfirst(cell);
+		ListCell *lc2;
+		foreach(lc2, iclause->indexquals)
+		{
+			RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc2);
+			Expr *clause = rinfo->clause;
+
+			if (!IsA(clause, OpExpr))
+			{
+				continue;
+			}
+
+			Expr *clauseArg = lsecond(((OpExpr *) clause)->args);
+			if (!IsA(clauseArg, Const))
+			{
+				/* We only support const args for now */
+				continue;
+			}
+
+			Const *clauseConst = (Const *) clauseArg;
+			if (clauseConst->constisnull)
+			{
+				/* We don't support null const args for now */
+				continue;
+			}
+
+			int32_t indexStrategy = 0;
+			int columnNumber = ProcessSingleCompositeFilter(
+				(Node *) clause, indexPath->indexinfo->opclassoptions[iclause->indexcol],
+				equalityPrefixes, nonEqualityPrefixes, &indexStrategy);
+			if (columnNumber < 0)
+			{
+				continue;
+			}
+
+			maxGlobalColumnNumber = Max(maxGlobalColumnNumber, columnNumber);
+
+			validRestrictInfos[columnNumber] = lappend(validRestrictInfos[columnNumber],
+													   rinfo);
+			if (indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_IN)
+			{
+				equalityPrefixesGlobal[columnNumber] = true;
+				numSaopScans[columnNumber]++;
+			}
+			else if (indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_NOT_IN)
+			{
+				numSaopScans[columnNumber]++;
+			}
+
+			if (equalityPrefixes[columnNumber])
+			{
+				equalityPrefixesGlobal[columnNumber] = true;
+			}
+		}
+	}
+
+	/* Now walk the paths from left to right, and only allow clauses until the first non-equality/range/missing */
+	int i;
+	List *finalBoundaryClauses = NIL;
+	for (i = 0; i <= maxGlobalColumnNumber; i++)
+	{
+		/* This path has no valid indexes, subsequent paths cannot be considered */
+		if (validRestrictInfos[i] == NIL)
+		{
+			break;
+		}
+
+		/* This path is valid for consideration with boundary clauses */
+		finalBoundaryClauses = list_concat(finalBoundaryClauses, validRestrictInfos[i]);
+
+		*num_sa_scans += numSaopScans[i];
+
+		list_free(validRestrictInfos[i]);
+		validRestrictInfos[i] = NIL;
+
+		/* If the current path does not have an equality match then subsequent paths cannot be considered */
+		if (!equalityPrefixesGlobal[i])
+		{
+			break;
+		}
+	}
+
+	for (; i <= maxGlobalColumnNumber; i++)
+	{
+		/* Free any remaining clauses that are not being considered */
+		if (validRestrictInfos[i] != NIL)
+		{
+			list_free(validRestrictInfos[i]);
+		}
+	}
+
+	return finalBoundaryClauses;
 }
 
 

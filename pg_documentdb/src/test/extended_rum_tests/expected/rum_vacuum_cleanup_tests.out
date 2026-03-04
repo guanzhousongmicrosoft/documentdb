@@ -50,6 +50,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=1000 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -62,7 +63,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
                Heap Blocks: exact=10
                ->  Bitmap Index Scan on a_1 (actual rows=1000 loops=1)
                      Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-(14 rows)
+(15 rows)
 
 -- drop all the rows now
 reset documentdb.forceDisableSeqScan;
@@ -79,6 +80,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 ------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=9 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -91,7 +93,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
                Heap Blocks: exact=10
                ->  Bitmap Index Scan on a_1 (actual rows=1000 loops=1)
                      Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-(14 rows)
+(15 rows)
 
 -- vacuum the collection
 SELECT FORMAT('VACUUM (FREEZE ON, INDEX_CLEANUP ON, DISABLE_PAGE_SKIPPING ON, PARALLEL 0) documentdb_data.documents_%s;', :vacuum_col) \gexec
@@ -102,6 +104,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=9 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -112,7 +115,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=9 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 reset documentdb.forceDisableSeqScan;
 SELECT COUNT(documentdb_api.insert_one('pvacuum_db', 'pclean',  FORMAT('{ "_id": %s, "a": %s }', i, i)::bson)) FROM generate_series(1001, 2000) AS i;
@@ -137,6 +140,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 --------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=18 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -147,7 +151,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=18 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 -- repeat one more time
 reset documentdb.forceDisableSeqScan;
@@ -173,6 +177,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 --------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=27 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -183,7 +188,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=27 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 reset documentdb.forceDisableSeqScan;
 -- insert some entries to create posting trees.
@@ -206,6 +211,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 ------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=9 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -218,7 +224,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
                Heap Blocks: exact=29
                ->  Bitmap Index Scan on a_1 (actual rows=3027 loops=1)
                      Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-(14 rows)
+(15 rows)
 
 -- now set the guc to clean up entry pages
 set documentdb_rum.prune_rum_empty_pages to on;
@@ -248,6 +254,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=9 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -258,7 +265,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=9 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 -- introduce dead pages and use the repair functions to clean up the index.
 reset documentdb.forceDisableSeqScan;
@@ -277,6 +284,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=3000 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -289,7 +297,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
                Heap Blocks: exact=29
                ->  Bitmap Index Scan on a_1 (actual rows=3000 loops=1)
                      Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-(14 rows)
+(15 rows)
 
 reset documentdb.forceDisableSeqScan;
 -- delete 3000 docs
@@ -310,6 +318,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=0 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -320,7 +329,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 reset documentdb.forceDisableSeqScan;
 -- call the repair function.
@@ -339,6 +348,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=0 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -349,7 +359,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 reset documentdb.forceDisableSeqScan;
 set documentdb_rum.prune_rum_empty_pages to on;
@@ -366,6 +376,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
 -------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
    ->  Custom Scan (DocumentDBApiExplainQueryScan) (actual rows=0 loops=1)
+         namespaceName: pvacuum_db.pclean
          indexName: a_1
          indexKey: {"a": 1}
          isMultiKey: false
@@ -376,7 +387,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          ->  Index Only Scan using a_1 on documents_401 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
                Heap Fetches: 0
-(12 rows)
+(13 rows)
 
 reset documentdb.forceDisableSeqScan;
 -- test multi-level posting tree cleanup

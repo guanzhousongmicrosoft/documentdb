@@ -68,6 +68,27 @@
         "winningPlan": {
           "$ref": "#/$defs/QueryPlanStage",
           "description": "The execution plan selected by the query optimizer, represented as a recursive tree of stages."
+        },
+        "indexCosts": {
+          "type": "array",
+          "description": "Estimated index cost information collected from all plan nodes, grouped by namespace. Written after winningPlan. Only present when the PostgreSQL explain reports IndexCosts (controlled by the enableExplainScanIndexCosts feature flag).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "description": "The 'db.collection' namespace that these index costs apply to. Derived from the plan node's namespaceName field if present, otherwise from the top-level collection path."
+              },
+              "costs": {
+                "type": "array",
+                "description": "Array of per-index cost estimates for this namespace.",
+                "items": {
+                  "$ref": "#/$defs/IndexCost"
+                }
+              }
+            },
+            "required": ["namespace", "costs"]
+          }
         }
       },
       "required": ["winningPlan"]
@@ -413,9 +434,9 @@
       "type": "object",
       "description": "Per-index execution statistics for a stage that uses an index.",
       "properties": {
-        "indexName": {
+        "indexKeyString": {
           "type": "string",
-          "description": "Name of the index."
+          "description": "Key used for the index lookup."
         },
         "scanLoops": {
           "type": "integer",
@@ -450,6 +471,52 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Details of the scan keys used for the index lookup."
+        }
+      }
+    },
+    "IndexCost": {
+      "type": "object",
+      "description": "Estimated cost information for a single index, as reported by the PostgreSQL planner. Only present when the enableExplainScanIndexCosts feature flag is enabled. All numeric fields are omitted when their value is zero.",
+      "properties": {
+        "indexName": {
+          "type": "string",
+          "description": "Name of the index these cost estimates apply to."
+        },
+        "startupCost": {
+          "type": "number",
+          "description": "PostgreSQL estimated startup cost for this index scan. Omitted if zero."
+        },
+        "totalCost": {
+          "type": "number",
+          "description": "PostgreSQL estimated total cost for this index scan. Omitted if zero."
+        },
+        "selectivity": {
+          "type": "number",
+          "description": "Estimated selectivity of the index scan (fraction of rows matched, between 0.0 and 1.0). Omitted if zero."
+        },
+        "correlation": {
+          "type": "number",
+          "description": "Statistical correlation between the index order and the physical table order. Values near 1.0 or -1.0 indicate strong correlation, enabling more efficient sequential access. Omitted if zero."
+        },
+        "estimatedPercentIndexPagesLoaded": {
+          "type": "number",
+          "description": "Estimated percentage of index pages that will be loaded during the scan. Omitted if zero."
+        },
+        "estimatedTotalIndexEntries": {
+          "type": "integer",
+          "description": "Estimated total number of entries in the index. Omitted if zero."
+        },
+        "boundarySelectivity": {
+          "type": "number",
+          "description": "Selectivity estimate from boundary conditions in the index. This excludes any index conditions that will filter from the main table but will not reduce selectivity within the index tree: E.g. if the query requests filters on a = 1 && d == 2 and the index is on a,b,c,d; only a contributes to boundary selectivity of the index. Omitted if zero."
+        },
+        "estimatedDataPagesLoadedPercent": {
+          "type": "number",
+          "description": "Estimated percentage of index data (posting) pages that will be fetched as a result of the index scan. Omitted if zero. Only present when the planner reports data page fetch proportion."
+        },
+        "numBoundaries": {
+          "type": "integer",
+          "description": "Number of index scan boundaries generated for this index. Omitted if zero."
         }
       }
     },

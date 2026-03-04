@@ -1022,6 +1022,24 @@ extern PGDLLIMPORT void documentdb_rum_costestimate(struct PlannerInfo *root, st
 													double *indexCorrelation,
 													double *indexPages);
 
+extern PGDLLIMPORT void DocumentDBRumOrderedCostEstimate(struct PlannerInfo *root, struct
+														 IndexPath *path, double
+														 loop_count,
+														 Cost *indexStartupCost,
+														 Cost *indexTotalCost,
+														 Selectivity *indexSelectivity,
+														 double *indexCorrelation,
+														 double *indexPages,
+														 double *totalNumTuples,
+														 Selectivity *boundarySelectivity,
+														 int *numBoundaryQuals,
+														 double *
+														 dataPagesProportionFetched,
+														 List *(*
+																boundaryIndexQualsSelector)(
+															 struct IndexPath *indexPath,
+															 int32_t *num_sa_scans));
+
 typedef struct RumEntryAccumulator
 {
 	RBTNode rbnode;
@@ -1096,7 +1114,6 @@ extern PGDLLIMPORT bool RumPruneEmptyPages;
 extern PGDLLIMPORT bool RumTrackIncompleteSplit;
 extern PGDLLIMPORT bool RumFixIncompleteSplit;
 extern PGDLLIMPORT bool RumInjectPageSplitIncomplete;
-extern PGDLLIMPORT bool RumEnableCustomCostEstimate;
 extern PGDLLIMPORT bool RumEnableNewBulkDelete;
 extern PGDLLIMPORT bool RumNewBulkDeleteInlineDataPages;
 extern PGDLLIMPORT bool RumVacuumSkipPrunePostingTreePages;

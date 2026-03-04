@@ -1,3 +1,4 @@
+\i sql/bson_composite_index_selectivity_tests.sql
 SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 SET documentdb.next_collection_id TO 200;
 SET documentdb.next_collection_index_id TO 200;
@@ -41,7 +42,7 @@ $$;
 -- create 2 single path indexes
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
     'comp_idb', '{ "createIndexes": "comp_index_selectivity", "indexes": [ { "name": "comp_index1", "key": { "path1": 1 } } ] }', TRUE);
-NOTICE:  creating collection
+psql:sql/bson_composite_index_selectivity_tests.sql:48: NOTICE:  creating collection
                                                                                                    create_indexes_non_concurrently                                                                                                   
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "1" }, "numIndexesAfter" : { "$numberInt" : "2" }, "createdCollectionAutomatically" : true, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
@@ -148,7 +149,7 @@ set documentdb.enableCompositeIndexPlanner to off;
 -- Create indexes on the two $or branch fields and a compound sort index
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
     'comp_idb', '{ "createIndexes": "generic_selectiviity_coll", "indexes": [ { "name": "idx_refs_val", "key": { "refs.val": 1 } } ] }', TRUE);
-NOTICE:  creating collection
+psql:sql/bson_composite_index_selectivity_tests.sql:91: NOTICE:  creating collection
                                                                                                    create_indexes_non_concurrently                                                                                                   
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "1" }, "numIndexesAfter" : { "$numberInt" : "2" }, "createdCollectionAutomatically" : true, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
@@ -281,8 +282,9 @@ EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('comp_idb',
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
-   ->  Sort
+   ->  Incremental Sort
          Sort Key: (bson_orderby(document, '{ "groupId" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST, (bson_orderby(document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
+         Presorted Key: (bson_orderby(document, '{ "groupId" : { "$numberInt" : "1" } }'::bson))
          ->  Custom Scan (DocumentDBApiExplainQueryScan)
                namespaceName: comp_idb.generic_selectiviity_coll
                indexName: idx_ownerId_groupId_state_flag_id
@@ -292,7 +294,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('comp_idb',
                ->  Index Scan using "idx_ownerId_groupId_state_flag_id" on documents_202 collection
                      Index Cond: ((document @= '{ "flag" : false }'::bson) AND (document @= '{ "_id.ownerId" : "owner-3" }'::bson) AND (document @*= '{ "groupId" : [ "group-0", "group-1", "group-2", "group-3", "group-4", "group-5", "group-6", "group-7", "group-8", "group-9", "group-10" ] }'::bson))
                      Order By: (document |-<> '{ "groupId" : { "$numberInt" : "1" } }'::bson)
-(12 rows)
+(13 rows)
 
 -- With composite planner: picks optimal idx_flag_groupId_ownerId
 set documentdb.enableCompositeIndexPlanner to on;
