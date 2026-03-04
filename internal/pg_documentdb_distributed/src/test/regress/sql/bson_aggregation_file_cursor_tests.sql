@@ -301,3 +301,46 @@ SELECT cursorPage, continuation, persistConnection FROM
     documentdb_api.find_cursor_first_page(database => 'db', commandSpec => '{ "find": "get_aggregation_cursor_test_file", "skip": 1, "batchSize": 2, "projection": { "_id": 1 } }', cursorId => 4294967295);
 SELECT cursorPage, continuation, persistConnection FROM
     documentdb_api.find_cursor_first_page(database => 'db', commandSpec => '{ "find": "get_aggregation_cursor_test_file", "skip": 1, "batchSize": 2, "projection": { "_id": 1 } }', cursorId => 4294967298);
+
+set documentdb.maxCursorFileCount to 100;
+
+-- create a cursor but don't drain it.
+SELECT cursorPage, continuation, persistConnection FROM
+    documentdb_api.find_cursor_first_page(database => 'db', commandSpec => '{ "find": "get_aggregation_cursor_test_file", "skip": 1, "batchSize": 2, "projection": { "_id": 1 } }', cursorId => 4294967280);
+
+-- query the cursor file (it should be there)
+SELECT * FROM pg_ls_dir('pg_documentdb_cursor_files') f WHERE f LIKE '%4294967280%' ORDER BY 1;
+
+-- sleep 4 seconds
+SELECT pg_sleep(4);
+
+-- now prune based on a 1s timeout - should prune the file.
+SELECT documentdb_api_internal.cursor_directory_cleanup(2);
+
+-- now the cursor file doesn't exist.
+SELECT * FROM pg_ls_dir('pg_documentdb_cursor_files') f WHERE f LIKE '%4294967280%' ORDER BY 1;
+
+-- now repeat this but sleep for the scenario for idleness with getmore.
+
+-- now start a new query
+SELECT continuation AS continuation_drain1 FROM
+    documentdb_api.find_cursor_first_page(database => 'db', commandSpec => '{ "find": "get_aggregation_cursor_test_file", "skip": 1, "batchSize": 2, "projection": { "_id": 1 } }', cursorId => 4294967280) \gset
+
+SELECT * FROM pg_ls_dir('pg_documentdb_cursor_files') f WHERE f LIKE '%4294967280%' ORDER BY 1;
+
+-- sleep 1 and access it 4 times
+SELECT pg_sleep(1);
+SELECT cursorPage, continuation FROM documentdb_api.cursor_get_more(database => 'db', getMoreSpec => '{ "getMore": { "$numberLong": "4294967280" }, "collection": "get_aggregation_cursor_test_file",  "batchSize": 0 }', continuationSpec => :'continuation_drain1');
+
+SELECT pg_sleep(1);
+SELECT cursorPage, continuation FROM documentdb_api.cursor_get_more(database => 'db', getMoreSpec => '{ "getMore": { "$numberLong": "4294967280" }, "collection": "get_aggregation_cursor_test_file",  "batchSize": 0 }', continuationSpec => :'continuation_drain1');
+
+SELECT pg_sleep(1);
+SELECT cursorPage, continuation FROM documentdb_api.cursor_get_more(database => 'db', getMoreSpec => '{ "getMore": { "$numberLong": "4294967280" }, "collection": "get_aggregation_cursor_test_file", "batchSize": 0 }', continuationSpec => :'continuation_drain1');
+
+SELECT pg_sleep(1);
+SELECT cursorPage, continuation FROM documentdb_api.cursor_get_more(database => 'db', getMoreSpec => '{ "getMore": { "$numberLong": "4294967280" }, "collection": "get_aggregation_cursor_test_file", "batchSize": 0 }', continuationSpec => :'continuation_drain1');
+
+-- now it's been at least 3 seconds, if we prune with a 2 second timeout, it should still not be pruned since getMore updated modified time.
+SELECT documentdb_api_internal.cursor_directory_cleanup(2);
+SELECT * FROM pg_ls_dir('pg_documentdb_cursor_files') f WHERE f LIKE '%4294967280%' ORDER BY 1;
