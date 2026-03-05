@@ -80,6 +80,7 @@ extern int MaxAggregationStagesAllowed;
 extern bool EnableConversionStreamableToSingleBatch;
 extern bool EnableFindProjectionAfterOffset;
 extern bool EnableNewCountAggregates;
+extern bool FailOnGroupIdDuplicate;
 extern bool EnableUseLookupNewProjectInlineMethod;
 extern bool InlineChangeStreamMatchStage;
 extern bool RemoveMatchNamespaceFilters;
@@ -5904,13 +5905,27 @@ HandleGroup(const bson_value_t *existingValue, Query *query,
 
 	/* First get the _id */
 	bson_value_t idValue = { 0 };
+	bool idAlreadyFound = false;
 	while (bson_iter_next(&groupIter))
 	{
 		StringView keyView = bson_iter_key_string_view(&groupIter);
 		if (StringViewEquals(&keyView, &IdFieldStringView))
 		{
+			if (idAlreadyFound)
+			{
+				ReportFeatureUsage(FEATURE_STAGE_GROUP_DUPLICATE_ID);
+
+				if (FailOnGroupIdDuplicate)
+				{
+					ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION15948),
+									errmsg("a group's _id may only be specified once")));
+				}
+
+				break;
+			}
+
 			idValue = *bson_iter_value(&groupIter);
-			break;
+			idAlreadyFound = true;
 		}
 	}
 

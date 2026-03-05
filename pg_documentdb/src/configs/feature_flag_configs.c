@@ -203,6 +203,11 @@ bool EnableContinuationFastBitmapLookup = DEFAULT_ENABLE_CONTINUATION_FAST_BITMA
 #define DEFAULT_USE_FILE_BASED_PERSISTED_CURSORS false
 bool UseFileBasedPersistedCursors = DEFAULT_USE_FILE_BASED_PERSISTED_CURSORS;
 
+/* Remove after v113. Default to true in v112 */
+#define DEFAULT_FAIL_ON_GROUP_ID_DUPLICATE false
+bool FailOnGroupIdDuplicate =
+	DEFAULT_FAIL_ON_GROUP_ID_DUPLICATE;
+
 /* Remove after v111 */
 #define DEFAULT_ENABLE_CONVERSION_STREAMABLE_SINGLE_BATCH true
 bool EnableConversionStreamableToSingleBatch =
@@ -734,6 +739,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		gettext_noop(
 			"Whether to enable new count aggregate optimizations."),
 		NULL, &EnableNewCountAggregates, DEFAULT_ENABLE_NEW_COUNT_AGGREGATES,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.failOnGroupIdDuplicate", newGucPrefix),
+		gettext_noop(
+			"Whether to fail when $group stage has duplicate _id."),
+		NULL, &FailOnGroupIdDuplicate,
+		DEFAULT_FAIL_ON_GROUP_ID_DUPLICATE,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

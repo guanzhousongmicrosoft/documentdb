@@ -1,4 +1,5 @@
 ### documentdb v0.111-0 (Unreleased) ###
+* Reject duplicate `_id` in `$group` stage. Guarded by `failOnGroupIdDuplicate` feature flag *[Bugfix]*
 * Update file modification time in `DeserializeFileState` to prevent TTL-based cleanup from expiring actively-used cursor files *[Bugfix]*
 
 ### documentdb v0.110-0 (Unreleased) ###

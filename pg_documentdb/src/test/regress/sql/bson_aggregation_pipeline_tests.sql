@@ -2,6 +2,7 @@ SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 
 SET documentdb.next_collection_id TO 3500;
 SET documentdb.next_collection_index_id TO 3500;
+SET documentdb.failOnGroupIdDuplicate TO on;
 
 
 SELECT documentdb_api.insert_one('db','aggregation_pipeline','{"_id":"1", "int": 10, "a" : { "b" : [ "x", 1, 2.0, true ] } }', NULL);
@@ -112,6 +113,9 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 SET documentdb.enableNewMinMaxAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
 SET documentdb.enableNewMinMaxAccumulators TO off;
+
+-- $group with duplicate _id should error
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": "$int", "_id": "$a" } }], "cursor": {} }');
 
 -- $group with first/last
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$first": "$_id" }, "e": { "$last":  "$_id" } } }], "cursor": {} }');
