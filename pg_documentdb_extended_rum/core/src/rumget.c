@@ -4150,7 +4150,7 @@ MoveScanForward(RumScanOpaque so, Snapshot snapshot, ParallelIndexScanDesc paral
 			}
 			else if (RumEnableSkipIntermediateEntry && canSkipCheck &&
 					 ScanDirectionIsForward(so->orderScanDirection) &&
-					 so->totalentries == 1 &&
+					 so->totalsearchentries == 1 &&
 					 so->rumstate.canOuterOrdering[so->orderByScanData->orderByEntry->
 												   attnum - 1] &&
 					 so->rumstate.outerOrderingFn[so->orderByScanData->orderByEntry->
@@ -4158,7 +4158,7 @@ MoveScanForward(RumScanOpaque so, Snapshot snapshot, ParallelIndexScanDesc paral
 			{
 				/* In this path, the orderbyEntry marked itself to push the scan forward due to the tail entry being done
 				 * but the prefix of it being unbounded.
-				 * TODO: Lift the restriction for so->totalentries == 1 by tracking multiple orderby entries here.
+				 * TODO: Lift the restriction for so->totalsearchentries == 1 by tracking multiple orderby entries here.
 				 * That's because the new value for the sortEntry *could* skip over ranges that are valid for other entries.
 				 */
 				bool resetScan = false;

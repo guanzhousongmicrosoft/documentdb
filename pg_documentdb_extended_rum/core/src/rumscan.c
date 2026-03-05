@@ -76,6 +76,7 @@ rumbeginscan(Relation rel, int nkeys, int norderbys)
 	so->nkeys = 0;
 	so->firstCall = true;
 	so->totalentries = 0;
+	so->totalsearchentries = 0;
 	so->sortedEntries = NULL;
 	so->orderByScanData = NULL;
 	so->scanLoops = 0;
@@ -522,6 +523,7 @@ freeScanKeys(RumScanOpaque so)
 	so->entries = NULL;
 	so->sortedEntries = NULL;
 	so->totalentries = 0;
+	so->totalsearchentries = 0;
 
 	if (so->sortstate)
 	{
@@ -971,6 +973,7 @@ rumNewScanKey(IndexScanDesc scan)
 
 	/* initialize expansible array of RumScanEntry pointers */
 	so->totalentries = 0;
+	so->totalsearchentries = 0;
 	so->allocentries = 32;
 	so->entries = (RumScanEntry *)
 				  palloc(so->allocentries * sizeof(RumScanEntry));
@@ -993,6 +996,8 @@ rumNewScanKey(IndexScanDesc scan)
 			memcpy(so->entries + so->totalentries,
 				   key->scanEntry, sizeof(*key->scanEntry) * key->nentries);
 			so->totalentries += key->nentries;
+
+			so->totalsearchentries += key->orderBy ? 0 : key->nentries;
 		}
 	}
 

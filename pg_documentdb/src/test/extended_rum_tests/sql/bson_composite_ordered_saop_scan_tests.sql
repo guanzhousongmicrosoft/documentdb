@@ -35,11 +35,13 @@ SELECT ordered_saop_scan_test.insert_documents('ordered_saop_scan_coll');
 SELECT ordered_saop_scan_test.insert_documents('ordered_saop_index_coll');
 SELECT ordered_saop_scan_test.insert_documents('ordered_saop_index_reverse_coll');
 SELECT ordered_saop_scan_test.insert_documents('ordered_saop_index_mixed_coll');
+SELECT ordered_saop_scan_test.insert_documents('ordered_saop_index_mixed2_coll');
 
 SELECT COUNT(*) FROM documentdb_api.collection('ordered_saop_scan_test', 'ordered_saop_scan_coll');
 SELECT COUNT(*) FROM documentdb_api.collection('ordered_saop_scan_test', 'ordered_saop_index_coll');
 SELECT COUNT(*) FROM documentdb_api.collection('ordered_saop_scan_test', 'ordered_saop_index_reverse_coll');
 SELECT COUNT(*) FROM documentdb_api.collection('ordered_saop_scan_test', 'ordered_saop_index_mixed_coll');
+SELECT COUNT(*) FROM documentdb_api.collection('ordered_saop_scan_test', 'ordered_saop_index_mixed2_coll');
 
 -- create a multikey index on 'a' and 'b' for the index collection
 SELECT documentdb_api_internal.create_indexes_non_concurrently('ordered_saop_scan_test',
@@ -48,11 +50,14 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('ordered_saop_sca
     '{ "createIndexes": "ordered_saop_index_reverse_coll", "indexes": [ { "key": { "a": -1, "b": -1 }, "name": "a_-1_b_-1" } ] }'::bson, TRUE);
 SELECT documentdb_api_internal.create_indexes_non_concurrently('ordered_saop_scan_test',
     '{ "createIndexes": "ordered_saop_index_mixed_coll", "indexes": [ { "key": { "a": -1, "b": 1 }, "name": "a_-1_b_1" } ] }'::bson, TRUE);
+SELECT documentdb_api_internal.create_indexes_non_concurrently('ordered_saop_scan_test',
+    '{ "createIndexes": "ordered_saop_index_mixed2_coll", "indexes": [ { "key": { "a": 1, "b": -1 }, "name": "a_1_b_-1" } ] }'::bson, TRUE);
 
 
 \d documentdb_data.documents_1202
 \d documentdb_data.documents_1203
 \d documentdb_data.documents_1204
+\d documentdb_data.documents_1205
 
 CREATE FUNCTION ordered_saop_scan_test.validate_index_runtime_equivalence(querySpec bson) RETURNS setof bson
  LANGUAGE plpgsql
@@ -140,6 +145,99 @@ SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
 EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
     SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
         '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": -1 } }'::bson);
+$cmd$);
+
+-- ===== Explain: sort matching index direction should not cause excessive loops =====
+
+-- sort {a: 1} matches prefix of index {a: 1, b: 1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": 1 } }'::bson);
+$cmd$);
+
+-- sort {a: 1, b: 1} matches full index {a: 1, b: 1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": 1, "b": 1 } }'::bson);
+$cmd$);
+
+-- sort {a: -1} matches prefix of index {a: -1, b: -1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_reverse_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": -1 } }'::bson);
+$cmd$);
+
+-- sort {a: -1, b: -1} matches full index {a: -1, b: -1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_reverse_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": -1, "b": -1 } }'::bson);
+$cmd$);
+
+-- sort {a: -1} matches prefix of index {a: -1, b: 1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_mixed_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": -1 } }'::bson);
+$cmd$);
+
+-- sort {a: -1, b: 1} matches full index {a: -1, b: 1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_mixed_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": -1, "b": 1 } }'::bson);
+$cmd$);
+
+-- sort {a: 1} matches prefix of index {a: 1, b: -1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_mixed2_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": 1 } }'::bson);
+$cmd$);
+
+-- sort {a: 1, b: -1} matches full index {a: 1, b: -1} with two $in
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_mixed2_coll", "filter": { "a": { "$in": [ 5, 16, 2005, 3001 ] }, "b": { "$in": [ 8, 6, 2005, 2995, 2996, 4000 ] } }, "sort": { "a": 1, "b": -1 } }'::bson);
+$cmd$);
+
+-- $in on 'a' with $lt on 'b', sort {a: 1} matching index prefix
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 5, 16, 100, 500, 1000, 2005, 3001 ] }, "b": { "$lt": 100 } }, "sort": { "a": 1 } }'::bson);
+$cmd$);
+
+-- large $in on 'a' with $lt on 'b', sort {a: 1} matching index prefix
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 2, 4, 6, 8, 10, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 ] }, "b": { "$lt": 500 } }, "sort": { "a": 1 } }'::bson);
+$cmd$);
+
+-- large $in on both with sort matching full index {a: 1, b: 1}
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_coll", "filter": { "a": { "$in": [ 2, 4, 6, 8, 10, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 ] }, "b": { "$in": [ 1, 2, 3, 4, 5, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 ] } }, "sort": { "a": 1, "b": 1 } }'::bson);
+$cmd$);
+
+-- $in on 'a' with $lt on 'b', sort {a: -1} matching reverse index prefix
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_reverse_coll", "filter": { "a": { "$in": [ 5, 16, 100, 500, 1000, 2005, 3001 ] }, "b": { "$lt": 100 } }, "sort": { "a": -1 } }'::bson);
+$cmd$);
+
+-- $in on 'a' with $lt on 'b', sort {a: 1} matching mixed2 index prefix
+SELECT documentdb_test_helpers.run_explain_and_trim( $cmd$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF)
+    SELECT document FROM bson_aggregation_find('ordered_saop_scan_test',
+        '{ "find": "ordered_saop_index_mixed2_coll", "filter": { "a": { "$in": [ 5, 16, 100, 500, 1000, 2005, 3001 ] }, "b": { "$lt": 100 } }, "sort": { "a": 1 } }'::bson);
 $cmd$);
 
 SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
@@ -289,6 +387,41 @@ SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
 -- sort on 'b' ascending with $in on 'a'
 SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
     '{ "filter": { "a": { "$in": [ 10, 1000, 100, 2000 ] }, "b": { "$gt": 0, "$lt": 1000 } }, "sort": { "b": 1 } }'::bson
+);
+
+-- sort matching full ascending index {a: 1, b: 1}
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 10, 100, 1000, 2000 ] }, "b": { "$in": [ 5, 50, 500, 1000 ] } }, "sort": { "a": 1, "b": 1 } }'::bson
+);
+
+-- sort matching full descending index {a: -1, b: -1}
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 10, 100, 1000, 2000 ] }, "b": { "$in": [ 5, 50, 500, 1000 ] } }, "sort": { "a": -1, "b": -1 } }'::bson
+);
+
+-- sort matching full mixed index {a: -1, b: 1}
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 10, 100, 1000, 2000 ] }, "b": { "$in": [ 5, 50, 500, 1000 ] } }, "sort": { "a": -1, "b": 1 } }'::bson
+);
+
+-- sort matching full mixed index {a: 1, b: -1}
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 10, 100, 1000, 2000 ] }, "b": { "$in": [ 5, 50, 500, 1000 ] } }, "sort": { "a": 1, "b": -1 } }'::bson
+);
+
+-- $in on 'a' with $lt on 'b', sort matching ascending prefix
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 5, 16, 100, 500, 1000, 2005, 3001 ] }, "b": { "$lt": 100 } }, "sort": { "a": 1 } }'::bson
+);
+
+-- large $in on 'a' with $lte on 'b', sort matching ascending prefix
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 2, 4, 6, 8, 10, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 ] }, "b": { "$lte": 500 } }, "sort": { "a": 1 } }'::bson
+);
+
+-- $in on 'a' with $gte/$lt range on 'b', sort matching full ascending index
+SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
+    '{ "filter": { "a": { "$in": [ 10, 100, 500, 2000, 3000 ] }, "b": { "$gte": 10, "$lt": 200 } }, "sort": { "a": 1, "b": 1 } }'::bson
 );
 
 -- $in on both.
@@ -471,12 +604,14 @@ TRUNCATE documentdb_data.documents_1201;
 TRUNCATE documentdb_data.documents_1202;
 TRUNCATE documentdb_data.documents_1203;
 TRUNCATE documentdb_data.documents_1204;
+TRUNCATE documentdb_data.documents_1205;
 
 -- now insert "a" going from 1 to 10, and b going from 1 to 10 for every value of a
 SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_scan_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
 SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
 SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_reverse_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
 SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_mixed_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
+SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_index_mixed2_coll', bson_build_document('_id', i * 10 + j, 'a', i, 'b', j))) FROM generate_series(1, 10) AS i, generate_series(1, 10) AS j;
 
 SELECT ordered_saop_scan_test.validate_index_runtime_equivalence(
     '{ "filter": { "a": { "$in": [ 1, 2, 3 ] }, "b": { "$in": [ 1, 4, 7 ] } } }'::bson
@@ -495,12 +630,14 @@ TRUNCATE documentdb_data.documents_1201;
 TRUNCATE documentdb_data.documents_1202;
 TRUNCATE documentdb_data.documents_1203;
 TRUNCATE documentdb_data.documents_1204;
+TRUNCATE documentdb_data.documents_1205;
 
 SELECT COUNT(documentdb_api.insert_one('ordered_saop_scan_test', 'ordered_saop_scan_coll', bson_build_document('_id', i, 'a', 'avalue' || i, 'b', 'bvalue' || i))) FROM generate_series(1, 10000) AS i;
 
 INSERT INTO documentdb_data.documents_1202 SELECT 1202, object_id, document FROM documentdb_data.documents_1201;
 INSERT INTO documentdb_data.documents_1203 SELECT 1203, object_id, document FROM documentdb_data.documents_1201;
 INSERT INTO documentdb_data.documents_1204 SELECT 1204, object_id, document FROM documentdb_data.documents_1201;
+INSERT INTO documentdb_data.documents_1205 SELECT 1205, object_id, document FROM documentdb_data.documents_1201;
 
 -- now form a large $in query.
 WITH raw_values AS (SELECT ARRAY_AGG( 'avalue' || i ) as a_values, ARRAY_AGG( 'bvalue' || i ) as b_values FROM generate_series(1, 5000) AS i)

@@ -3150,7 +3150,6 @@ SerializeBoundsStringForExplain(bytea *entry, void *extraData, PG_FUNCTION_ARGS,
 				BSON_TYPE_EOD)
 			{
 				/* If we have base bounds, add it to the set */
-				Assert(pathList != NIL);
 				resetStringInfo(scandata);
 				appendStringInfo(scandata, "[");
 				bool appendPath = true;
@@ -3169,7 +3168,7 @@ SerializeBoundsStringForExplain(bytea *entry, void *extraData, PG_FUNCTION_ARGS,
 				CompositeProcessedPerPathEntry *entry =
 					(CompositeProcessedPerPathEntry *) lfirst(cell);
 
-				/* Eacn bounds set is an independent clause - represent it as such. */
+				/* Each bounds set is an independent clause - represent it as such. */
 				resetStringInfo(scandata);
 				appendStringInfo(scandata, "[");
 

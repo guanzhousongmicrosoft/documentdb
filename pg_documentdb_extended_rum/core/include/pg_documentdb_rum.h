@@ -906,6 +906,7 @@ typedef struct RumScanOpaqueData
 	RumScanEntry *sortedEntries;    /* Sorted entries. Used in fast scan */
 	int entriesIncrIndex;           /* used in fast scan */
 	uint32 totalentries;
+	uint32 totalsearchentries;
 	uint32 allocentries;            /* allocated length of entries[] and
 	                                 * sortedEntries[] */
 
