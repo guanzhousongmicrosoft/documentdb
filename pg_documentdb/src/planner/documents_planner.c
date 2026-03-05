@@ -126,7 +126,6 @@ static void ExtensionRelPathlistHookCoreNew(PlannerInfo *root, RelOptInfo *rel, 
 											RangeTblEntry *rte, uint64 collectionId, bool
 											isShardQuery);
 
-extern bool ForceRUMIndexScanToBitmapHeapScan;
 extern bool EnableCollation;
 extern bool EnableLetAndCollationForQueryMatch;
 extern bool EnableVariablesSupportForWriteCommands;

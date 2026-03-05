@@ -87,9 +87,6 @@ int TdigestCompressionAccuracy = DEFAULT_TDIGEST_COMPRESSION_ACCURACY;
 #define DEFAULT_DOCUMENTDB_PG_READ_ONLY_FOR_DISK_FULL false
 bool DocumentDBPGReadOnlyForDiskFull = DEFAULT_DOCUMENTDB_PG_READ_ONLY_FOR_DISK_FULL;
 
-#define DEFAULT_FORCE_RUM_INDEXSCAN_TO_BITMAPHEAPSCAN true
-bool ForceRUMIndexScanToBitmapHeapScan = DEFAULT_FORCE_RUM_INDEXSCAN_TO_BITMAPHEAPSCAN;
-
 /* Setting this to true until we have statistics. When dealing with large number of records sequential
  * scan can win even if there is an index to be used, because index cost being not reflected properly.
  * Avoiding that case is our priority. Using index when dealing with small number of records might be worse
@@ -214,17 +211,6 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 		NULL,
 		&MaxWriteBatchSize,
 		DEFAULT_MAX_WRITE_BATCH_SIZE, 1, INT_MAX,
-		PGC_USERSET,
-		0,
-		NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.forceRumIndexScantoBitmapHeapScan", prefix),
-		gettext_noop(
-			"Force RUM Index Scan to BitMap Heap Scan"),
-		NULL,
-		&ForceRUMIndexScanToBitmapHeapScan,
-		DEFAULT_FORCE_RUM_INDEXSCAN_TO_BITMAPHEAPSCAN,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
