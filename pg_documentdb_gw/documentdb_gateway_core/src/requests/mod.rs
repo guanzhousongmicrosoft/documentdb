@@ -248,6 +248,10 @@ impl FromStr for RequestType {
             "usersInfo" => Ok(RequestType::UsersInfo),
             "validate" => Ok(RequestType::Validate),
             "whatsmyuri" => Ok(RequestType::WhatsMyUri),
+            "atlasVersion" => Err(DocumentDBError::documentdb_error(
+                ErrorCode::CommandNotFound,
+                format!("Command '{cmd_name}' not found."),
+            )),
             _ => Err(DocumentDBError::documentdb_error(
                 ErrorCode::CommandNotSupported,
                 format!("Unknown request received: {cmd_name}"),
