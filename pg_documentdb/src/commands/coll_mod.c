@@ -36,6 +36,8 @@ extern bool EnablePrepareUnique;
 extern bool EnableCollModUnique;
 extern bool ForceUpdateIndexInline;
 
+extern Datum command_reindex_index_background_internal(PG_FUNCTION_ARGS);
+
 
 /* --------------------------------------------------------- */
 /* Data-types */
@@ -51,6 +53,7 @@ typedef struct
 	bool hidden;
 	bool prepareUnique;
 	bool unique;
+	bool reindex;
 	int expireAfterSeconds;
 } CollModIndexOptions;
 
@@ -102,6 +105,9 @@ typedef enum CollModSpecFlags
 
 	/* validation update */
 	HAS_VALIDATION_OPTION = 1 << 9,
+
+	/* reindex option */
+	HAS_INDEX_OPTION_REINDEX = 1 << 10,
 
 	/* TODO: More OPTIONS to follow */
 } CollModSpecFlags;
@@ -398,37 +404,43 @@ ParseSpecSetCollModOptions(const pgbson *collModSpec,
 		specFlags |= HAS_VALIDATION_OPTION;
 	}
 
-	if ((specFlags & HAS_INDEX_OPTION) && (specFlags & HAS_INDEX_OPTION_PREPARE_UNIQUE))
+	if ((specFlags & HAS_INDEX_OPTION) != 0)
 	{
 		/* prepareUnique cannot be specified with other collMod options, we should remove metadata flags. */
 		CollModSpecFlags tmpFlags = specFlags &
 									~HAS_INDEX_OPTION &
 									~HAS_INDEX_OPTION_NAME &
-									~HAS_INDEX_OPTION_KEYPATTERN &
-									~HAS_INDEX_OPTION_PREPARE_UNIQUE;
+									~HAS_INDEX_OPTION_KEYPATTERN;
+		if (tmpFlags == 0)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
+							errmsg(
+								"no expireAfterSeconds, hidden, prepareUnique or unique field")));
+		}
 
-		if (tmpFlags != 0)
+		if ((tmpFlags & HAS_INDEX_OPTION_PREPARE_UNIQUE) != 0 &&
+			tmpFlags != HAS_INDEX_OPTION_PREPARE_UNIQUE)
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
 							errmsg(
 								"collMod.prepareUnique cannot be specified with other collMod options")));
 		}
-	}
 
-	if ((specFlags & HAS_INDEX_OPTION) && (specFlags & HAS_INDEX_OPTION_UNIQUE))
-	{
-		/* unique cannot be specified with other collMod options, we should remove metadata flags. */
-		CollModSpecFlags tmpFlags = specFlags &
-									~HAS_INDEX_OPTION &
-									~HAS_INDEX_OPTION_NAME &
-									~HAS_INDEX_OPTION_KEYPATTERN &
-									~HAS_INDEX_OPTION_UNIQUE;
-
-		if (tmpFlags != 0)
+		if ((tmpFlags & HAS_INDEX_OPTION_UNIQUE) != 0 &&
+			tmpFlags != HAS_INDEX_OPTION_UNIQUE)
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
 							errmsg(
 								"collMod.unique cannot be specified with other collMod options")));
+		}
+
+		/* reindex is mutually exclusive with other index modification options */
+		if ((tmpFlags & HAS_INDEX_OPTION_REINDEX) != 0 &&
+			tmpFlags != HAS_INDEX_OPTION_REINDEX)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
+							errmsg(
+								"reindex cannot be combined with other index options")));
 		}
 	}
 
@@ -519,6 +531,19 @@ ParseIndexSpecSetCollModOptions(bson_iter_t *indexSpecIter,
 			collModIndexOptions->expireAfterSeconds = (uint64) expireAfterSeconds;
 			*specFlags |= HAS_INDEX_OPTION_EXPIRE_AFTER_SECONDS;
 		}
+		else if (strcmp(key, "reindex") == 0)
+		{
+			EnsureTopLevelFieldIsBooleanLike("collMod.index.reindex",
+											 indexSpecIter);
+			collModIndexOptions->reindex = BsonValueAsBool(value);
+
+			if (!collModIndexOptions->reindex)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
+								errmsg("collMod.reindex can only be set to true")));
+			}
+			*specFlags |= HAS_INDEX_OPTION_REINDEX;
+		}
 		else
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_UNKNOWNBSONFIELD),
@@ -534,19 +559,6 @@ ParseIndexSpecSetCollModOptions(bson_iter_t *indexSpecIter,
 		/* If no name or key pattern then error */
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
 						errmsg("Must specify either index name or key pattern.")));
-	}
-
-	if ((*specFlags & HAS_INDEX_OPTION_EXPIRE_AFTER_SECONDS) !=
-		HAS_INDEX_OPTION_EXPIRE_AFTER_SECONDS &&
-		(*specFlags & HAS_INDEX_OPTION_HIDDEN) != HAS_INDEX_OPTION_HIDDEN &&
-		(*specFlags & HAS_INDEX_OPTION_PREPARE_UNIQUE) !=
-		HAS_INDEX_OPTION_PREPARE_UNIQUE &&
-		(*specFlags & HAS_INDEX_OPTION_UNIQUE) != HAS_INDEX_OPTION_UNIQUE)
-	{
-		/* If index options not provided then error */
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
-						errmsg(
-							"no expireAfterSeconds, hidden, prepareUnique or unique field")));
 	}
 }
 
@@ -792,6 +804,44 @@ ModifyIndexSpecsInCollection(const MongoCollection *collection,
 			newUnique = indexDetails.indexSpec.indexUnique;
 			updateNeeded = true;
 		}
+	}
+
+	if ((*specFlags & HAS_INDEX_OPTION_REINDEX) == HAS_INDEX_OPTION_REINDEX)
+	{
+		if (!isIndexValid)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
+							errmsg(
+								"cannot reindex an invalid index")));
+		}
+
+		/* Build the reindex spec: {"collection": "<name>", "indexes": [<indexId>]} */
+		pgbson_writer reindexSpecWriter;
+		PgbsonWriterInit(&reindexSpecWriter);
+		PgbsonWriterAppendUtf8(&reindexSpecWriter, "collection", 10,
+							   collection->name.collectionName);
+
+		pgbson_array_writer indexArrayWriter;
+		PgbsonWriterStartArray(&reindexSpecWriter, "indexes", 7,
+							   &indexArrayWriter);
+		bson_value_t indexIdValue = {
+			.value_type = BSON_TYPE_INT32,
+			.value.v_int32 = indexDetails.indexId
+		};
+		PgbsonArrayWriterWriteValue(&indexArrayWriter, &indexIdValue);
+		PgbsonWriterEndArray(&reindexSpecWriter, &indexArrayWriter);
+
+		pgbson *reindexSpec = PgbsonWriterGetPgbson(&reindexSpecWriter);
+
+		DirectFunctionCall2(command_reindex_index_background_internal,
+							CStringGetTextDatum(collection->name.databaseName),
+							PointerGetDatum(reindexSpec));
+
+		PgbsonWriterAppendBool(writer, "reindex_old", 11, false);
+		PgbsonWriterAppendBool(writer, "reindex_new", 11, true);
+
+		/* Reindex is queued asynchronously, no metadata update needed */
+		return;
 	}
 
 	if (!updateNeeded)
