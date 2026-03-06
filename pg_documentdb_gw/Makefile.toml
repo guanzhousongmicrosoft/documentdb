@@ -25,8 +25,11 @@ command = "cargo"
 args = ["build", "--frozen", "--profile=release-with-symbols"]
 
 [tasks.test]
-command = "cargo"
-args = ["test", "--workspace", "--", "--test-threads=1"]
+clear = true
+script_runner = "@shell"
+script = '''
+bash ../scripts/run_rust_tests_with_junit.sh "$CARGO_MAKE_WORKING_DIRECTORY"
+'''
 
 [tasks.dev]
 dependencies = ["build", "lint"]
