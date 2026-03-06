@@ -603,6 +603,7 @@ PG_FUNCTION_INFO_V1(bson_orderby_lt);
 PG_FUNCTION_INFO_V1(bson_orderby_eq);
 PG_FUNCTION_INFO_V1(bson_orderby_gt);
 PG_FUNCTION_INFO_V1(command_bson_orderby_index);
+PG_FUNCTION_INFO_V1(command_bson_orderby_index_reverse);
 
 /*
  * Traverses the document for a given dot-path notation
@@ -1769,8 +1770,8 @@ command_bson_orderby_reverse(PG_FUNCTION_ARGS)
 }
 
 
-Datum
-command_bson_orderby_index(PG_FUNCTION_ARGS)
+static Datum
+RunOrderByOnIndexCore(PG_FUNCTION_ARGS, bool isReverse)
 {
 	pgbson *document = PG_GETARG_PGBSON_PACKED(0);
 	pgbson *sortSpec = PG_GETARG_PGBSON_PACKED(1);
@@ -1808,7 +1809,12 @@ command_bson_orderby_index(PG_FUNCTION_ARGS)
 																	  terms[i],
 																	  collationStringView.
 																	  string);
-			if (cmp > 0)
+			if (!isReverse && cmp > 0)
+			{
+				pfree(DatumGetByteaP(selectedDatum));
+				selectedDatum = terms[i];
+			}
+			else if (isReverse && cmp < 0)
 			{
 				pfree(DatumGetByteaP(selectedDatum));
 				selectedDatum = terms[i];
@@ -1830,6 +1836,22 @@ command_bson_orderby_index(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_DATUM(selectedDatum);
+}
+
+
+Datum
+command_bson_orderby_index(PG_FUNCTION_ARGS)
+{
+	bool reverse = false;
+	return RunOrderByOnIndexCore(fcinfo, reverse);
+}
+
+
+Datum
+command_bson_orderby_index_reverse(PG_FUNCTION_ARGS)
+{
+	bool reverse = true;
+	return RunOrderByOnIndexCore(fcinfo, reverse);
 }
 
 
