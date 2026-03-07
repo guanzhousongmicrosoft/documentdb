@@ -1390,6 +1390,10 @@ fn query_planner(
                             index_doc.append("isMultiKey", multi_key_val);
                         }
 
+                        if let Some(has_truncation_val) = detail.has_truncation {
+                            index_doc.append("hasTruncation", has_truncation_val);
+                        }
+
                         if let Some(index_bounds) = detail.index_bounds.as_ref() {
                             if !index_bounds.is_empty() {
                                 let mut bounds_arr = RawArrayBuf::new();

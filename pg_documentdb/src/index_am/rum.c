@@ -1569,6 +1569,12 @@ ExplainRawCompositeScan(Relation index_rel, List *indexQuals, List *indexOrderBy
 		ExplainPropertyBool("hasCorrelatedTerms", true, es);
 	}
 
+	bool isTruncated = RumGetTruncationStatus(index_rel);
+	if (isTruncated)
+	{
+		ExplainPropertyBool("hasTruncation", true, es);
+	}
+
 	Datum compositeDatum = FormCompositeDatumFromQuals(indexQuals, indexOrderBy,
 													   isMultiKey, hasCorrelatedTerms,
 													   supportsOrderedOperatorScans);

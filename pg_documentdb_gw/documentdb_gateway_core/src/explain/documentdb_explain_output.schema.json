@@ -257,6 +257,10 @@
           "type": "boolean",
           "description": "Whether the index is a multikey index (indexes on array fields). Null/omitted if not applicable."
         },
+        "hasTruncation": {
+          "type": "boolean",
+          "description": "Whether the composite index has truncated terms due to exceeding maximum term size. Null/omitted if not applicable."
+        },
         "bounds": {
           "type": "array",
           "items": { "type": "string" },

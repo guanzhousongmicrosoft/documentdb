@@ -217,6 +217,7 @@ pub struct IndexDetails {
     pub index_name: Option<String>,
     pub index_key: Option<String>,
     pub is_multi_key: Option<bool>,
+    pub has_truncation: Option<bool>,
     pub index_bounds: Option<Vec<String>>,
     pub raw_bounds: Option<Vec<String>>,
     pub start_bounds: Option<Vec<String>>,

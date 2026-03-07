@@ -1081,11 +1081,12 @@ EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{
    indexName: b_1
    indexKey: {"b": 1,"c": 1}
    isMultiKey: false
+   hasTruncation: true
    indexBounds: ["b": [MinKey, MaxKey], "c": (MinKey, MaxKey)]
    ->  Index Scan using b_1 on documents_68004_680008 collection
          Index Cond: (document @>= '{ "b" : { "$minKey" : 1 } }'::bson)
          Order By: (document |-<> '{ "b" : { "$numberInt" : "1" } }'::bson)
-(8 rows)
+(9 rows)
 
 EXPLAIN (COSTS OFF) WITH s1 AS (SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": 1 } } ] }')),
 s2 AS (SELECT COALESCE(document -> 'b' >= (LAG(document, 1) OVER ()) -> 'b', true) AS greater_check FROM s1)
@@ -1099,11 +1100,12 @@ SELECT MIN(greater_check::int4), MAX(greater_check::int4) FROM s2;
                      indexName: b_1
                      indexKey: {"b": 1,"c": 1}
                      isMultiKey: false
+                     hasTruncation: true
                      indexBounds: ["b": [MinKey, MaxKey], "c": (MinKey, MaxKey)]
                      ->  Index Scan using b_1 on documents_68004_680008 collection
                            Index Cond: (document @>= '{ "b" : { "$minKey" : 1 } }'::bson)
                            Order By: (document |-<> '{ "b" : { "$numberInt" : "1" } }'::bson)
-(11 rows)
+(12 rows)
 
 EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": -1 } } ] }');
                                  QUERY PLAN                                  
@@ -1112,11 +1114,12 @@ EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{
    indexName: b_1
    indexKey: {"b": 1,"c": 1}
    isMultiKey: false
+   hasTruncation: true
    indexBounds: ["b": [MinKey, MaxKey], "c": (MinKey, MaxKey)]
    ->  Index Scan using b_1 on documents_68004_680008 collection
          Index Cond: (document @>= '{ "b" : { "$minKey" : 1 } }'::bson)
          Order By: (document <>-| '{ "b" : { "$numberInt" : "-1" } }'::bson)
-(8 rows)
+(9 rows)
 
 EXPLAIN (COSTS OFF) WITH s1 AS (SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": -1 } } ] }')),
 s2 AS (SELECT COALESCE(document -> 'b' <= (LAG(document, 1) OVER ()) -> 'b', true) AS greater_check FROM s1)
@@ -1130,11 +1133,12 @@ SELECT MIN(greater_check::int4), MAX(greater_check::int4) FROM s2;
                      indexName: b_1
                      indexKey: {"b": 1,"c": 1}
                      isMultiKey: false
+                     hasTruncation: true
                      indexBounds: ["b": [MinKey, MaxKey], "c": (MinKey, MaxKey)]
                      ->  Index Scan using b_1 on documents_68004_680008 collection
                            Index Cond: (document @>= '{ "b" : { "$minKey" : 1 } }'::bson)
                            Order By: (document <>-| '{ "b" : { "$numberInt" : "-1" } }'::bson)
-(11 rows)
+(12 rows)
 
 -- validate the order is correct
 WITH s1 AS (SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf2", "pipeline": [ { "$match": { "b": { "$exists": true } } }, { "$sort": { "b": 1 } } ] }')),
