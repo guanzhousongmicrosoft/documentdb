@@ -187,8 +187,8 @@ bool EnsureMetadataTableReplicated(const char *tableName);
  * The hook allows the extension to do any additional setup
  * after the cluster has been initialized or upgraded.
  */
-void PostSetupClusterHook(bool isInitialize, bool (shouldUpgradeFunc(void *, int, int,
-																	 int)), void *state);
+void PostSetupClusterHook(bool (shouldUpgradeFunc(void *, int, int,
+												  int)), void *state);
 
 
 /*

@@ -477,12 +477,11 @@ EnsureMetadataTableReplicated(const char *tableName)
  * after the cluster has been initialized or upgraded.
  */
 void
-PostSetupClusterHook(bool isInitialize, bool (shouldUpgradeFunc(void *, int, int, int)),
-					 void *state)
+PostSetupClusterHook(bool (shouldUpgradeFunc(void *, int, int, int)), void *state)
 {
 	if (post_setup_cluster_hook != NULL)
 	{
-		return post_setup_cluster_hook(isInitialize, shouldUpgradeFunc, state);
+		return post_setup_cluster_hook(shouldUpgradeFunc, state);
 	}
 }
 
