@@ -19,7 +19,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
    ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=15 loops=1)
          Output: collection.shard_key_value, collection.object_id
          Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id > '{ "" : { "$numberInt" : "5" } }'::bson) AND (collection.object_id <= '{ "" : { "$numberDouble" : "Infinity" } }'::bson))
-         Heap Fetches: xxx
+         Heap Fetches: 0
 (6 rows)
 
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosdb', '{ "aggregate" : "iosc", "pipeline" : [{ "$match" : {"_id": {"$gt": 5, "$lt": 8 }} }, { "$count": "count" }]}') $$);
@@ -30,7 +30,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
    ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=2 loops=1)
          Output: collection.shard_key_value, collection.object_id
          Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id > '{ "" : { "$numberInt" : "5" } }'::bson) AND (collection.object_id <= '{ "" : { "$numberDouble" : "Infinity" } }'::bson) AND (collection.object_id < '{ "" : { "$numberInt" : "8" } }'::bson) AND (collection.object_id >= '{ "" : { "$numberDouble" : "-Infinity" } }'::bson))
-         Heap Fetches: xxx
+         Heap Fetches: 0
 (6 rows)
 
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosdb', '{ "aggregate" : "iosc", "pipeline" : [{ "$match" : {"_id": 5 } }, { "$count": "count" }]}') $$);
@@ -41,7 +41,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
    ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=1 loops=1)
          Output: collection.shard_key_value, collection.object_id
          Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id = '{ "" : { "$numberInt" : "5" } }'::bson))
-         Heap Fetches: xxx
+         Heap Fetches: 0
 (6 rows)
 
 -- does not work with other filters.
@@ -90,7 +90,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
          ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=15 loops=1)
                Output: collection.shard_key_value, collection.object_id
                Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id > '{ "" : { "$numberInt" : "5" } }'::bson) AND (collection.object_id <= '{ "" : { "$numberDouble" : "Infinity" } }'::bson))
-               Heap Fetches: xxx
+               Heap Fetches: 0
                Worker 0:  actual rows=15 loops=1
 (13 rows)
 
@@ -108,7 +108,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
          ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=2 loops=1)
                Output: collection.shard_key_value, collection.object_id
                Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id > '{ "" : { "$numberInt" : "5" } }'::bson) AND (collection.object_id <= '{ "" : { "$numberDouble" : "Infinity" } }'::bson) AND (collection.object_id < '{ "" : { "$numberInt" : "8" } }'::bson) AND (collection.object_id >= '{ "" : { "$numberDouble" : "-Infinity" } }'::bson))
-               Heap Fetches: xxx
+               Heap Fetches: 0
                Worker 0:  actual rows=2 loops=1
 (13 rows)
 
@@ -126,7 +126,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
          ->  Index Only Scan using _id_ on documentdb_data.documents_301 collection (actual rows=1 loops=1)
                Output: collection.shard_key_value, collection.object_id
                Index Cond: ((collection.shard_key_value = '301'::bigint) AND (collection.object_id = '{ "" : { "$numberInt" : "5" } }'::bson))
-               Heap Fetches: xxx
+               Heap Fetches: 0
                Worker 0:  actual rows=1 loops=1
 (13 rows)
 

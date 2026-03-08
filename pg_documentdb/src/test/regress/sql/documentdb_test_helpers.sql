@@ -32,7 +32,7 @@ CALL documentdb_test_helpers.wait_for_background_worker();
 SELECT application_name FROM pg_stat_activity WHERE application_name = 'documentdb_bg_worker_leader';
 
 
-CREATE OR REPLACE FUNCTION documentdb_test_helpers.run_explain_and_trim(p_query text)
+CREATE OR REPLACE FUNCTION documentdb_test_helpers.run_explain_and_trim(p_query text, p_ignore_heap_fetches boolean DEFAULT false)
 RETURNS SETOF text
 AS $$
 DECLARE
@@ -44,7 +44,7 @@ BEGIN
       CONTINUE;
     ELSIF v_explain_row ~ '^\s+Index Searches: [0-9]+\s*$' THEN
       CONTINUE;
-    ELSIF v_explain_row ~ '^\s+Heap Fetches: [0-9]+\s*$' THEN
+    ELSIF p_ignore_heap_fetches AND v_explain_row ~ '^\s+Heap Fetches: [0-9]+\s*$' THEN
       SELECT regexp_replace(v_explain_row, 'Heap Fetches: [0-9]+', 'Heap Fetches: xxx') INTO v_explain_row;
     ELSIF v_explain_row ~ 'Parallel Index Scan using .+ on documents_[0-9]+ collection \(actual rows=[0-9\.]+ loops=[0-9]+\)' THEN
       SELECT regexp_replace(v_explain_row, 'Parallel Index Scan using (.+) on documents_([0-9]+) collection \(actual rows=[0-9\.]+ loops=([0-9]+)\)',

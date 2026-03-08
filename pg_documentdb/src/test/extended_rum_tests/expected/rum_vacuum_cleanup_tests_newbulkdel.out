@@ -116,7 +116,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 9)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=9 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 reset documentdb.forceDisableSeqScan;
@@ -152,7 +152,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 18)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=18 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 -- repeat one more time
@@ -189,7 +189,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 27)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=27 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 reset documentdb.forceDisableSeqScan;
@@ -265,7 +265,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 9)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=9 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 -- introduce dead pages and use the repair functions to clean up the index.
@@ -329,7 +329,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 0)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 reset documentdb.forceDisableSeqScan;
@@ -359,7 +359,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 0)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 reset documentdb.forceDisableSeqScan;
@@ -387,7 +387,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, AN
          scanKeyDetails: key 1: [(isInequality: true, estimatedEntryCount: 0)]
          ->  Index Only Scan using a_1 on documents_500 collection (actual rows=0 loops=1)
                Index Cond: (document @>= '{ "a" : { "$minKey" : 1 } }'::bson)
-               Heap Fetches: xxx
+               Heap Fetches: 0
 (13 rows)
 
 reset documentdb.forceDisableSeqScan;
