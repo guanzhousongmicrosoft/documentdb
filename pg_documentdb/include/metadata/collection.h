@@ -209,6 +209,10 @@ MongoCollection * GetMongoCollectionByColId(uint64 collectionId, LOCKMODE lockMo
 /* get Mongo collection metadata by realtion ID of a collection's shard */
 MongoCollection * GetMongoCollectionByRelationOid(Oid relationId, bool requireShardTable);
 
+/* Try to get the collection ID for a given relation OID */
+bool TryGetCollectionIdByRelationOid(Oid relationId, uint64 *collectionId,
+									 bool requireShardTable);
+
 /* get OID of data table (documents_*) table by collection id */
 Oid GetRelationIdForCollectionId(uint64 collectionId, LOCKMODE lockMode);
 

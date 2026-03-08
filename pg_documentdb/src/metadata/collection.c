@@ -415,16 +415,20 @@ GetMongoCollectionByColId(uint64 collectionId, LOCKMODE lockMode)
 }
 
 
-/*
- * GetMongoCollectionByRelationOid checks if a collection
- * with the specified relationId exists in the ApiCatalogSchemaName.
- */
-MongoCollection *
-GetMongoCollectionByRelationOid(Oid relationId, bool requireShardTable)
+/* Tries to extract the collection ID from a relation OID, returns true if it could and set it to the out param, false otherwise. */
+bool
+TryGetCollectionIdByRelationOid(Oid relationId, uint64 *collectionId, bool
+								requireShardTable)
 {
+	if (collectionId == NULL)
+	{
+		return false;
+	}
+
+	*collectionId = 0;
 	if (get_rel_namespace(relationId) != ApiDataNamespaceOid())
 	{
-		return NULL;
+		return false;
 	}
 
 	/* Get the relation's name using the relationId. */
@@ -433,21 +437,33 @@ GetMongoCollectionByRelationOid(Oid relationId, bool requireShardTable)
 	/* If the relation lookup failed, return false. */
 	if (relationName == NULL)
 	{
-		return NULL;
+		return false;
 	}
 
 	/* Get the collection ID from the shard table name. */
-	uint64 collectionId = 0;
-	if (!CheckRelNameValidity(relationName, &collectionId, requireShardTable))
+	if (!CheckRelNameValidity(relationName, collectionId, requireShardTable))
 	{
-		return NULL;
+		return false;
 	}
+
+	return *collectionId != 0;
+}
+
+
+/*
+ * GetMongoCollectionByRelationOid checks if a collection
+ * with the specified relationId exists in the ApiCatalogSchemaName.
+ */
+MongoCollection *
+GetMongoCollectionByRelationOid(Oid relationId, bool requireShardTable)
+{
+	uint64 collectionId = 0;
 
 	/*
 	 * If the collection Id can't be parsed from relation's name,
 	 * then this is not a valid shard of a collection.
 	 */
-	if (collectionId == 0)
+	if (!TryGetCollectionIdByRelationOid(relationId, &collectionId, requireShardTable))
 	{
 		return NULL;
 	}

@@ -45,6 +45,7 @@
 extern bool ForceUseIndexIfAvailable;
 extern bool EnableIndexOnlyScan;
 extern bool EnableCompositeIndexPlanner;
+extern bool EnableIndexOnlyScanOnCostFunction;
 extern bool DisableExtendedRumExplainPlans;
 extern bool EnableOrderedCostEstimator;
 extern bool EnableExtendedExplainPlans;
@@ -666,12 +667,16 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 	Selectivity boundarySelectivity = 0;
 	int numBoundaryQuals = 0;
 	double dataPagesProportionFetched = 0;
+	bool convertedToIndexOnlyScan = false;
 
 	bool isCompositeOpFamily = IsCompositeOpFamilyOid(path->indexinfo->relam,
 													  path->indexinfo->opfamily[0]);
 	if (isCompositeOpFamily)
 	{
-		bool firstColumnSpecified = TraverseIndexPathForCompositeIndex(path, root);
+		bool canSupportIndexOnlyScan = false;
+		bool firstColumnSpecified = TraverseIndexPathForCompositeIndex(path, root,
+																	   &
+																	   canSupportIndexOnlyScan);
 
 		/* If this is a composite index, then we need to ensure that
 		 * the first column of the index matches the query path.
@@ -686,6 +691,23 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 			*indexCorrelation = 0;
 			*indexPages = 0;
 			return;
+		}
+
+		if (canSupportIndexOnlyScan && path->path.pathtype != T_IndexOnlyScan)
+		{
+			/* We copy the index opt info to a new allocated memory as we can't modify
+			 * memory we don't own, we should let PG handle that memory. */
+			IndexOptInfo *oldIndexInfo = path->indexinfo;
+			path->indexinfo = (IndexOptInfo *) palloc(sizeof(IndexOptInfo));
+			memcpy(path->indexinfo, oldIndexInfo, sizeof(IndexOptInfo));
+
+			path->indexinfo->canreturn = palloc0(sizeof(bool) *
+												 path->indexinfo->
+												 ncolumns);
+			path->indexinfo->canreturn[0] = true;
+
+			path->path.pathtype = T_IndexOnlyScan;
+			convertedToIndexOnlyScan = true;
 		}
 	}
 
@@ -721,6 +743,18 @@ extension_rumcostestimate_core(PlannerInfo *root, IndexPath *path, double loop_c
 		*indexStartupCost = 0;
 	}
 
+	if (convertedToIndexOnlyScan)
+	{
+		/*
+		 * We convert this path to T_IndexOnlyScan inside the AM cost callback.
+		 * At that point, PostgreSQL's cost_index() has already taken the is-index-only
+		 * decision for this costing pass, so cost_index() does not apply its usual allvisfrac
+		 * adjustment here. We apply the same visibility-fraction adjustment in this
+		 * callback to approximate index-only scan costing for this pass.
+		 */
+		*indexSelectivity = *indexSelectivity * (1.0 - path->indexinfo->rel->allvisfrac);
+	}
+
 	if (EnableExplainScanIndexCosts && EnableExtendedExplainPlans)
 	{
 		RangeTblEntry *rte = planner_rt_fetch(path->indexinfo->rel->relid, root);
@@ -754,28 +788,30 @@ CompositeIndexSupportsIndexOnlyScan(const IndexPath *indexPath)
 		return false;
 	}
 
-	if (indexPath->indexinfo->opclassoptions != NULL)
+	if (indexPath->indexinfo->opclassoptions == NULL)
 	{
-		BsonGinIndexOptionsBase *options =
-			(BsonGinIndexOptionsBase *) indexPath->indexinfo->opclassoptions[0];
-		if (options->type != IndexOptionsType_Composite)
-		{
-			return false;
-		}
+		return false;
+	}
 
-		BsonGinCompositePathOptions *compositeOptions =
-			(BsonGinCompositePathOptions *) options;
-		if (compositeOptions->wildcardPathIndex >= 0)
-		{
-			/* Wildcard indexes don't support index only scans for now.
-			 * This is because wildcard indexes don't index documents and so we don't have full
-			 * fidelity recreation of index terms.
-			 * We can technically do better if the filter ranges don't overlap with nulls, arrays
-			 * and documents but that needs to be considered as part of the cost function +
-			 * order by integration.
-			 */
-			return false;
-		}
+	BsonGinIndexOptionsBase *options =
+		(BsonGinIndexOptionsBase *) indexPath->indexinfo->opclassoptions[0];
+	if (options->type != IndexOptionsType_Composite)
+	{
+		return false;
+	}
+
+	BsonGinCompositePathOptions *compositeOptions =
+		(BsonGinCompositePathOptions *) options;
+	if (compositeOptions->wildcardPathIndex >= 0)
+	{
+		/* Wildcard indexes don't support index only scans for now.
+		 * This is because wildcard indexes don't index documents and so we don't have full
+		 * fidelity recreation of index terms.
+		 * We can technically do better if the filter ranges don't overlap with nulls, arrays
+		 * and documents but that needs to be considered as part of the cost function +
+		 * order by integration.
+		 */
+		return false;
 	}
 
 	Relation indexRelation = index_open(indexPath->indexinfo->indexoid, NoLock);
@@ -1622,6 +1658,12 @@ ExplainCompositeScan(IndexScanDesc scan, ExplainState *es)
 	if (outerScanState->hasCorrelatedReducedTerms)
 	{
 		ExplainPropertyBool("hasCorrelatedTerms", true, es);
+	}
+
+	bool hasTruncation = RumGetTruncationStatus(scan->indexRelation);
+	if (hasTruncation)
+	{
+		ExplainPropertyBool("hasTruncation", true, es);
 	}
 
 	if (outerScanState->compositeKey.sk_argument != (Datum) 0)

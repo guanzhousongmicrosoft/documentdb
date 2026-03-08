@@ -243,7 +243,7 @@ void GetCollationFromIndexOptions(void *indexOptions, StringView *collationStrin
 
 struct PlannerInfo;
 bool TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct
-										PlannerInfo *root);
+										PlannerInfo *root, bool *canSupportIndexOnlyScan);
 List * ExtractBoundaryQualsForOrderedIndexPath(struct IndexPath *indexPath,
 											   int *num_sa_scans);
 

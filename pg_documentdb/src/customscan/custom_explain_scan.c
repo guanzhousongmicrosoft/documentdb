@@ -197,7 +197,8 @@ AddExplainCustomPathCore(List *pathList, Oid relOid, uint64 collectionId)
 		else if (inputPath->pathtype == T_BitmapHeapScan)
 		{
 			BitmapHeapPath *bitmapHeapPath = (BitmapHeapPath *) inputPath;
-			if (bitmapHeapPath->bitmapqual->pathtype == T_IndexScan)
+			if (bitmapHeapPath->bitmapqual->pathtype == T_IndexScan ||
+				bitmapHeapPath->bitmapqual->pathtype == T_IndexOnlyScan)
 			{
 				IndexPath *indexPath = (IndexPath *) bitmapHeapPath->bitmapqual;
 				isValidPath = IsBsonRegularIndexAm(indexPath->indexinfo->relam);
@@ -212,7 +213,8 @@ AddExplainCustomPathCore(List *pathList, Oid relOid, uint64 collectionId)
 				foreach(bitmapCell, bitmapAndPath->bitmapquals)
 				{
 					Path *childPath = (Path *) lfirst(bitmapCell);
-					if (childPath->pathtype != T_IndexScan ||
+					if ((childPath->pathtype != T_IndexScan &&
+						 childPath->pathtype != T_IndexOnlyScan) ||
 						!IsBsonRegularIndexAm(
 							((IndexPath *) childPath)->indexinfo->relam))
 					{
@@ -230,7 +232,8 @@ AddExplainCustomPathCore(List *pathList, Oid relOid, uint64 collectionId)
 				foreach(bitmapCell, bitmapOrPath->bitmapquals)
 				{
 					Path *childPath = (Path *) lfirst(bitmapCell);
-					if (childPath->pathtype != T_IndexScan ||
+					if ((childPath->pathtype != T_IndexScan &&
+						 childPath->pathtype != T_IndexOnlyScan) ||
 						!IsBsonRegularIndexAm(
 							((IndexPath *) childPath)->indexinfo->relam))
 					{

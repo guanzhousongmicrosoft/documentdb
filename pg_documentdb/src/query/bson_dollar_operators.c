@@ -1181,7 +1181,8 @@ bson_dollar_fullscan(PG_FUNCTION_ARGS)
 	 * should be executed as a full scan, without any filters.
 	 * The actual logic for full scan is handled in the query planner.
 	 */
-	ereport(ERROR, (errmsg("This function should be replaced by the planner")));
+	ereport(ERROR, (errmsg(
+						"bson_dollar_fullscan function should be replaced by the planner")));
 }
 
 
@@ -1193,7 +1194,8 @@ bson_dollar_index_hint(PG_FUNCTION_ARGS)
 	 * should use a specific index hint, which is handled in the query planner.
 	 * The actual logic for index hint is handled in the query planner.
 	 */
-	ereport(ERROR, (errmsg("The index hint function should be replaced by the planner")));
+	ereport(ERROR, (errmsg(
+						"bson_dollar_index_hint function should be replaced by the planner")));
 }
 
 

@@ -1836,10 +1836,11 @@ TrimPathListForSeqTypeScans(List *pathList)
 		Path *path = (Path *) lfirst(cell);
 
 		if (path->pathtype != T_IndexScan &&
-			path->pathtype != T_BitmapHeapScan)
+			path->pathtype != T_BitmapHeapScan &&
+			path->pathtype != T_IndexOnlyScan)
 		{
-			elog(DEBUG1, "Excluding path non-index path %d for scan",
-				 path->pathtype);
+			ereport(DEBUG1, errmsg("Excluding path non-index path %d for scan",
+								   path->pathtype));
 			pathList = foreach_delete_current(pathList, cell);
 			continue;
 		}
@@ -1850,8 +1851,9 @@ TrimPathListForSeqTypeScans(List *pathList)
 		 */
 		if (IsPrimaryKeyScanOnJustShardKey(path))
 		{
-			elog(DEBUG1, "Excluding primary key scan on just shard key %d for scan",
-				 path->pathtype);
+			ereport(DEBUG1, errmsg(
+						"Excluding primary key scan on just shard key %d for scan",
+						path->pathtype));
 			pathList = foreach_delete_current(pathList, cell);
 			continue;
 		}
@@ -1861,8 +1863,9 @@ TrimPathListForSeqTypeScans(List *pathList)
 			if (bitmapHeapPath->bitmapqual != NULL &&
 				IsPrimaryKeyScanOnJustShardKey(bitmapHeapPath->bitmapqual))
 			{
-				elog(DEBUG1, "Excluding bitmap heap scan on just shard key %d for scan",
-					 path->pathtype);
+				ereport(DEBUG1, errmsg(
+							"Excluding bitmap heap scan on just shard key %d for scan",
+							path->pathtype));
 				pathList = foreach_delete_current(pathList, cell);
 				continue;
 			}

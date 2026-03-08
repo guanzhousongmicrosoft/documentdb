@@ -128,6 +128,8 @@ BEGIN
       CONTINUE;
     ELSIF v_explain_row ~ '^\s+Index Searches: [0-9]+\s*$' THEN
       CONTINUE;
+    ELSIF v_explain_row ~ '^\s+Heap Fetches: [0-9]+\s*$' THEN
+      SELECT regexp_replace(v_explain_row, 'Heap Fetches: [0-9]+', 'Heap Fetches: xxx') INTO v_explain_row;
     ELSIF v_explain_row ~ 'Parallel Index Scan using .+ on documents_[0-9]+ collection \(actual rows=[0-9\.]+ loops=[0-9]+\)' THEN
       SELECT regexp_replace(v_explain_row, 'Parallel Index Scan using (.+) on documents_([0-9]+) collection \(actual rows=[0-9\.]+ loops=([0-9]+)\)',
                                            'Parallel Index Scan using \1 on documents_\2 collection (actual rows=xyz loops=\3)') INTO v_explain_row;

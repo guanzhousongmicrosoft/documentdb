@@ -86,9 +86,12 @@ bool EnableCompositeIndexPlanner = DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER;
 #define DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR true
 bool EnableOrderedCostEstimator = DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR;
 
-/* We can enable by default once we stabilize by moving it's creation to the cost estimate. */
-#define DEFAULT_ENABLE_INDEX_ONLY_SCAN false
+/* Remove index only scan GUCs after v113. */
+#define DEFAULT_ENABLE_INDEX_ONLY_SCAN true
 bool EnableIndexOnlyScan = DEFAULT_ENABLE_INDEX_ONLY_SCAN;
+
+#define DEFAULT_ENABLE_INDEX_ONLY_SCAN_ON_COST true
+bool EnableIndexOnlyScanOnCostFunction = DEFAULT_ENABLE_INDEX_ONLY_SCAN_ON_COST;
 
 #define DEFAULT_ENABLE_ID_INDEX_CUSTOM_COST_FUNCTION true
 bool EnableIdIndexCustomCostFunction = DEFAULT_ENABLE_ID_INDEX_CUSTOM_COST_FUNCTION;
@@ -609,6 +612,13 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		gettext_noop(
 			"Whether to enable index only scan for queries that can be satisfied by an index without accessing the table."),
 		NULL, &EnableIndexOnlyScan, DEFAULT_ENABLE_INDEX_ONLY_SCAN,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableIndexOnlyScanOnCost", newGucPrefix),
+		gettext_noop(
+			"Whether to enable index only scan on cost function or planner."),
+		NULL, &EnableIndexOnlyScanOnCostFunction, DEFAULT_ENABLE_INDEX_ONLY_SCAN_ON_COST,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
