@@ -118,7 +118,8 @@ typedef enum CollModSpecFlags
 /* --------------------------------------------------------- */
 static void HandleUniqueConversion(IndexDetails *indexDetails);
 static CollModSpecFlags ParseSpecSetCollModOptions(const pgbson *collModSpec,
-												   CollModOptions *collModOptions);
+												   CollModOptions *collModOptions,
+												   Datum *databaseNameDatum);
 static void ParseIndexSpecSetCollModOptions(bson_iter_t *indexSpecIter,
 											CollModIndexOptions *collModIndexOptions,
 											CollModSpecFlags *specFlags);
@@ -159,21 +160,18 @@ PG_FUNCTION_INFO_V1(command_coll_mod);
 Datum
 command_coll_mod(PG_FUNCTION_ARGS)
 {
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("Database name must not be NULL")));
-	}
-
-	if (PG_ARGISNULL(1))
-	{
-		ereport(ERROR, (errmsg("collection name cannot be NULL")));
-	}
-
 	if (PG_ARGISNULL(2))
 	{
 		ereport(ERROR, (errmsg("collMod spec cannot be NULL")));
 	}
 	pgbson *collModSpec = PG_GETARG_PGBSON(2);
+
+	Datum databaseDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
+
+	if (PG_ARGISNULL(1))
+	{
+		ereport(ERROR, (errmsg("collection name cannot be NULL")));
+	}
 
 	ReportFeatureUsage(FEATURE_COMMAND_COLLMOD);
 
@@ -187,12 +185,17 @@ command_coll_mod(PG_FUNCTION_ARGS)
 	 * Currently, only the collection itself is locked, since options that could affect
 	 * other collections (such as viewOn, pipelines, or validators) are not yet supported.
 	 */
-	Datum databaseDatum = PG_GETARG_DATUM(0);
 
 	/* Validate the collMod options received because GW only checks for valid collection name */
 	CollModOptions collModOptions = { 0 };
 	CollModSpecFlags specFlags = ParseSpecSetCollModOptions(collModSpec,
-															&collModOptions);
+															&collModOptions,
+															&databaseDatum);
+
+	if (databaseDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("Database name must not be NULL")));
+	}
 
 	if (collModOptions.collectionName == NULL)
 	{
@@ -301,7 +304,8 @@ command_coll_mod(PG_FUNCTION_ARGS)
  */
 static CollModSpecFlags
 ParseSpecSetCollModOptions(const pgbson *collModSpec,
-						   CollModOptions *collModOptions)
+						   CollModOptions *collModOptions,
+						   Datum *databaseNameDatum)
 {
 	Assert(collModSpec != NULL && collModOptions != NULL);
 
@@ -373,6 +377,10 @@ ParseSpecSetCollModOptions(const pgbson *collModSpec,
 																				 "collMod.validationAction",
 																				 &
 																				 hasSchemaValidation);
+		}
+		else if (strcmp(key, "$db") == 0)
+		{
+			ExtractDatabaseNameFromSpec(&iter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(key))
 		{

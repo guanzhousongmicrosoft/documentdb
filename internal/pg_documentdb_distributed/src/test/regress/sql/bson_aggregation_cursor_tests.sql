@@ -292,19 +292,19 @@ SET documentdb.enableNewMinMaxAccumulators TO off;
 ROLLBACK;
 
 -- test for errors when returnKey is set to true
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "returnKey" : true, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "test" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "returnKey" : true, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "db" }');
 
 -- test for no errors when returnKey is set to false
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "returnKey" : false, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "test" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "returnKey" : false, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "db" }');
 
 -- test for errors when returnKey and showRecordId are set to true
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "showRecordId": true, "returnKey" : true, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "test" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "filter" : { "title" : "a" }, "limit" : 1, "singleBatch" : true, "batchSize" : 1, "showRecordId": true, "returnKey" : true, "lsid" : { "id" : { "$binary" : { "base64": "apfUje6LTzKH9YfO3smIGA==", "subType" : "04" } } }, "$db" : "db" }');
 
 -- test for ntoreturn in find command with unset documentdb.version
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies",  "limit" : 1,  "batchSize" : 1, "ntoreturn":1 ,"$db" : "test" }');
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 ,"$db" : "test" }');
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 , "batchSize":1, "$db" : "test" }');
-SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 , "limit":1, "$db" : "test" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies",  "limit" : 1,  "batchSize" : 1, "ntoreturn":1 ,"$db" : "db" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 ,"$db" : "db" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 , "batchSize":1, "$db" : "db" }');
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find" : "movies", "ntoreturn":1 , "limit":1, "$db" : "db" }');
 
 -- Test $limit for large docs, even when batch size is enough to fit all limited docs, the response size should enforce persisted cursors for $limit
 SELECT 1 FROM drop_collection('db','get_aggregation_cursor_test');

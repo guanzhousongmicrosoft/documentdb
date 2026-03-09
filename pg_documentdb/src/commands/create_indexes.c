@@ -495,16 +495,12 @@ GetIndexAmHandlerByName(IndexDef *indexDef)
 Datum
 command_create_indexes_non_concurrently(PG_FUNCTION_ARGS)
 {
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("dbName cannot be NULL")));
-	}
-	Datum dbNameDatum = PG_GETARG_DATUM(0);
-
 	if (PG_ARGISNULL(1))
 	{
 		ereport(ERROR, (errmsg("arg cannot be NULL")));
 	}
+
+	Datum dbNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
 
 	/* Temporary hack. This allows the MX Tests to call
 	 * the non-concurrent index creation so that we can get
@@ -525,9 +521,15 @@ command_create_indexes_non_concurrently(PG_FUNCTION_ARGS)
 	ThrowIfServerOrTransactionReadOnly();
 	pgbson *arg = PgbsonDeduplicateFields(PG_GETARG_PGBSON(1));
 	bool buildAsUniqueForPrepareUnique = false;
-	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(dbNameDatum,
+	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum,
 															  arg,
 															  buildAsUniqueForPrepareUnique);
+
+	if (dbNameDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("dbName cannot be NULL")));
+	}
+
 	skip_check_collection_create |= createIndexesArg.blocking;
 	bool uniqueIndexOnly = false;
 	CreateIndexesResult result = create_indexes_non_concurrently(
@@ -548,12 +550,18 @@ command_create_indexes_non_concurrently(PG_FUNCTION_ARGS)
 Datum
 command_create_temp_indexes_non_concurrently(PG_FUNCTION_ARGS)
 {
-	Datum dbNameDatum = PG_GETARG_DATUM(0);
 	pgbson *createIndexesMessage = PgbsonDeduplicateFields(PG_GETARG_PGBSON(1));
+	Datum dbNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
+
 	bool buildAsUniqueForPrepareUnique = false;
-	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(dbNameDatum,
+	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum,
 															  createIndexesMessage,
 															  buildAsUniqueForPrepareUnique);
+
+	if (dbNameDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("dbName cannot be NULL")));
+	}
 
 	char *collectionName = createIndexesArg.collectionName;
 	Datum collectionNameDatum = CStringGetTextDatum(collectionName);
@@ -636,12 +644,6 @@ command_create_indexes(const CallStmt *callStmt, ProcessUtilityContext context,
 	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
 	InitFCInfoForCallStmt(fcinfo, callStmt, context, params);
 
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("dbName cannot be NULL")));
-	}
-	Datum dbNameDatum = PG_GETARG_DATUM(0);
-
 	if (PG_ARGISNULL(1))
 	{
 		ereport(ERROR, (errmsg("arg cannot be NULL")));
@@ -657,10 +659,17 @@ command_create_indexes(const CallStmt *callStmt, ProcessUtilityContext context,
 	 *   {"createIndexes": 1, "createIndexes": "my_collection_name"}
 	 */
 	pgbson *arg = PgbsonDeduplicateFields(PG_GETARG_PGBSON(1));
+	Datum dbNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
+
 	bool buildAsUniqueForPrepareUnique = false;
-	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(dbNameDatum,
+	CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum,
 															  arg,
 															  buildAsUniqueForPrepareUnique);
+
+	if (dbNameDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("dbName cannot be NULL")));
+	}
 	bool isTopLevel = (context == PROCESS_UTILITY_TOPLEVEL);
 	bool buildIndexesConcurrently = !IsInTransactionBlock(isTopLevel);
 	buildIndexesConcurrently &= !createIndexesArg.blocking;
@@ -1288,7 +1297,7 @@ InitFCInfoForCallStmt(FunctionCallInfo fcinfo, const CallStmt *callStmt,
  * dbCommand/createIndexes.
  */
 CreateIndexesArg
-ParseCreateIndexesArg(Datum dbNameDatum, pgbson *arg, bool buildAsUniqueForPrepareUnique)
+ParseCreateIndexesArg(Datum *dbNameDatum, pgbson *arg, bool buildAsUniqueForPrepareUnique)
 {
 	CreateIndexesArg createIndexesArg = { 0 };
 
@@ -1385,6 +1394,10 @@ ParseCreateIndexesArg(Datum dbNameDatum, pgbson *arg, bool buildAsUniqueForPrepa
 					bson_iter_value(&argIter));
 			}
 		}
+		else if (strcmp(argKey, "$db") == 0)
+		{
+			ExtractDatabaseNameFromSpec(&argIter, dbNameDatum);
+		}
 		else if (IsCommonSpecIgnoredField(argKey))
 		{
 			elog(DEBUG1, "Unrecognized command field: createIndexes.%s", argKey);
@@ -1406,6 +1419,11 @@ ParseCreateIndexesArg(Datum dbNameDatum, pgbson *arg, bool buildAsUniqueForPrepa
 	}
 
 	/* verify that all non-optional fields are given */
+	if (*dbNameDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("$db must be specified.")));
+	}
+
 	if (!gotIndexesArray)
 	{
 		ThrowTopLevelMissingFieldError("createIndexes.indexes");
@@ -1416,7 +1434,7 @@ ParseCreateIndexesArg(Datum dbNameDatum, pgbson *arg, bool buildAsUniqueForPrepa
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDNAMESPACE),
 						errmsg("The specified namespace is invalid: '%s'.",
-							   TextDatumGetCString(dbNameDatum))));
+							   TextDatumGetCString(*dbNameDatum))));
 	}
 
 	if (list_length(createIndexesArg.indexDefList) == 0)

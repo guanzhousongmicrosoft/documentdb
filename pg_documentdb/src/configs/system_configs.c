@@ -36,6 +36,9 @@ static const struct config_enum_entry VECTOR_ITERATIVE_SCAN_OPTIONS[] =
  */
 extern bool EnableCreateCollectionOnInsert;
 
+#define DEFAULT_ENABLE_DB_NAME_VALIDATION true
+bool EnableDbNameValidation = DEFAULT_ENABLE_DB_NAME_VALIDATION;
+
 #define DEFAULT_SHARDING_MAX_CHUNKS 128
 int ShardingMaxChunks = DEFAULT_SHARDING_MAX_CHUNKS;
 
@@ -193,6 +196,13 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 		psprintf("%s.enable_create_collection_on_insert", prefix),
 		gettext_noop("Create a collection when inserting into a non-existent collection"),
 		NULL, &EnableCreateCollectionOnInsert, true,
+		PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableDbNameValidation", prefix),
+		gettext_noop(
+			"Whether to enforce that $db in the command body matches the database argument."),
+		NULL, &EnableDbNameValidation, DEFAULT_ENABLE_DB_NAME_VALIDATION,
 		PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
 	DefineCustomIntVariable(

@@ -1,6 +1,7 @@
 ### documentdb v0.111-0 (Unreleased) ###
 * Reject duplicate `_id` in `$group` stage. Guarded by `failOnGroupIdDuplicate` feature flag *[Bugfix]*
 * Update file modification time in `DeserializeFileState` to prevent TTL-based cleanup from expiring actively-used cursor files *[Bugfix]*
+* Support `$db` field in wire protocol command specs for insert, update, delete, findAndModify, createIndexes, dropIndexes, collMod, and background index commands *[Feature]*
 
 ### documentdb v0.110-0 (Unreleased) ###
 * Add support for keyword `description` in `$jsonSchema` *[Feature]*

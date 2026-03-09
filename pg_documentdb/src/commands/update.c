@@ -281,7 +281,8 @@ extern bool UseLocalExecutionShardQueries;
 extern bool EnableVariablesSupportForWriteCommands;
 
 static BatchUpdateSpec * BuildBatchUpdateSpec(bson_iter_t *updateCommandIter,
-											  pgbsonsequence *updateDocs);
+											  pgbsonsequence *updateDocs,
+											  Datum *databaseNameDatum);
 static List * BuildUpdateSpecList(bson_iter_t *updateArrayIter, bool *hasUpsert,
 								  const bson_value_t *variableSpec);
 static List * BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs,
@@ -392,7 +393,7 @@ static void CallUpdateWorkerForUpdateOne(MongoCollection *collection,
 										 int64 shardKeyHash, text *transactionId,
 										 UpdateOneResult *result);
 
-static HeapTuple PerformUpdateCore(Datum databaseNameDatum, pgbson *updateSpec,
+static HeapTuple PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 								   pgbsonsequence *updateDocs, text *transactionId,
 								   TupleDesc resultTupleDesc, bool isTransactional,
 								   MemoryContext allocContext);
@@ -423,17 +424,12 @@ PG_FUNCTION_INFO_V1(command_update_worker);
 Datum
 command_update_bulk(PG_FUNCTION_ARGS)
 {
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("database name must not be NULL")));
-	}
-
 	if (PG_ARGISNULL(1))
 	{
 		ereport(ERROR, (errmsg("update document cannot be NULL")));
 	}
 
-	Datum databaseNameDatum = PG_GETARG_DATUM(0);
+	Datum databaseNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
 	pgbson *updateSpec = PG_GETARG_PGBSON(1);
 	pgbsonsequence *updateDocs = PG_GETARG_MAYBE_NULL_PGBSON_SEQUENCE(2);
 
@@ -467,7 +463,7 @@ command_update_bulk(PG_FUNCTION_ARGS)
 	/* For results we need a stable memory context across transactions */
 	MemoryContext stableContext = fcinfo->flinfo->fn_mcxt;
 	bool isTransactional = false;
-	HeapTuple resultTuple = PerformUpdateCore(databaseNameDatum, updateSpec, updateDocs,
+	HeapTuple resultTuple = PerformUpdateCore(&databaseNameDatum, updateSpec, updateDocs,
 											  transactionId, resultTupDesc,
 											  isTransactional, stableContext);
 	PG_RETURN_DATUM(HeapTupleGetDatum(resultTuple));
@@ -481,17 +477,12 @@ command_update_bulk(PG_FUNCTION_ARGS)
 Datum
 command_update_txn_proc(PG_FUNCTION_ARGS)
 {
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("database name must not be NULL")));
-	}
-
 	if (PG_ARGISNULL(1))
 	{
 		ereport(ERROR, (errmsg("update document cannot be NULL")));
 	}
 
-	Datum databaseNameDatum = PG_GETARG_DATUM(0);
+	Datum databaseNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
 	pgbson *updateSpec = PG_GETARG_PGBSON(1);
 
 	pgbsonsequence *updateDocs = PG_GETARG_MAYBE_NULL_PGBSON_SEQUENCE(2);
@@ -516,7 +507,7 @@ command_update_txn_proc(PG_FUNCTION_ARGS)
 	}
 
 	bool isTransactional = true;
-	HeapTuple resultTuple = PerformUpdateCore(databaseNameDatum, updateSpec, updateDocs,
+	HeapTuple resultTuple = PerformUpdateCore(&databaseNameDatum, updateSpec, updateDocs,
 											  transactionId, resultTupDesc,
 											  isTransactional, CurrentMemoryContext);
 	PG_RETURN_DATUM(HeapTupleGetDatum(resultTuple));
@@ -529,17 +520,12 @@ command_update_txn_proc(PG_FUNCTION_ARGS)
 Datum
 command_update(PG_FUNCTION_ARGS)
 {
-	if (PG_ARGISNULL(0))
-	{
-		ereport(ERROR, (errmsg("database name must not be NULL")));
-	}
-
 	if (PG_ARGISNULL(1))
 	{
 		ereport(ERROR, (errmsg("update document cannot be NULL")));
 	}
 
-	Datum databaseNameDatum = PG_GETARG_DATUM(0);
+	Datum databaseNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
 	pgbson *updateSpec = PG_GETARG_PGBSON(1);
 
 	pgbsonsequence *updateDocs = PG_GETARG_MAYBE_NULL_PGBSON_SEQUENCE(2);
@@ -564,7 +550,7 @@ command_update(PG_FUNCTION_ARGS)
 	}
 
 	bool isTransactional = true;
-	HeapTuple resultTuple = PerformUpdateCore(databaseNameDatum, updateSpec, updateDocs,
+	HeapTuple resultTuple = PerformUpdateCore(&databaseNameDatum, updateSpec, updateDocs,
 											  transactionId, resultTupDesc,
 											  isTransactional, CurrentMemoryContext);
 	PG_RETURN_DATUM(HeapTupleGetDatum(resultTuple));
@@ -580,7 +566,7 @@ IsUnshardedRemoteCollection(MongoCollection *collection)
 
 
 static HeapTuple
-PerformUpdateCore(Datum databaseNameDatum, pgbson *updateSpec,
+PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 				  pgbsonsequence *updateDocs, text *transactionId,
 				  TupleDesc resultTupDesc, bool isTransactional,
 				  MemoryContext allocContext)
@@ -597,10 +583,12 @@ PerformUpdateCore(Datum databaseNameDatum, pgbson *updateSpec,
 	 * We first validate update command BSON and build a specification.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(allocContext);
-	BatchUpdateSpec *batchSpec = BuildBatchUpdateSpec(&updateCommandIter, updateDocs);
+	BatchUpdateSpec *batchSpec = BuildBatchUpdateSpec(&updateCommandIter, updateDocs,
+													  databaseNameDatum);
+
 	Datum collectionNameDatum = CStringGetTextDatum(batchSpec->collectionName);
 	MongoCollection *collection =
-		GetMongoCollectionByNameDatum(databaseNameDatum, collectionNameDatum,
+		GetMongoCollectionByNameDatum(*databaseNameDatum, collectionNameDatum,
 									  RowExclusiveLock);
 	MemoryContextSwitchTo(oldContext);
 
@@ -615,12 +603,12 @@ PerformUpdateCore(Datum databaseNameDatum, pgbson *updateSpec,
 		MemoryContextSwitchTo(oldContext);
 
 		ValidateCollectionNameForUnauthorizedSystemNs(batchSpec->collectionName,
-													  databaseNameDatum);
+													  *databaseNameDatum);
 
 		if (batchSpec->hasUpsert)
 		{
 			/* upsert on a non-existent collection creates the collection */
-			collection = CreateCollectionForInsert(databaseNameDatum,
+			collection = CreateCollectionForInsert(*databaseNameDatum,
 												   collectionNameDatum);
 		}
 		else
@@ -790,7 +778,8 @@ BuildUpdates(BatchUpdateSpec *spec)
  * a BatchUpdateSpec.
  */
 static BatchUpdateSpec *
-BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs)
+BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs,
+					 Datum *databaseNameDatum)
 {
 	const char *collectionName = NULL;
 	bool isOrdered = true;
@@ -873,6 +862,10 @@ BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs)
 								errmsg("update.let is not yet supported")));
 			}
 		}
+		else if (strcmp(field, "$db") == 0)
+		{
+			ExtractDatabaseNameFromSpec(updateCommandIter, databaseNameDatum);
+		}
 		else if (IsCommonSpecIgnoredField(field))
 		{
 			elog(DEBUG1, "Unrecognized command field: update.%s", field);
@@ -890,6 +883,11 @@ BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs)
 								"The BSON field 'update.%s' is not recognized as a valid field",
 								field)));
 		}
+	}
+
+	if (*databaseNameDatum == (Datum) 0)
+	{
+		ereport(ERROR, (errmsg("database name must not be NULL")));
 	}
 
 	if (collectionName == NULL)

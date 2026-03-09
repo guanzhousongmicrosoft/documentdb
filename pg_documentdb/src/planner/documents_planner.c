@@ -1718,7 +1718,7 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 
 	Const *databaseConst = (Const *) databaseArg;
 	Const *aggregationConst = (Const *) secondArg;
-	if (databaseConst->constisnull || aggregationConst->constisnull)
+	if (aggregationConst->constisnull)
 	{
 		ereport(ERROR, (errmsg(
 							"Aggregation pipeline arguments should not be null. This is unexpected")));
@@ -1729,29 +1729,31 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 	QueryData queryData = GenerateFirstPageQueryData();
 	bool enableCursorParam = false;
 	bool setStatementTimeout = false;
+	text *databaseName = databaseConst->constisnull ? NULL : DatumGetTextPP(
+		databaseConst->constvalue);
 	Query *finalQuery;
 	if (aggregationFunc->funcid == ApiCatalogAggregationPipelineFunctionId())
 	{
-		finalQuery = GenerateAggregationQuery(DatumGetTextPP(databaseConst->constvalue),
+		finalQuery = GenerateAggregationQuery(databaseName,
 											  pipeline,
 											  &queryData,
 											  enableCursorParam, setStatementTimeout);
 	}
 	else if (aggregationFunc->funcid == ApiCatalogAggregationFindFunctionId())
 	{
-		finalQuery = GenerateFindQuery(DatumGetTextPP(databaseConst->constvalue),
+		finalQuery = GenerateFindQuery(databaseName,
 									   pipeline, &queryData,
 									   enableCursorParam, setStatementTimeout);
 	}
 	else if (aggregationFunc->funcid == ApiCatalogAggregationCountFunctionId())
 	{
-		finalQuery = GenerateCountQuery(DatumGetTextPP(databaseConst->constvalue),
+		finalQuery = GenerateCountQuery(databaseName,
 										pipeline,
 										setStatementTimeout);
 	}
 	else if (aggregationFunc->funcid == ApiCatalogAggregationDistinctFunctionId())
 	{
-		finalQuery = GenerateDistinctQuery(DatumGetTextPP(databaseConst->constvalue),
+		finalQuery = GenerateDistinctQuery(databaseName,
 										   pipeline,
 										   setStatementTimeout);
 	}
@@ -1764,7 +1766,7 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 								"Aggregation pipeline arguments should not be null. This is unexpected")));
 		}
 
-		finalQuery = GenerateGetMoreQuery(DatumGetTextPP(databaseConst->constvalue),
+		finalQuery = GenerateGetMoreQuery(databaseName,
 										  pipeline, DatumGetPgBson(
 											  thirdConst->constvalue),
 										  &queryData, enableCursorParam,

@@ -1520,7 +1520,7 @@ ShardCollectionCore(ShardCollectionArgs *args)
 		SetGUCLocally(psprintf("%s.defaultUseCompositeOpClass", ApiGucPrefixV2), "false");
 
 		bool buildAsUniqueForPrepareUnique = isPrepareUniqueSupported;
-		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(databaseDatum,
+		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&databaseDatum,
 																  createIndexesMsg,
 																  buildAsUniqueForPrepareUnique);
 		bool skipCheckCollectionCreate = createIndexesArg.blocking;

@@ -78,7 +78,7 @@ select 1 from documentdb_api.insert_one('db', 'removeme', '{"a":10,"_id":10}');
 select documentdb_api.delete('db', NULL);
 ERROR:  delete document cannot be NULL
 select documentdb_api.delete(NULL, '{"delete":"removeme", "deletes":[{"q":{},"limit":0}]}');
-ERROR:  Database name must not be NULL value
+ERROR:  $db must not be NULL
 select documentdb_api.delete('db', '{"deletes":[{"q":{},"limit":0}]}');
 ERROR:  The required BSON field 'delete.delete' is not present in the data.
 select documentdb_api.delete('db', '{"delete":"removeme"}');

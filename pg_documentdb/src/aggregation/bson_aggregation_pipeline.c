@@ -1319,17 +1319,11 @@ GenerateAggregationQuery(text *database, pgbson *aggregationSpec, QueryData *que
 		}
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
-			/* BackCompat: Ignore if provided top level */
-			if (context.databaseNameDatum == NULL)
+			text *prevDb = context.databaseNameDatum;
+			ExtractDatabaseNameTextFromSpec(&aggregationIterator,
+											&context.databaseNameDatum);
+			if (prevDb == NULL)
 			{
-				/* Extract the database out of $db */
-				EnsureTopLevelFieldType("$db", &aggregationIterator, BSON_TYPE_UTF8);
-
-				uint32_t databaseLength = 0;
-				const char *databaseName = bson_iter_utf8(&aggregationIterator,
-														  &databaseLength);
-				context.databaseNameDatum = cstring_to_text_with_len(databaseName,
-																	 databaseLength);
 				database = context.databaseNameDatum;
 			}
 		}
@@ -1518,17 +1512,11 @@ GenerateFindQuery(text *databaseDatum, pgbson *findSpec, QueryData *queryData, b
 			{
 				if (StringViewEqualsCString(&keyView, "$db"))
 				{
-					/* BackCompat: Ignore if provided top level */
-					if (context.databaseNameDatum == NULL)
+					text *prevDb = context.databaseNameDatum;
+					ExtractDatabaseNameTextFromSpec(&findIterator,
+													&context.databaseNameDatum);
+					if (prevDb == NULL)
 					{
-						/* Extract the database out of $db */
-						EnsureTopLevelFieldType("$db", &findIterator, BSON_TYPE_UTF8);
-
-						uint32_t databaseLength = 0;
-						const char *databaseName = bson_iter_utf8(&findIterator,
-																  &databaseLength);
-						context.databaseNameDatum = cstring_to_text_with_len(databaseName,
-																			 databaseLength);
 						databaseDatum = context.databaseNameDatum;
 					}
 
@@ -2122,12 +2110,28 @@ GenerateCountQuery(text *databaseDatum, pgbson *countSpec, bool setStatementTime
 			EnsureTopLevelFieldIsNumberLike("distinct.maxTimeMS", value);
 			SetExplicitStatementTimeout(BsonValueAsInt32(value));
 		}
+		else if (StringViewEqualsCString(&keyView, "$db"))
+		{
+			text *prevDb = context.databaseNameDatum;
+			ExtractDatabaseNameTextFromSpec(&countIterator,
+											&context.databaseNameDatum);
+			if (prevDb == NULL)
+			{
+				databaseDatum = context.databaseNameDatum;
+			}
+		}
 		else if (!IsCommonSpecIgnoredField(keyView.string))
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 							errmsg("%.*s is an unknown field",
 								   keyView.length, keyView.string)));
 		}
+	}
+
+	if (context.databaseNameDatum == NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
+						errmsg("Required element \"$db\" missing.")));
 	}
 
 	if (collectionName.length == 0)
@@ -2310,12 +2314,28 @@ GenerateDistinctQuery(text *databaseDatum, pgbson *distinctSpec, bool setStateme
 			EnsureTopLevelFieldIsNumberLike("distinct.maxTimeMS", value);
 			SetExplicitStatementTimeout(BsonValueAsInt32(value));
 		}
+		else if (StringViewEqualsCString(&keyView, "$db"))
+		{
+			text *prevDb = context.databaseNameDatum;
+			ExtractDatabaseNameTextFromSpec(&distinctIter,
+											&context.databaseNameDatum);
+			if (prevDb == NULL)
+			{
+				databaseDatum = context.databaseNameDatum;
+			}
+		}
 		else if (!IsCommonSpecIgnoredField(keyView.string))
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 							errmsg("%.*s is an unknown field",
 								   keyView.length, keyView.string)));
 		}
+	}
+
+	if (context.databaseNameDatum == NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
+						errmsg("Required element \"$db\" missing.")));
 	}
 
 	if (!hasDistinct)
@@ -2402,18 +2422,7 @@ ParseGetMore(text **databaseName, pgbson *getMoreSpec, QueryData *queryData, boo
 		}
 		else if (strcmp(pathKey, "$db") == 0)
 		{
-			/* BackCompat: Ignore if provided top level */
-			if (*databaseName == NULL)
-			{
-				/* Extract the database out of $db */
-				EnsureTopLevelFieldType("$db", &cursorSpecIter, BSON_TYPE_UTF8);
-
-				uint32_t databaseLength = 0;
-				const char *databaseStr = bson_iter_utf8(&cursorSpecIter,
-														 &databaseLength);
-				*databaseName = cstring_to_text_with_len(databaseStr,
-														 databaseLength);
-			}
+			ExtractDatabaseNameTextFromSpec(&cursorSpecIter, databaseName);
 		}
 		else if (!IsCommonSpecIgnoredField(pathKey))
 		{
