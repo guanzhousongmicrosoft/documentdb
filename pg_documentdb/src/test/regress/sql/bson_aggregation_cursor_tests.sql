@@ -399,3 +399,20 @@ SELECT cursorPage FROM cursor_get_more(database => 'db',
     continuationSpec => :'r1_continuation');
 
 ROLLBACK;
+
+-- Regression test for GitHub issue documentdb#484: crash in pg_get_querydef
+-- when called after pg_plan_query mutates the query tree.
+-- Exercise different cursor types with enableDebugQueryText on non-existent collection.
+SET documentdb.enableDebugQueryText TO on;
+SELECT document FROM documentdb_api.count_query('db', '{ "count": "nonexistent_coll_484" }');
+-- Streamable cursor (simple find, no sort/skip/limit)
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find": "nonexistent_coll_484", "filter": {} }');
+-- SingleBatch cursor (find with limit 1)
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find": "nonexistent_coll_484", "filter": {}, "limit": 1 }');
+-- Persistent cursor (find with sort)
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find": "nonexistent_coll_484", "filter": {}, "sort": {"a": 1} }');
+-- PointRead cursor (find by _id on non-existent collection, falls back to Streamable)
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find": "nonexistent_coll_484", "filter": {"_id": 1} }');
+-- PointRead cursor (find by _id on existing collection with _id index)
+SELECT cursorPage FROM documentdb_api.find_cursor_first_page('db', '{ "find": "get_aggregation_cursor_smalldoc_test", "filter": {"_id": 1} }');
+SET documentdb.enableDebugQueryText TO off;
