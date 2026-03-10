@@ -80,6 +80,7 @@ extern int MaxAggregationStagesAllowed;
 extern bool EnableConversionStreamableToSingleBatch;
 extern bool EnableFindProjectionAfterOffset;
 extern bool EnableNewCountAggregates;
+extern bool FailOnNonEmptyGroupCountArg;
 extern bool FailOnGroupIdDuplicate;
 extern bool EnableUseLookupNewProjectInlineMethod;
 extern bool InlineChangeStreamMatchStage;
@@ -6117,6 +6118,19 @@ HandleGroup(const bson_value_t *existingValue, Query *query,
 		else if (StringViewEqualsCString(&accumulatorName, "$count"))
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_COUNT);
+
+			if (!IsBsonValueEmptyDocument(&accumulatorElement.bsonValue))
+			{
+				ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_COUNT_WITH_ARG);
+
+				if (FailOnNonEmptyGroupCountArg)
+				{
+					ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_TYPEMISMATCH),
+									errmsg(
+										"$count:{} accumulator requires 0 arguments")));
+				}
+			}
+
 			if (CanUseNewCountAggregates())
 			{
 				/* Use the new BSONCOUNT aggregate. */

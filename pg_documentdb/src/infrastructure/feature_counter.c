@@ -208,6 +208,7 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_AGGREGATE_GROUP_BOTTOM_N] = "group_bottom_n",
 	[FEATURE_AGGREGATE_GROUP_CONCAT_ARRAYS] = "group_concat_arrays",
 	[FEATURE_AGGREGATE_GROUP_COUNT] = "group_count",
+	[FEATURE_AGGREGATE_GROUP_COUNT_WITH_ARG] = "group_count_with_arg",
 	[FEATURE_AGGREGATE_GROUP_FIRST] = "group_first",
 	[FEATURE_AGGREGATE_GROUP_FIRST_N] = "group_first_n",
 	[FEATURE_AGGREGATE_GROUP_LAST] = "group_last",
@@ -517,8 +518,11 @@ SharedFeatureCounterShmemSize(void)
 void
 SharedFeatureCounterShmemInit(void)
 {
+	/* Split into two asserts so the error message tells which direction to fix. */
 	StaticAssertExpr(MAX_FEATURE_INDEX < MAX_FEATURE_COUNT,
 					 "feature enums should be less than size - bump up MAX_FEATURE_COUNT");
+	StaticAssertExpr(MAX_FEATURE_INDEX + 1 <= MAX_FEATURE_COUNT,
+					 "MAX_FEATURE_COUNT is too large - reduce it to MAX_FEATURE_INDEX + 1");
 
 	/* Validate that we have names for the feature counters as well */
 	for (int i = 0; i < MAX_FEATURE_INDEX; i++)

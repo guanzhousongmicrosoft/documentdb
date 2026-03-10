@@ -1,6 +1,7 @@
 SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 SET documentdb.next_collection_id TO 3500;
 SET documentdb.next_collection_index_id TO 3500;
+SET documentdb.failOnNonEmptyGroupCountArg TO on;
 SET documentdb.failOnGroupIdDuplicate TO on;
 SELECT documentdb_api.insert_one('db','aggregation_pipeline','{"_id":"1", "int": 10, "a" : { "b" : [ "x", 1, 2.0, true ] } }', NULL);
 NOTICE:  creating collection
@@ -378,7 +379,7 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 (2 rows)
 
 -- $group
-SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
                                   document                                   
 -----------------------------------------------------------------------------
  { "_id" : { "$numberInt" : "0" }, "d" : "2", "e" : { "$numberInt" : "1" } }
@@ -386,7 +387,7 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 (2 rows)
 
 SET documentdb.enableNewMinMaxAccumulators TO on;
-SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
                                   document                                   
 -----------------------------------------------------------------------------
  { "_id" : { "$numberInt" : "0" }, "d" : "2", "e" : { "$numberInt" : "1" } }
@@ -394,6 +395,21 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 (2 rows)
 
 SET documentdb.enableNewMinMaxAccumulators TO off;
+-- $group $count with arguments should error
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
+ERROR:  $count:{} accumulator requires 0 arguments
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": "invalid" } } }], "cursor": {} }');
+ERROR:  $count:{} accumulator requires 0 arguments
+-- $group $count with arguments should succeed when flag is off
+SET documentdb.failOnNonEmptyGroupCountArg TO off;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
+                                  document                                   
+-----------------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "0" }, "d" : "2", "e" : { "$numberInt" : "1" } }
+ { "_id" : { "$numberInt" : "1" }, "d" : "3", "e" : { "$numberInt" : "2" } }
+(2 rows)
+
+SET documentdb.failOnNonEmptyGroupCountArg TO on;
 -- $group with duplicate _id should error
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": "$int", "_id": "$a" } }], "cursor": {} }');
 ERROR:  a group's _id may only be specified once
@@ -1829,3 +1845,5 @@ SELECT BSONLASTNONSORTED(NULL, 3) FROM documentdb_api.collection('db', 'bsonFirs
  { "" : [  ] }
 (1 row)
 
+RESET documentdb.failOnNonEmptyGroupCountArg;
+RESET documentdb.failOnGroupIdDuplicate;

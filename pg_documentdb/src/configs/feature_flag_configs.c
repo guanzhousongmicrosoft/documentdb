@@ -254,6 +254,10 @@ bool EnableIdIndexPushdownForQueryOp =
 #define DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE true
 bool EnableBinarySearchForOrderedMove = DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE;
 
+/* Remove after v113. Default to true in v112 */
+#define DEFAULT_FAIL_ON_NON_EMPTY_GROUP_COUNT_ARG false
+bool FailOnNonEmptyGroupCountArg = DEFAULT_FAIL_ON_NON_EMPTY_GROUP_COUNT_ARG;
+
 /*
  * SECTION: Let support feature flags
  */
@@ -749,6 +753,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		gettext_noop(
 			"Whether to enable new count aggregate optimizations."),
 		NULL, &EnableNewCountAggregates, DEFAULT_ENABLE_NEW_COUNT_AGGREGATES,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.failOnNonEmptyGroupCountArg", newGucPrefix),
+		gettext_noop(
+			"Whether to fail when $count accumulator in $group has non-empty arguments."),
+		NULL, &FailOnNonEmptyGroupCountArg,
+		DEFAULT_FAIL_ON_NON_EMPTY_GROUP_COUNT_ARG,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

@@ -169,14 +169,14 @@ EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bs
 
 
 -- groupby pushdown works for non-multi-key indexes
-EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf", "pipeline": [ { "$match": { "a": { "$exists": true } } }, { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
+EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf", "pipeline": [ { "$match": { "a": { "$exists": true } } }, { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
 
 set enable_bitmapscan to off;
-EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
+EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
 
 -- the same does not work on multi-key indexes
-EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf_arr", "pipeline": [ { "$match": { "a": { "$exists": true } } }, { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
-EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf_arr", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
+EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf_arr", "pipeline": [ { "$match": { "a": { "$exists": true } } }, { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
+EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "query_orderby_perf_arr", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
 
 set enable_bitmapscan to off;
 -- for non-multi-key requires, prefix equality until the min order by key only.
@@ -426,8 +426,8 @@ select COUNT(documentdb_api.insert_one('comp_db', 'ordering_groups', FORMAT('{ "
 ANALYZE documentdb_data.documents_68009;
 
 set documentdb.forceDisableSeqScan to on;
-EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
-SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": 1 } } } ] }');
+EXPLAIN (ANALYZE ON, COSTS OFF, SUMMARY OFF, TIMING OFF) SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
+SELECT document FROM bson_aggregation_pipeline('comp_db', '{ "aggregate": "ordering_groups", "pipeline": [ { "$group": { "_id": "$a", "c": { "$count": {} } } } ] }');
 
 
 -- sorting on prefix with missing path is not allowed unless it's equality.
