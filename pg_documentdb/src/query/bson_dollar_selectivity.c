@@ -18,7 +18,6 @@
 #include "query/bson_dollar_selectivity.h"
 #include "aggregation/bson_query_common.h"
 
-extern bool EnableNewOperatorSelectivityMode;
 extern bool EnableCompositeIndexPlanner;
 extern bool LowSelectivityForLookup;
 
@@ -94,7 +93,7 @@ GetDollarOperatorSelectivity(PlannerInfo *planner, Oid selectivityOpExpr,
 		}
 	}
 
-	if (!EnableNewOperatorSelectivityMode && !EnableCompositeIndexPlanner)
+	if (!EnableCompositeIndexPlanner)
 	{
 		return GetDisableStatisticSelectivity(args, defaultExprSelectivity);
 	}

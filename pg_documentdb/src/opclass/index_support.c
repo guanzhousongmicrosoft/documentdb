@@ -346,7 +346,6 @@ static const ForceIndexSupportFuncs ForceIndexOperatorSupport[] =
 
 extern bool EnableVectorForceIndexPushdown;
 extern bool EnableGeonearForceIndexPushdown;
-extern bool EnableNewOperatorSelectivityMode;
 extern bool EnableCompositeIndexPlanner;
 extern bool LowSelectivityForLookup;
 extern bool EnableExprLookupIndexPushdown;
@@ -411,7 +410,7 @@ dollar_support(PG_FUNCTION_ARGS)
 	else if (IsA(supportRequest, SupportRequestSelectivity))
 	{
 		SupportRequestSelectivity *req = (SupportRequestSelectivity *) supportRequest;
-		if ((EnableNewOperatorSelectivityMode || EnableCompositeIndexPlanner))
+		if (EnableCompositeIndexPlanner)
 		{
 			const MongoIndexOperatorInfo *indexOperator =
 				GetMongoIndexOperatorInfoByPostgresFuncId(req->funcid);

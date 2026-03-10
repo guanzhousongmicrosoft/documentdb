@@ -16,31 +16,44 @@
 
 
 /*
- * SECTION: Top level feature flags
+ * SECTION: Schema validation flags
  */
+
+/* Added in v108, Pending stabilization */
 #define DEFAULT_ENABLE_SCHEMA_VALIDATION false
 bool EnableSchemaValidation =
 	DEFAULT_ENABLE_SCHEMA_VALIDATION;
 
+/* Added in v108, Pending stabilization */
 #define DEFAULT_ENABLE_BYPASSDOCUMENTVALIDATION false
 bool EnableBypassDocumentValidation =
 	DEFAULT_ENABLE_BYPASSDOCUMENTVALIDATION;
 
+/*
+ * SECTION: Authentication & Authorization user flags
+ */
+
+/* Added in v108, enabled in v108, unknown stabilization time */
 #define DEFAULT_ENABLE_USERNAME_PASSWORD_CONSTRAINTS true
 bool EnableUsernamePasswordConstraints = DEFAULT_ENABLE_USERNAME_PASSWORD_CONSTRAINTS;
 
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_USERS_INFO_PRIVILEGES true
 bool EnableUsersInfoPrivileges = DEFAULT_ENABLE_USERS_INFO_PRIVILEGES;
 
+/* Added in v108, enabled in v108, Why is this a feature flag */
 #define DEFAULT_ENABLE_NATIVE_AUTHENTICATION true
 bool IsNativeAuthEnabled = DEFAULT_ENABLE_NATIVE_AUTHENTICATION;
 
+/* Added in v108, Pending stabilization */
 #define DEFAULT_ENABLE_ROLE_CRUD false
 bool EnableRoleCrud = DEFAULT_ENABLE_ROLE_CRUD;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_USERS_ADMIN_DB_CHECK false
 bool EnableUsersAdminDBCheck = DEFAULT_ENABLE_USERS_ADMIN_DB_CHECK;
 
+/* Added in v109, enabled in v109, Unknown stabilization time */
 #define DEFAULT_ENABLE_ROLES_ADMIN_DB_CHECK true
 bool EnableRolesAdminDBCheck = DEFAULT_ENABLE_ROLES_ADMIN_DB_CHECK;
 
@@ -49,26 +62,33 @@ bool EnableRolesAdminDBCheck = DEFAULT_ENABLE_ROLES_ADMIN_DB_CHECK;
  */
 
 /* GUC to enable HNSW index type and query for vector search. */
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_VECTOR_HNSW_INDEX true
 bool EnableVectorHNSWIndex = DEFAULT_ENABLE_VECTOR_HNSW_INDEX;
 
 /* GUC to enable vector pre-filtering feature for vector search. */
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_VECTOR_PRE_FILTER true
 bool EnableVectorPreFilter = DEFAULT_ENABLE_VECTOR_PRE_FILTER;
 
+/* Added in v108, Pending stabilization */
 #define DEFAULT_ENABLE_VECTOR_PRE_FILTER_V2 false
 bool EnableVectorPreFilterV2 = DEFAULT_ENABLE_VECTOR_PRE_FILTER_V2;
 
+/* Added in v108, Pending stabilization */
 #define DEFAULT_ENABLE_VECTOR_FORCE_INDEX_PUSHDOWN false
 bool EnableVectorForceIndexPushdown = DEFAULT_ENABLE_VECTOR_FORCE_INDEX_PUSHDOWN;
 
 /* GUC to enable vector compression for vector search. */
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_VECTOR_COMPRESSION_HALF true
 bool EnableVectorCompressionHalf = DEFAULT_ENABLE_VECTOR_COMPRESSION_HALF;
 
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_VECTOR_COMPRESSION_PQ true
 bool EnableVectorCompressionPQ = DEFAULT_ENABLE_VECTOR_COMPRESSION_PQ;
 
+/* Added in v108, enabled in v108, Unknown stabilization time */
 #define DEFAULT_ENABLE_VECTOR_CALCULATE_DEFAULT_SEARCH_PARAM true
 bool EnableVectorCalculateDefaultSearchParameter =
 	DEFAULT_ENABLE_VECTOR_CALCULATE_DEFAULT_SEARCH_PARAM;
@@ -77,74 +97,83 @@ bool EnableVectorCalculateDefaultSearchParameter =
  * SECTION: Indexing feature flags
  */
 
+/* Long term feature flag - defaulted in 108 - to track older clusters */
+/* added in v107, enabled in v108, retire after v999 */
 #define DEFAULT_USE_NEW_COMPOSITE_INDEX_OPCLASS true
 bool DefaultUseCompositeOpClass = DEFAULT_USE_NEW_COMPOSITE_INDEX_OPCLASS;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER false
 bool EnableCompositeIndexPlanner = DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER;
 
+/* Added in v110, enabled in v110, remove after v112 */
 #define DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR true
 bool EnableOrderedCostEstimator = DEFAULT_ENABLE_ORDERED_COST_ESTIMATOR;
 
-/* Remove index only scan GUCs after v113. */
+/* We can enable by default once we stabilize by moving it's creation to the cost estimate. */
+/* Added in v107, enabled in v111, remove after v113. */
 #define DEFAULT_ENABLE_INDEX_ONLY_SCAN true
 bool EnableIndexOnlyScan = DEFAULT_ENABLE_INDEX_ONLY_SCAN;
 
+/* Added in v111, enabled in v111, remove after v113 */
 #define DEFAULT_ENABLE_INDEX_ONLY_SCAN_ON_COST true
 bool EnableIndexOnlyScanOnCostFunction = DEFAULT_ENABLE_INDEX_ONLY_SCAN_ON_COST;
 
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_ID_INDEX_CUSTOM_COST_FUNCTION true
 bool EnableIdIndexCustomCostFunction = DEFAULT_ENABLE_ID_INDEX_CUSTOM_COST_FUNCTION;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_ORDER_BY_ID_ON_COST false
 bool EnableOrderByIdOnCostFunction = DEFAULT_ENABLE_ORDER_BY_ID_ON_COST;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_COMPOSITE_PARALLEL_INDEX_SCAN false
 bool EnableCompositeParallelIndexScan = DEFAULT_ENABLE_COMPOSITE_PARALLEL_INDEX_SCAN;
 
 /* Note: this is a long term feature flag since we need to validate compatiblity
  * in mixed mode for older indexes - once this is
  * enabled by default - please move this to testing_configs.
+ * Added in v109, enabled in v109, remove after v999
  */
 #define DEFAULT_ENABLE_VALUE_ONLY_INDEX_TERMS true
 bool EnableValueOnlyIndexTerms = DEFAULT_ENABLE_VALUE_ONLY_INDEX_TERMS;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_USE_NEW_UNIQUE_HASH_EQUALITY_FUNCTION true
 bool UseNewUniqueHashEqualityFunction = DEFAULT_USE_NEW_UNIQUE_HASH_EQUALITY_FUNCTION;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_COMPOSITE_UNIQUE_HASH true
 bool EnableCompositeUniqueHash = DEFAULT_ENABLE_COMPOSITE_UNIQUE_HASH;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_RUM_USE_NEW_COMPOSITE_TERM_GENERATION true
 bool RumUseNewCompositeTermGeneration = DEFAULT_RUM_USE_NEW_COMPOSITE_TERM_GENERATION;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v110, remove after v113 */
 #define DEFAULT_ENABLE_COMPOSITE_WILDCARD_INDEX true
 bool EnableCompositeWildcardIndex = DEFAULT_ENABLE_COMPOSITE_WILDCARD_INDEX;
 
+/* Added in v110, enabled in v110, remove after v113 */
 #define DEFAULT_CREATE_TTL_INDEX_AS_COMPOSITE true
 bool CreateTTLIndexAsCompositeByDefault = DEFAULT_CREATE_TTL_INDEX_AS_COMPOSITE;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_REDUCED_CORRELATED_TERMS false
 bool EnableCompositeReducedCorrelatedTerms = DEFAULT_ENABLE_REDUCED_CORRELATED_TERMS;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_UNIQUE_REDUCED_CORRELATED_TERMS false
 bool EnableUniqueCompositeReducedCorrelatedTerms =
 	DEFAULT_ENABLE_UNIQUE_REDUCED_CORRELATED_TERMS;
 
-#define DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS true
-bool EnableExplainScanIndexCosts = DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS;
-
-#define DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME true
-bool EnableExplainScanNamespaceName = DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME;
-
 /* Longer term feature flag to track older cluster data: Move to testing_configs when convenient */
+/* Added in v109, enabled in v109, remove after v999 */
 #define DEFAULT_ENABLE_COMPOSITE_SHARD_DOCUMENT_TERMS true
 bool EnableCompositeShardDocumentTerms = DEFAULT_ENABLE_COMPOSITE_SHARD_DOCUMENT_TERMS;
 
+/* Added in v110, enabled in v110, remove after v113 */
 #define DEFAULT_ENABLE_COMPOSITE_WILDCARD_SKIP_EMPTY_ENTRIES true
 bool EnableCompositeWildcardSkipEmptyEntries =
 	DEFAULT_ENABLE_COMPOSITE_WILDCARD_SKIP_EMPTY_ENTRIES;
@@ -152,41 +181,42 @@ bool EnableCompositeWildcardSkipEmptyEntries =
 /*
  * SECTION: Planner feature flags
  */
-#define DEFAULT_ENABLE_NEW_OPERATOR_SELECTIVITY false
-bool EnableNewOperatorSelectivityMode = DEFAULT_ENABLE_NEW_OPERATOR_SELECTIVITY;
 
-/* Remove after v109 */
+/* Added in v108, enabled in v108, remove after v109 */
 #define DEFAULT_LOOKUP_ENABLE_INNER_JOIN true
 bool EnableLookupInnerJoin = DEFAULT_LOOKUP_ENABLE_INNER_JOIN;
 
-#define DEFAULT_FORCE_BITMAP_SCAN_FOR_LOOKUP false
-bool ForceBitmapScanForLookup = DEFAULT_FORCE_BITMAP_SCAN_FOR_LOOKUP;
-
-/* Remove after v110 */
+/* Added in v108, enabled in v108, remove after v110 */
 #define DEFAULT_LOW_SELECTIVITY_FOR_LOOKUP true
 bool LowSelectivityForLookup = DEFAULT_LOW_SELECTIVITY_FOR_LOOKUP;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v112 */
 #define DEFAULT_ENABLE_EXPR_LOOKUP_INDEX_PUSHDOWN true
 bool EnableExprLookupIndexPushdown = DEFAULT_ENABLE_EXPR_LOOKUP_INDEX_PUSHDOWN;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_UNIFY_PFE_ON_INDEXINFO true
 bool EnableUnifyPfeOnIndexInfo = DEFAULT_ENABLE_UNIFY_PFE_ON_INDEXINFO;
 
-/* Remove after v111 */
-#define DEFAULT_ENABLE_UPDATE_BSON_DOCUMENT true
-bool EnableUpdateBsonDocument = DEFAULT_ENABLE_UPDATE_BSON_DOCUMENT;
-
-/* Remove after v111 */
+/* Added in v108, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_NEW_COUNT_AGGREGATES true
 bool EnableNewCountAggregates = DEFAULT_ENABLE_NEW_COUNT_AGGREGATES;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_EXTENDED_EXPLAIN_ON_ANALYZEOFF true
 bool EnableExtendedExplainOnAnalyzeOff = DEFAULT_ENABLE_EXTENDED_EXPLAIN_ON_ANALYZEOFF;
 
-/* Remove after v113 */
+/* Left here temporarily for stabilization. Move to test config and remove once all test output is updated */
+/* Added in v110, enabled in v110, remove after v112 */
+#define DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS true
+bool EnableExplainScanIndexCosts = DEFAULT_ENABLE_EXPLAIN_SCAN_INDEX_COSTS;
+
+/* Left here temporarily for stabilization. Move to test config and remove once all test output is updated */
+/* Added in v110, enabled in v110, remove after v112 */
+#define DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME true
+bool EnableExplainScanNamespaceName = DEFAULT_ENABLE_EXPLAIN_SCAN_NAMESPACE_NAME;
+
+/* Added in v110, Pending stabilization */
 #define DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS false
 bool EnableNewMinMaxAccumulators = DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS;
 
@@ -194,81 +224,102 @@ bool EnableNewMinMaxAccumulators = DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS;
 /*
  * SECTION: Aggregation & Query feature flags
  */
+
+/* Added in v108, enabled in v108, unknown removal */
 #define DEFAULT_ENABLE_NOW_SYSTEM_VARIABLE true
 bool EnableNowSystemVariable = DEFAULT_ENABLE_NOW_SYSTEM_VARIABLE;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_PRIMARY_KEY_CURSOR_SCAN false
 bool EnablePrimaryKeyCursorScan = DEFAULT_ENABLE_PRIMARY_KEY_CURSOR_SCAN;
 
+/* Added in v110, Pending stabilization */
 #define DEFAULT_ENABLE_CONTINUATION_FAST_BITMAP_LOOKUP false
 bool EnableContinuationFastBitmapLookup = DEFAULT_ENABLE_CONTINUATION_FAST_BITMAP_LOOKUP;
 
+/* Added in v108, Pending stabilization */
 #define DEFAULT_USE_FILE_BASED_PERSISTED_CURSORS false
 bool UseFileBasedPersistedCursors = DEFAULT_USE_FILE_BASED_PERSISTED_CURSORS;
 
-/* Remove after v113. Default to true in v112 */
+/* Added in v111, Pending stabilization */
 #define DEFAULT_FAIL_ON_GROUP_ID_DUPLICATE false
 bool FailOnGroupIdDuplicate =
 	DEFAULT_FAIL_ON_GROUP_ID_DUPLICATE;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_CONVERSION_STREAMABLE_SINGLE_BATCH true
 bool EnableConversionStreamableToSingleBatch =
 	DEFAULT_ENABLE_CONVERSION_STREAMABLE_SINGLE_BATCH;
 
-/* Remove after v111 */
+/* Added in v109, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_FIND_PROJECTION_AFTER_OFFSET true
 bool EnableFindProjectionAfterOffset = DEFAULT_ENABLE_FIND_PROJECTION_AFTER_OFFSET;
 
-/* Remove after v109 */
+/* Added in v108, enabled in v109, remove after v111 */
 #define DEFAULT_ENABLE_DELAYED_HOLD_PORTAL true
 bool EnableDelayedHoldPortal = DEFAULT_ENABLE_DELAYED_HOLD_PORTAL;
 
-/* Remove after v109 */
-#define DEFAULT_FORCE_COLL_STATS_DATA_COLLECTION false
-bool ForceCollStatsDataCollection = DEFAULT_FORCE_COLL_STATS_DATA_COLLECTION;
-
-/* Remove after 110 */
+/* Added in v108, enabled in v108, remove after v110 */
 #define DEFAULT_ENABLE_ID_INDEX_PUSHDOWN true
 bool EnableIdIndexPushdown = DEFAULT_ENABLE_ID_INDEX_PUSHDOWN;
 
+/* Added in v110, enabled in 110, remove after v113 */
 #define DEFAULT_ENABLE_DOLLAR_IN_TO_SCALAR_ARRAY_OP_EXPR_CONVERSION true
 bool EnableDollarInToScalarArrayOpExprConversion =
 	DEFAULT_ENABLE_DOLLAR_IN_TO_SCALAR_ARRAY_OP_EXPR_CONVERSION;
 
-/* Remove after 111*/
+/* Added in v109, Enabled in v109, Remove after 111 */
 #define DEFAULT_USE_LOOKUP_NEW_PROJECT_INLINE_METHOD true
 bool EnableUseLookupNewProjectInlineMethod = DEFAULT_USE_LOOKUP_NEW_PROJECT_INLINE_METHOD;
+
+/* Added in v111, enabled in v111, remove after v114 */
 #define DEFAULT_USE_FOREIGN_KEY_LOOKUP_INLINE true
 bool EnableUseForeignKeyLookupInline = DEFAULT_USE_FOREIGN_KEY_LOOKUP_INLINE;
 
-/* Remove after 111 */
+/* Added in v110, enabled in v110, remove after v113 */
 #define DEFAULT_ENABLE_ADD_TO_SET_AGGREGATION_REWRITE true
 bool EnableAddToSetAggregationRewrite = DEFAULT_ENABLE_ADD_TO_SET_AGGREGATION_REWRITE;
 
-/* Remove after 112*/
+/* Added in v109, enabled in v109, Remove after 112*/
 #define DEFAULT_ENABLE_ID_INDEX_PUSHDOWN_FOR_QUERY_OP true
 bool EnableIdIndexPushdownForQueryOp =
 	DEFAULT_ENABLE_ID_INDEX_PUSHDOWN_FOR_QUERY_OP;
 
+/* Added in v110, enabled in v110, remove after v112 */
 #define DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE true
 bool EnableBinarySearchForOrderedMove = DEFAULT_ENABLE_BINARY_SEARCH_FOR_ORDERED_MOVE;
 
-/* Remove after v113. Default to true in v112 */
+/* Added in v110, enabled in v110, remove after v112 */
+#define DEFAULT_INLINE_CHANGESTREAM_MATCH_STAGES true
+bool InlineChangeStreamMatchStage = DEFAULT_INLINE_CHANGESTREAM_MATCH_STAGES;
+
+/* Added in v110, enabled in v110, unknown stabilization removal time */
+#define DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS true
+bool RemoveMatchNamespaceFilters = DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS;
+
+/* Added in v111, enabled in v111, Remove after v113 */
+#define DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED true
+bool MultiplePositionalNotAllowed = DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED;
+
+/* Added in v111, Pending stabilization */
 #define DEFAULT_FAIL_ON_NON_EMPTY_GROUP_COUNT_ARG false
 bool FailOnNonEmptyGroupCountArg = DEFAULT_FAIL_ON_NON_EMPTY_GROUP_COUNT_ARG;
 
 /*
  * SECTION: Let support feature flags
  */
+
+/* Added in v108, enabled in v108, unknown stabilization removal time */
 #define DEFAULT_ENABLE_LET_AND_COLLATION_FOR_QUERY_MATCH true
 bool EnableLetAndCollationForQueryMatch =
 	DEFAULT_ENABLE_LET_AND_COLLATION_FOR_QUERY_MATCH;
 
+/* Added in v108, enabled in v109, Unknown stabilization removal time */
 #define DEFAULT_ENABLE_VARIABLES_SUPPORT_FOR_WRITE_COMMANDS true
 bool EnableVariablesSupportForWriteCommands =
 	DEFAULT_ENABLE_VARIABLES_SUPPORT_FOR_WRITE_COMMANDS;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_OPERATOR_VARIABLES_IN_LOOKUP false
 bool EnableOperatorVariablesInLookup =
 	DEFAULT_ENABLE_OPERATOR_VARIABLES_IN_LOOKUP;
@@ -276,47 +327,55 @@ bool EnableOperatorVariablesInLookup =
 /*
  * SECTION: Collation feature flags
  */
+
+/* Added in v108, Pending stabilization */
 #define DEFAULT_SKIP_FAIL_ON_COLLATION false
 bool SkipFailOnCollation = DEFAULT_SKIP_FAIL_ON_COLLATION;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_LOOKUP_ID_JOIN_OPTIMIZATION_ON_COLLATION false
 bool EnableLookupIdJoinOptimizationOnCollation =
 	DEFAULT_ENABLE_LOOKUP_ID_JOIN_OPTIMIZATION_ON_COLLATION;
 
+/* Added in v110, Pending stabilization */
 #define DEFAULT_ENABLE_COLLATION_WITH_INDEXES false
 bool EnableCollationWithIndexes = DEFAULT_ENABLE_COLLATION_WITH_INDEXES;
 
 
 /*
- * SECTION: DML Write Path feature flags
+ * SECTION: DML & Write path feature flags
  */
 
-#define DEFAULT_RUM_FAIL_ON_LOST_PATH false
-bool RumFailOnLostPath = DEFAULT_RUM_FAIL_ON_LOST_PATH;
+/* Added in v109, enabled in v109, remove after v112 */
+#define DEFAULT_ENABLE_UPDATE_BSON_DOCUMENT true
+bool EnableUpdateBsonDocument = DEFAULT_ENABLE_UPDATE_BSON_DOCUMENT;
 
 
 /*
  * SECTION: Cluster administration & DDL feature flags
  */
+
+/* Added in v108, Pending stabilization */
 #define DEFAULT_RECREATE_RETRY_TABLE_ON_SHARDING false
 bool RecreateRetryTableOnSharding = DEFAULT_RECREATE_RETRY_TABLE_ON_SHARDING;
 
-#define DEFAULT_ENABLE_DATA_TABLES_WITHOUT_CREATION_TIME true
-bool EnableDataTableWithoutCreationTime =
-	DEFAULT_ENABLE_DATA_TABLES_WITHOUT_CREATION_TIME;
-
+/* Added in v108, enabled in v108, unknown retirement schedule */
 #define DEFAULT_ENABLE_SCHEMA_ENFORCEMENT_FOR_CSFLE true
 bool EnableSchemaEnforcementForCSFLE = DEFAULT_ENABLE_SCHEMA_ENFORCEMENT_FOR_CSFLE;
 
+/* Added in v108, enabled in v108, remove after v113 */
 #define DEFAULT_USE_PG_STATS_LIVE_TUPLES_FOR_COUNT true
 bool UsePgStatsLiveTuplesForCount = DEFAULT_USE_PG_STATS_LIVE_TUPLES_FOR_COUNT;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_PREPARE_UNIQUE false
 bool EnablePrepareUnique = DEFAULT_ENABLE_PREPARE_UNIQUE;
 
+/* Added in v109, Pending stabilization */
 #define DEFAULT_ENABLE_COLLMOD_UNIQUE false
 bool EnableCollModUnique = DEFAULT_ENABLE_COLLMOD_UNIQUE;
 
+/* Added in v110, enabled in v110, remove after v113 */
 #define DEFAULT_ENABLE_DROP_INDEXES_ON_READ_ONLY true
 bool EnableDropInvalidIndexesOnReadOnly = DEFAULT_ENABLE_DROP_INDEXES_ON_READ_ONLY;
 
@@ -324,20 +383,9 @@ bool EnableDropInvalidIndexesOnReadOnly = DEFAULT_ENABLE_DROP_INDEXES_ON_READ_ON
  * SECTION: Schedule jobs via background worker.
  */
 
-/* Remove after v111*/
+/* Added in v109, Pending stabilization */
 #define DEFAULT_INDEX_BUILDS_SCHEDULED_ON_BGWORKER false
 bool IndexBuildsScheduledOnBgWorker = DEFAULT_INDEX_BUILDS_SCHEDULED_ON_BGWORKER;
-
-/* Remove it after 112 */
-#define DEFAULT_INLINE_CHANGESTREAM_MATCH_STAGES true
-bool InlineChangeStreamMatchStage = DEFAULT_INLINE_CHANGESTREAM_MATCH_STAGES;
-
-#define DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS true
-bool RemoveMatchNamespaceFilters = DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS;
-
-/* Remove after 113 */
-#define DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED true
-bool MultiplePositionalNotAllowed = DEFAULT_MULTIPLE_POSITONAL_OPERATORS_NOT_ALLOWED;
 
 /* FEATURE FLAGS END */
 
@@ -392,14 +440,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Enables support for vector index default search parameter calculation"),
 		NULL, &EnableVectorCalculateDefaultSearchParameter,
 		DEFAULT_ENABLE_VECTOR_CALCULATE_DEFAULT_SEARCH_PARAM,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enableNewSelectivityMode", newGucPrefix),
-		gettext_noop(
-			"Determines whether to use the new selectivity logic."),
-		NULL, &EnableNewOperatorSelectivityMode,
-		DEFAULT_ENABLE_NEW_OPERATOR_SELECTIVITY,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
@@ -504,14 +544,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
-		psprintf("%s.enableDataTableWithoutCreationTime", newGucPrefix),
-		gettext_noop(
-			"Create data table without creation_time column."),
-		NULL, &EnableDataTableWithoutCreationTime,
-		DEFAULT_ENABLE_DATA_TABLES_WITHOUT_CREATION_TIME,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
 		psprintf("%s.useFileBasedPersistedCursors", newGucPrefix),
 		gettext_noop(
 			"Whether or not to use file based persisted cursors."),
@@ -541,14 +573,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether or not to enable lookup inner join."),
 		NULL, &EnableLookupInnerJoin,
 		DEFAULT_LOOKUP_ENABLE_INNER_JOIN,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.forceBitmapScanForLookup", newGucPrefix),
-		gettext_noop(
-			"Whether or not to force bitmap scan for lookup."),
-		NULL, &ForceBitmapScanForLookup,
-		DEFAULT_FORCE_BITMAP_SCAN_FOR_LOOKUP,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
@@ -634,25 +658,10 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
-		psprintf("%s.rumFailOnLostPath", newGucPrefix),
-		gettext_noop(
-			"Whether or not to fail the query when a lost path is detected in RUM"),
-		NULL, &RumFailOnLostPath,
-		DEFAULT_RUM_FAIL_ON_LOST_PATH,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
 		psprintf("%s.enableDelayedHoldPortal", newGucPrefix),
 		gettext_noop(
 			"Whether to delay holding the portal until we know there is more data to be fetched."),
 		NULL, &EnableDelayedHoldPortal, DEFAULT_ENABLE_DELAYED_HOLD_PORTAL,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.forceCollStatsDataCollection", newGucPrefix),
-		gettext_noop(
-			"Whether to force fetching metadata during collstats operations."),
-		NULL, &ForceCollStatsDataCollection, DEFAULT_FORCE_COLL_STATS_DATA_COLLECTION,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
@@ -953,5 +962,13 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to enable new min and max aggregate optimizations."),
 		NULL, &EnableNewMinMaxAccumulators,
 		DEFAULT_ENABLE_NEW_MIN_MAX_ACCUMULATORS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enableDropInvalidIndexesOnReadOnly", newGucPrefix),
+		gettext_noop(
+			"Whether to enable dropping invalid indexes on read only database state."),
+		NULL, &EnableDropInvalidIndexesOnReadOnly,
+		DEFAULT_ENABLE_DROP_INDEXES_ON_READ_ONLY,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 }
