@@ -362,7 +362,7 @@ BuildBatchInsertionSpec(bson_iter_t *insertCommandIter, pgbsonsequence *insertDo
 		}
 		else if (strcmp(field, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(insertCommandIter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(insertCommandIter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(field))
 		{

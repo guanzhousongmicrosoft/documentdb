@@ -1396,7 +1396,7 @@ ParseCreateIndexesArg(Datum *dbNameDatum, pgbson *arg, bool buildAsUniqueForPrep
 		}
 		else if (strcmp(argKey, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(&argIter, dbNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&argIter, dbNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(argKey))
 		{

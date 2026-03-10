@@ -117,7 +117,7 @@ command_validate(PG_FUNCTION_ARGS)
 		}
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
-			ExtractDatabaseNameFromSpec(&validateIter, &databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&validateIter, &databaseNameDatum);
 		}
 		else if (StringViewEqualsCString(&keyView, "full"))
 		{

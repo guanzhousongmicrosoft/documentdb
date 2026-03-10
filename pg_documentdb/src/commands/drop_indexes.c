@@ -631,7 +631,7 @@ ParseDropIndexesArg(pgbson *arg, Datum *databaseNameDatum)
 		}
 		else if (strcmp(argKey, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(&argIter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&argIter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(argKey))
 		{

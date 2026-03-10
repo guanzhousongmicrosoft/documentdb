@@ -864,7 +864,7 @@ BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs,
 		}
 		else if (strcmp(field, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(updateCommandIter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(updateCommandIter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(field))
 		{

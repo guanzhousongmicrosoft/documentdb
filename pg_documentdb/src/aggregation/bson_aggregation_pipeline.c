@@ -1321,8 +1321,8 @@ GenerateAggregationQuery(text *database, pgbson *aggregationSpec, QueryData *que
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
 			text *prevDb = context.databaseNameDatum;
-			ExtractDatabaseNameTextFromSpec(&aggregationIterator,
-											&context.databaseNameDatum);
+			ValidateOrExtractDatabaseNameTextFromSpec(&aggregationIterator,
+													  &context.databaseNameDatum);
 			if (prevDb == NULL)
 			{
 				database = context.databaseNameDatum;
@@ -1514,8 +1514,8 @@ GenerateFindQuery(text *databaseDatum, pgbson *findSpec, QueryData *queryData, b
 				if (StringViewEqualsCString(&keyView, "$db"))
 				{
 					text *prevDb = context.databaseNameDatum;
-					ExtractDatabaseNameTextFromSpec(&findIterator,
-													&context.databaseNameDatum);
+					ValidateOrExtractDatabaseNameTextFromSpec(&findIterator,
+															  &context.databaseNameDatum);
 					if (prevDb == NULL)
 					{
 						databaseDatum = context.databaseNameDatum;
@@ -2114,8 +2114,8 @@ GenerateCountQuery(text *databaseDatum, pgbson *countSpec, bool setStatementTime
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
 			text *prevDb = context.databaseNameDatum;
-			ExtractDatabaseNameTextFromSpec(&countIterator,
-											&context.databaseNameDatum);
+			ValidateOrExtractDatabaseNameTextFromSpec(&countIterator,
+													  &context.databaseNameDatum);
 			if (prevDb == NULL)
 			{
 				databaseDatum = context.databaseNameDatum;
@@ -2318,8 +2318,8 @@ GenerateDistinctQuery(text *databaseDatum, pgbson *distinctSpec, bool setStateme
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
 			text *prevDb = context.databaseNameDatum;
-			ExtractDatabaseNameTextFromSpec(&distinctIter,
-											&context.databaseNameDatum);
+			ValidateOrExtractDatabaseNameTextFromSpec(&distinctIter,
+													  &context.databaseNameDatum);
 			if (prevDb == NULL)
 			{
 				databaseDatum = context.databaseNameDatum;
@@ -2423,7 +2423,7 @@ ParseGetMore(text **databaseName, pgbson *getMoreSpec, QueryData *queryData, boo
 		}
 		else if (strcmp(pathKey, "$db") == 0)
 		{
-			ExtractDatabaseNameTextFromSpec(&cursorSpecIter, databaseName);
+			ValidateOrExtractDatabaseNameTextFromSpec(&cursorSpecIter, databaseName);
 		}
 		else if (!IsCommonSpecIgnoredField(pathKey))
 		{

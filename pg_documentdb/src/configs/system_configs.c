@@ -199,7 +199,7 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 		PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
-		psprintf("%s.enableDbNameValidation", prefix),
+		psprintf("%s.enableDbNameValidation", newGucPrefix),
 		gettext_noop(
 			"Whether to enforce that $db in the command body matches the database argument."),
 		NULL, &EnableDbNameValidation, DEFAULT_ENABLE_DB_NAME_VALIDATION,

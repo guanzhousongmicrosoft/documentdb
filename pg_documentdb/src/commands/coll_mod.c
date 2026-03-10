@@ -380,7 +380,7 @@ ParseSpecSetCollModOptions(const pgbson *collModSpec,
 		}
 		else if (strcmp(key, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(&iter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&iter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(key))
 		{

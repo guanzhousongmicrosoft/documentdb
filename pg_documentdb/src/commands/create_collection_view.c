@@ -386,7 +386,7 @@ ParseCreateSpec(Datum *databaseDatum, pgbson *createSpec, bool *hasSchemaValidat
 		}
 		else if (strcmp(key, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(&createIter, databaseDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&createIter, databaseDatum);
 		}
 		else if (!IsCommonSpecIgnoredField(key))
 		{

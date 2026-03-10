@@ -348,7 +348,7 @@ BuildBatchDeletionSpec(bson_iter_t *deleteCommandIter, pgbsonsequence *deleteDoc
 		}
 		else if (strcmp(field, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(deleteCommandIter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(deleteCommandIter, databaseNameDatum);
 		}
 		else if (IsCommonSpecIgnoredField(field))
 		{

@@ -391,7 +391,7 @@ ParseFindAndModifyMessage(pgbson *message, Datum *databaseNameDatum)
 		}
 		else if (strcmp(key, "$db") == 0)
 		{
-			ExtractDatabaseNameFromSpec(&messageIter, databaseNameDatum);
+			ValidateOrExtractDatabaseNameFromSpec(&messageIter, databaseNameDatum);
 			continue;
 		}
 		else

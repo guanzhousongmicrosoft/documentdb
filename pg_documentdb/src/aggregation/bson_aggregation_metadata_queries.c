@@ -161,8 +161,8 @@ GenerateListCollectionsQuery(text *databaseDatum, pgbson *listCollectionsSpec,
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
 			text *prevDb = context.databaseNameDatum;
-			ExtractDatabaseNameTextFromSpec(&listCollectionsIter,
-											&context.databaseNameDatum);
+			ValidateOrExtractDatabaseNameTextFromSpec(&listCollectionsIter,
+													  &context.databaseNameDatum);
 			if (prevDb == NULL)
 			{
 				databaseDatum = context.databaseNameDatum;
@@ -243,8 +243,8 @@ GenerateListIndexesQuery(text *databaseDatum, pgbson *listIndexesSpec,
 		else if (StringViewEqualsCString(&keyView, "$db"))
 		{
 			text *prevDb = context.databaseNameDatum;
-			ExtractDatabaseNameTextFromSpec(&listIndexesIter,
-											&context.databaseNameDatum);
+			ValidateOrExtractDatabaseNameTextFromSpec(&listIndexesIter,
+													  &context.databaseNameDatum);
 			if (prevDb == NULL)
 			{
 				databaseDatum = context.databaseNameDatum;

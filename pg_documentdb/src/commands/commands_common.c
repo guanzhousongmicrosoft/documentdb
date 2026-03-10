@@ -280,7 +280,7 @@ IsCommonSpecIgnoredField(const char *fieldName)
  * The iterator must be positioned at the "$db" field.
  */
 void
-ExtractDatabaseNameTextFromSpec(bson_iter_t *iter, text **databaseNameText)
+ValidateOrExtractDatabaseNameTextFromSpec(bson_iter_t *iter, text **databaseNameText)
 {
 	uint32_t len = 0;
 	const char *dbName;
@@ -315,15 +315,15 @@ ExtractDatabaseNameTextFromSpec(bson_iter_t *iter, text **databaseNameText)
 
 
 /*
- * Datum-based wrapper around ExtractDatabaseNameTextFromSpec for callers
+ * Datum-based wrapper around ValidateOrExtractDatabaseNameTextFromSpec for callers
  * that pass the database name as a Datum (where 0 means unset).
  */
 void
-ExtractDatabaseNameFromSpec(bson_iter_t *iter, Datum *databaseNameDatum)
+ValidateOrExtractDatabaseNameFromSpec(bson_iter_t *iter, Datum *databaseNameDatum)
 {
 	text *dbText = (*databaseNameDatum != (Datum) 0) ?
 				   DatumGetTextP(*databaseNameDatum) : NULL;
-	ExtractDatabaseNameTextFromSpec(iter, &dbText);
+	ValidateOrExtractDatabaseNameTextFromSpec(iter, &dbText);
 	if (*databaseNameDatum == (Datum) 0 && dbText != NULL)
 	{
 		*databaseNameDatum = PointerGetDatum(dbText);

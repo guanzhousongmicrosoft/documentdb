@@ -82,8 +82,9 @@ bool FindShardKeyValueForDocumentId(MongoCollection *collection, const
 									const char *collationString);
 
 bool IsCommonSpecIgnoredField(const char *fieldName);
-void ExtractDatabaseNameFromSpec(bson_iter_t *iter, Datum *databaseNameDatum);
-void ExtractDatabaseNameTextFromSpec(bson_iter_t *iter, text **databaseNameText);
+void ValidateOrExtractDatabaseNameFromSpec(bson_iter_t *iter, Datum *databaseNameDatum);
+void ValidateOrExtractDatabaseNameTextFromSpec(bson_iter_t *iter,
+											   text **databaseNameText);
 
 WriteError * GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx);
 bool TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage);
