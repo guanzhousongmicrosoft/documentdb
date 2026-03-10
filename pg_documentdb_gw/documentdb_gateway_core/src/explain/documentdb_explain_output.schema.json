@@ -99,12 +99,12 @@
       "properties": {
         "stage": {
           "type": "string",
-          "description": "The name of the execution stage. Possible values include: 'COLLSCAN' (collection scan), 'IXSCAN' (index scan), 'FETCH' (document fetch after index scan), 'SORT' (in-memory sort), 'LIMIT' (result limit), 'COUNT' (count operation), 'OR' (bitmap OR of index scans), 'AND' (bitmap AND of index scans), 'PROJECTION_DEFAULT' (default projection), 'TEXT_MATCH' (full-text search), 'GEO_NEAR_2D' (2D geo-near), 'GEO_NEAR_2DSPHERE' (2D-sphere geo-near), 'SHARD_MERGE' (merge results from multiple shards), 'SINGLE_SHARD' (query routed to a single shard), 'LOOKUP' (lookup/join), 'EOF' (empty result set / no data), 'SAMPLESCAN' (random sample scan), 'SAMPLESORT' ($sample via sort on random()), 'UNIQUE' (deduplication), 'GROUP' ($group aggregation), 'GROUPSORT' (sort for group), 'COUNT_SCAN' (count via aggregation), 'DISTINCT_SCAN' (distinct scan).",
+          "description": "The name of the execution stage. Possible values include: 'COLLSCAN' (collection scan), 'IXSCAN' (index scan), 'FETCH' (document fetch after index scan), 'SORT' (in-memory sort), 'LIMIT' (result limit), 'COUNT' (count operation), 'OR' (bitmap OR of index scans), 'AND' (bitmap AND of index scans), 'PROJECTION_DEFAULT' (default projection), 'TEXT_MATCH' (full-text search), 'GEO_NEAR_2D' (2D geo-near), 'GEO_NEAR_2DSPHERE' (2D-sphere geo-near), 'SHARD_MERGE' (merge results from multiple shards), 'SINGLE_SHARD' (query routed to a single shard), 'PARALLEL_MERGE' (merge results from parallel workers — maps from PostgreSQL Gather node), 'PARALLEL_SORT_MERGE' (merge sorted results from parallel workers preserving sort order — maps from PostgreSQL Gather Merge node), 'LOOKUP' (lookup/join), 'EOF' (empty result set / no data), 'SAMPLESCAN' (random sample scan), 'SAMPLESORT' ($sample via sort on random()), 'UNIQUE' (deduplication), 'GROUP' ($group aggregation), 'GROUPSORT' (sort for group), 'COUNT_SCAN' (count via aggregation), 'DISTINCT_SCAN' (distinct scan).",
           "enum": [
             "COLLSCAN", "IXSCAN", "FETCH", "SORT", "LIMIT", "COUNT",
             "OR", "AND", "PROJECTION_DEFAULT", "TEXT_MATCH",
             "GEO_NEAR_2D", "GEO_NEAR_2DSPHERE",
-            "SHARD_MERGE", "SINGLE_SHARD",
+            "SHARD_MERGE", "SINGLE_SHARD", "PARALLEL_MERGE", "PARALLEL_SORT_MERGE",
             "LOOKUP", "EOF",
             "SAMPLESCAN", "SAMPLESORT", "UNIQUE",
             "GROUP", "GROUPSORT", "COUNT_SCAN", "DISTINCT_SCAN"

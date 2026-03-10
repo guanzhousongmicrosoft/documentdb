@@ -4,6 +4,7 @@
 * Update file modification time in `DeserializeFileState` to prevent TTL-based cleanup from expiring actively-used cursor files *[Bugfix]*
 * Support `$db` field in wire protocol command specs for insert, update, delete, findAndModify, createIndexes, dropIndexes, collMod, and background index commands *[Feature]*
 * Fixes crash that occurs when `enableDebugQueryText` is enabled and certain commands (e.g., `count_query`, `find_cursor_first_page`) operate on queries whose query trees are mutated by the PostgreSQL planner. *[Bugfix]* (#484)
+* Map PostgreSQL `Gather Merge` plan node to `PARALLEL_SORT_MERGE` in explain output *[Bugfix]*
 
 ### documentdb v0.110-0 (Unreleased) ###
 * Add support for keyword `description` in `$jsonSchema` *[Feature]*

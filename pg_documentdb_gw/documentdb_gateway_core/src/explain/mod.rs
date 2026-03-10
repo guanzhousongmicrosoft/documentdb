@@ -958,6 +958,7 @@ fn get_stage_from_plan(
             ("GENERIC_AGGREGATE".to_owned(), None)
         }
         "Gather" => ("PARALLEL_MERGE".to_owned(), None),
+        "Gather Merge" => ("PARALLEL_SORT_MERGE".to_owned(), None),
         "Custom Scan" => {
             if let Some(cpp) = plan.custom_plan_provider.as_ref() {
                 match cpp.as_str() {
@@ -2031,5 +2032,53 @@ fn smallest_from_i64(value: i64) -> RawBson {
         RawBson::Int32(v)
     } else {
         RawBson::Int64(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::postgres::QueryCatalog;
+
+    use super::get_stage_from_plan;
+    use super::model::ExplainPlan;
+
+    /// Helper that builds a minimal [`ExplainPlan`] with the given `node_type`.
+    fn plan_with_node_type(node_type: &str) -> ExplainPlan {
+        ExplainPlan {
+            node_type: node_type.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gather_maps_to_parallel_merge() {
+        let plan = plan_with_node_type("Gather");
+        let catalog = QueryCatalog::default();
+
+        let (stage, inner) = get_stage_from_plan(&plan, None, &catalog);
+
+        assert_eq!(stage, "PARALLEL_MERGE");
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn gather_merge_maps_to_parallel_sort_merge() {
+        let plan = plan_with_node_type("Gather Merge");
+        let catalog = QueryCatalog::default();
+
+        let (stage, inner) = get_stage_from_plan(&plan, None, &catalog);
+
+        assert_eq!(stage, "PARALLEL_SORT_MERGE");
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn seq_scan_maps_to_collscan() {
+        let plan = plan_with_node_type("Seq Scan");
+        let catalog = QueryCatalog::default();
+
+        let (stage, _) = get_stage_from_plan(&plan, None, &catalog);
+
+        assert_eq!(stage, "COLLSCAN");
     }
 }
