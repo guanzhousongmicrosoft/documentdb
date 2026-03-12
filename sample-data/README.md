@@ -31,7 +31,7 @@ Contains sample analytics and reporting data:
 - Monthly summary metrics
 - Daily user activity logs
 - Product performance data
-- Sample aggregation examples
+- Fields that can be queried with aggregation pipelines after startup
 
 ## Database Structure
 
