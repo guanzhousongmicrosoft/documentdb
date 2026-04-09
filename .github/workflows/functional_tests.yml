@@ -23,17 +23,15 @@ permissions:
   contents: read
 
 env:
+  FUNCTIONAL_TESTS_COMPOSE_PATH: scripts/functional_tests/docker-compose.yml
   PG_VERSION: "17"
   PACKAGE_OUTPUT_DIR: downloaded-artifacts
+  COMPOSE_PROJECT_NAME: documentdb-functional-tests-${{ github.run_id }}-${{ github.run_attempt }}
   DOCUMENTDB_IMAGE: documentdb-local-ci:${{ github.run_id }}-${{ github.run_attempt }}
-  DOCUMENTDB_CONTAINER_NAME: documentdb-local-${{ github.run_id }}-${{ github.run_attempt }}
   DOCDB_USERNAME: docdb_user
   DOCDB_PASSWORD: DocDB_${{ github.run_id }}_${{ github.run_attempt }}
   TEST_IMAGE: ghcr.io/documentdb/functional-tests:latest
-  TEST_DESELECT_FILE: test-config/functional-tests-deselect.list
   TEST_RESULTS_DIR: ${{ github.workspace }}/functional-test-results
-  TEST_CONTAINER_NAME: functional-tests-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-  TEST_CONNECTION_STRING: mongodb://docdb_user:DocDB_${{ github.run_id }}_${{ github.run_attempt }}@localhost:10260/?authMechanism=SCRAM-SHA-256&tls=true&tlsAllowInvalidCertificates=true
 
 jobs:
   functional-tests:
@@ -48,122 +46,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build Debian package for documentdb-local
-        run: |
-          ./packaging/build_packages.sh --os deb13 --pg ${{ env.PG_VERSION }} --output-dir ${{ env.PACKAGE_OUTPUT_DIR }}
-          ls -R ${{ env.PACKAGE_OUTPUT_DIR }}
-
-      - name: Resolve package path
-        id: package
+      - name: Run functional tests with Docker Compose
         shell: bash
         run: |
           set -euo pipefail
-
-          package_path="$(find "${{ env.PACKAGE_OUTPUT_DIR }}" -maxdepth 1 -type f -name '*.deb' ! -name '*dbgsym*' | sort | head -n 1)"
-          if [ -z "$package_path" ]; then
-            echo "No Debian package found in ${{ env.PACKAGE_OUTPUT_DIR }}"
-            exit 1
-          fi
-
-          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
-
-      - name: Build local documentdb-local image
-        run: |
-          docker build \
-            --build-arg BASE_IMAGE=debian:trixie-slim \
-            --build-arg POSTGRES_VERSION=${{ env.PG_VERSION }} \
-            --build-arg DEB_PACKAGE_REL_PATH=${{ steps.package.outputs.package_path }} \
-            -t "${{ env.DOCUMENTDB_IMAGE }}" \
-            -f .github/containers/Build-Ubuntu/Dockerfile_gateway .
-
-      - name: Pull functional test image
-        run: docker pull "${{ env.TEST_IMAGE }}"
-
-      - name: Start local documentdb-local container
-        run: |
-          docker run -d \
-            --name "${{ env.DOCUMENTDB_CONTAINER_NAME }}" \
-            -p 10260:10260 \
-            "${{ env.DOCUMENTDB_IMAGE }}" \
+          bash ./scripts/functional_tests/run_with_compose.sh run \
+            --pg "${{ env.PG_VERSION }}" \
+            --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
+            --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
+            --test-image "${{ env.TEST_IMAGE }}" \
+            --results-dir "${{ env.TEST_RESULTS_DIR }}" \
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
-            --skip-init-data
+            --scope "${{ env.TEST_SCOPE }}"
 
-      - name: Wait for documentdb-local readiness
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          docker run --rm --network host --entrypoint python "${{ env.TEST_IMAGE }}" -c "
-          import sys
-          import time
-          from pymongo import MongoClient
-
-          connection_string = '${{ env.TEST_CONNECTION_STRING }}'
-          for attempt in range(30):
-              try:
-                  client = MongoClient(connection_string, serverSelectionTimeoutMS=2000)
-                  client.admin.command('ping')
-                  print('DocumentDB is ready')
-                  sys.exit(0)
-              except Exception as exc:
-                  print(f'Waiting for DocumentDB... ({attempt + 1}/30): {exc}')
-                  time.sleep(2)
-
-          print('DocumentDB failed to start')
-          sys.exit(1)
-          "
-
-      - name: Create functional test container
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          args=(
-            documentdb_tests/compatibility/tests
-            -n auto
-            --connection-string "${{ env.TEST_CONNECTION_STRING }}"
-            --engine-name documentdb
-            --json-report
-            --json-report-file=/app/.test-results/functional-report.json
-            --junitxml=/app/.test-results/functional-results.xml
-          )
-
-          deselect_file="${{ github.workspace }}/${{ env.TEST_DESELECT_FILE }}"
-          if [ -f "$deselect_file" ]; then
-            while IFS= read -r nodeid; do
-              args+=( "--deselect=$nodeid" )
-              echo "Deselected test: $nodeid"
-            done < <(
-              sed \
-                -e 's/[[:space:]]*#.*$//' \
-                -e 's/^[[:space:]]*//' \
-                -e 's/[[:space:]]*$//' \
-                -e '/^[[:space:]]*$/d' \
-                "$deselect_file"
-            )
-          fi
-
-          docker create \
-            --name "${{ env.TEST_CONTAINER_NAME }}" \
-            --network host \
-            "${{ env.TEST_IMAGE }}" \
-            "${args[@]}" > /dev/null
-
-      - name: Run functional tests
-        run: docker start -a "${{ env.TEST_CONTAINER_NAME }}"
-
-      - name: Copy test results
+      - name: Verify test results
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p "${{ env.TEST_RESULTS_DIR }}"
-          results_source="${{ env.TEST_CONTAINER_NAME }}:/app/.test-results/."
-          if ! docker cp "$results_source" "${{ env.TEST_RESULTS_DIR }}/"; then
-            echo "Failed to copy test results from $results_source. The test container may have exited before writing /app/.test-results." >&2
-          fi
 
           missing_results=false
           for required_file in functional-report.json functional-results.xml; do
@@ -249,8 +150,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p "${{ runner.temp }}/documentdb-local-logs"
-          docker logs "${{ env.DOCUMENTDB_CONTAINER_NAME }}" > "${{ runner.temp }}/documentdb-local-logs/container.log" 2>&1 || true
-          docker cp "${{ env.DOCUMENTDB_CONTAINER_NAME }}:/var/log/documentdb/." "${{ runner.temp }}/documentdb-local-logs/" || true
+
+          if ! bash ./scripts/functional_tests/run_with_compose.sh logs > "${{ runner.temp }}/documentdb-local-logs/compose.log" 2>&1; then
+            echo "Failed to capture Docker Compose logs. The stack may not have started." >&2
+          fi
+
+          container_id="$(docker compose -f "${{ env.FUNCTIONAL_TESTS_COMPOSE_PATH }}" -p "${{ env.COMPOSE_PROJECT_NAME }}" ps -q documentdb-local || true)"
+          if [ -n "$container_id" ]; then
+            docker logs "$container_id" > "${{ runner.temp }}/documentdb-local-logs/container.log" 2>&1 || true
+            docker cp "$container_id:/var/log/documentdb/." "${{ runner.temp }}/documentdb-local-logs/" || true
+          fi
 
       - name: Upload documentdb-local logs
         if: failure()
@@ -260,10 +169,6 @@ jobs:
           overwrite: true
           path: ${{ runner.temp }}/documentdb-local-logs/
 
-      - name: Cleanup functional test container
+      - name: Cleanup local functional test stack
         if: always()
-        run: docker rm -f "${{ env.TEST_CONTAINER_NAME }}" || true
-
-      - name: Cleanup local documentdb-local container
-        if: always()
-        run: docker rm -f "${{ env.DOCUMENTDB_CONTAINER_NAME }}" || true
+        run: bash ./scripts/functional_tests/run_with_compose.sh down
