@@ -50,6 +50,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "${{ runner.temp }}/documentdb-local-logs"
+
+          set +e
           bash ./scripts/functional_tests/run_with_compose.sh run \
             --pg "${{ env.PG_VERSION }}" \
             --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
@@ -58,7 +61,12 @@ jobs:
             --results-dir "${{ env.TEST_RESULTS_DIR }}" \
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
-            --scope "${{ env.TEST_SCOPE }}"
+            --scope "${{ env.TEST_SCOPE }}" \
+            2>&1 | tee "${{ runner.temp }}/documentdb-local-logs/run.log"
+          exit_code=${PIPESTATUS[0]}
+          set -e
+
+          exit "$exit_code"
 
       - name: Verify test results
         if: always()
