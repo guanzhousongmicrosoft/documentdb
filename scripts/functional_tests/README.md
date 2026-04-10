@@ -50,6 +50,12 @@ Tear down the local stack:
 Build the local `documentdb-local` image without running tests:
 
 ```bash
-./scripts/functional_tests/run_with_compose.sh build \
+./scripts/functional_tests/run_with_compose.sh build
+```
+
+Run tests again without rebuilding the local image:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh test \
   --test-image ghcr.io/documentdb/functional-tests:latest
 ```

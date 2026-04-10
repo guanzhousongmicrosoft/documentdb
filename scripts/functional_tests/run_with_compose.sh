@@ -7,14 +7,15 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 
 function show_help {
     cat <<EOF
-Usage: $0 [run|build|logs|down] [options]
+Usage: $0 [run|build|test|logs|down] [options]
 
 Description:
   Build documentdb-local, then run the functional test stack with Docker Compose.
 
 Commands:
-  run                  Build packages if needed, then run the test stack (default)
+  run                  Build packages if needed, build the local image, then run tests
   build                Build packages if needed, then build the documentdb-local image only
+  test                 Run tests against the already-built documentdb-local image
   logs                 Show Docker Compose logs for the local stack
   down                 Stop and remove the local stack
 
@@ -149,6 +150,24 @@ function resolve_deb_package {
     echo "${package_path#${repo_root}/}"
 }
 
+function resolve_deb_package_for_maintenance {
+    local abs_output_dir="${repo_root}/${package_output_dir}"
+    local package_path
+
+    package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name '*.deb' ! -name '*dbgsym*' | sort | head -n 1 || true)"
+    if [[ -z "${package_path}" ]]; then
+        echo "${package_output_dir}/placeholder-documentdb.deb"
+        return 0
+    fi
+
+    if [[ "${package_path}" != "${repo_root}/"* ]]; then
+        echo "Package path must stay under the repository root: ${package_path}" >&2
+        exit 1
+    fi
+
+    echo "${package_path#${repo_root}/}"
+}
+
 function prepare_results_dir {
     mkdir -p "${results_dir}"
     results_dir="$(cd "${results_dir}" && pwd)"
@@ -190,20 +209,80 @@ function ensure_test_image_available {
     docker pull "${test_image}"
 }
 
-function run_stack {
-    local deb_package_rel_path
-    local status
-
+function maybe_build_packages {
     if [[ "${skip_package_build}" != true ]]; then
         build_packages
     fi
+}
+
+function prepare_compose_environment {
+    local prepare_results="${1:-false}"
+    local deb_package_rel_path
+
+    if [[ "${prepare_results}" == true ]]; then
+        prepare_results_dir
+    fi
 
     deb_package_rel_path="$(resolve_deb_package)"
-    prepare_results_dir
     export_compose_env "${deb_package_rel_path}"
-    ensure_test_image_available
+}
 
-    if docker compose -f "${compose_config_path}" -p "${compose_project_name}" up --build --abort-on-container-exit --exit-code-from functional-tests; then
+function prepare_maintenance_environment {
+    local deb_package_rel_path
+
+    deb_package_rel_path="$(resolve_deb_package_for_maintenance)"
+    export_compose_env "${deb_package_rel_path}"
+}
+
+function build_stack_image {
+    maybe_build_packages
+    prepare_compose_environment false
+    docker compose -f "${compose_config_path}" -p "${compose_project_name}" build documentdb-local
+}
+
+function start_documentdb_service {
+    docker compose -f "${compose_config_path}" -p "${compose_project_name}" up -d --no-build documentdb-local
+}
+
+function wait_for_documentdb_service {
+    local container_id
+    local status
+    local attempt
+
+    container_id="$(docker compose -f "${compose_config_path}" -p "${compose_project_name}" ps -q documentdb-local)"
+    if [[ -z "${container_id}" ]]; then
+        echo "Could not find a documentdb-local container for project ${compose_project_name}" >&2
+        exit 1
+    fi
+
+    for attempt in $(seq 1 60); do
+        status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_id}" 2>/dev/null || true)"
+        case "${status}" in
+            healthy)
+                return 0
+                ;;
+            unhealthy|exited|dead)
+                echo "documentdb-local became unhealthy while waiting for readiness." >&2
+                docker logs "${container_id}" >&2 || true
+                exit 1
+                ;;
+        esac
+        sleep 2
+    done
+
+    echo "Timed out waiting for documentdb-local to become healthy." >&2
+    docker logs "${container_id}" >&2 || true
+    exit 1
+}
+
+function run_test_service {
+    local status
+
+    ensure_test_image_available
+    start_documentdb_service
+    wait_for_documentdb_service
+
+    if docker compose -f "${compose_config_path}" -p "${compose_project_name}" run --rm --no-deps functional-tests; then
         status=0
     else
         status=$?
@@ -211,26 +290,27 @@ function run_stack {
 
     echo "Functional test results are in ${results_dir}"
     echo "Use '$0 logs' to inspect the stack or '$0 down' to remove it."
-    exit "${status}"
+    return "${status}"
 }
 
-function build_stack_image {
-    local deb_package_rel_path
+function run_stack {
+    build_stack_image
+    prepare_compose_environment true
+    run_test_service
+}
 
-    if [[ "${skip_package_build}" != true ]]; then
-        build_packages
-    fi
-
-    deb_package_rel_path="$(resolve_deb_package)"
-    export_compose_env "${deb_package_rel_path}"
-    docker compose -f "${compose_config_path}" -p "${compose_project_name}" build documentdb-local
+function test_stack {
+    prepare_compose_environment true
+    run_test_service
 }
 
 function show_logs {
+    prepare_maintenance_environment
     docker compose -f "${compose_config_path}" -p "${compose_project_name}" logs
 }
 
 function tear_down_stack {
+    prepare_maintenance_environment
     docker compose -f "${compose_config_path}" -p "${compose_project_name}" down --volumes --remove-orphans
 }
 
@@ -243,6 +323,9 @@ case "${command}" in
         ;;
     build)
         build_stack_image
+        ;;
+    test)
+        test_stack
         ;;
     logs)
         show_logs

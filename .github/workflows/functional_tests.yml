@@ -46,14 +46,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run functional tests with Docker Compose
+      - name: Build local documentdb-local image
+        id: build_documentdb_local
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${{ runner.temp }}/documentdb-local-logs"
+          logs_dir="${{ runner.temp }}/documentdb-local-logs"
+          build_log="${logs_dir}/build.log"
+          mkdir -p "${logs_dir}"
 
-          set +e
-          bash ./scripts/functional_tests/run_with_compose.sh run \
+          echo "Building ${DOCUMENTDB_IMAGE}; full output is being captured to ${build_log}."
+          bash ./scripts/functional_tests/run_with_compose.sh build \
+            --pg "${{ env.PG_VERSION }}" \
+            --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
+            --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
+            > "${build_log}" 2>&1
+          echo "Build completed."
+
+      - name: Run functional tests with Docker Compose
+        id: run_functional_tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs_dir="${{ runner.temp }}/documentdb-local-logs"
+          test_log="${logs_dir}/test.log"
+          mkdir -p "${logs_dir}"
+
+          echo "Running functional tests; full output is being captured to ${test_log}."
+          bash ./scripts/functional_tests/run_with_compose.sh test \
             --pg "${{ env.PG_VERSION }}" \
             --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
             --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
@@ -62,17 +82,16 @@ jobs:
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
             --scope "${{ env.TEST_SCOPE }}" \
-            2>&1 | tee "${{ runner.temp }}/documentdb-local-logs/run.log"
-          exit_code=${PIPESTATUS[0]}
-          set -e
-
-          exit "$exit_code"
+            > "${test_log}" 2>&1
+          echo "Functional test run completed."
 
       - name: Verify test results
-        if: always()
+        id: verify_test_results
+        if: always() && steps.build_documentdb_local.outcome == 'success' && steps.run_functional_tests.outcome != 'skipped'
         shell: bash
         run: |
           set -euo pipefail
+          echo "results_ready=false" >> "$GITHUB_OUTPUT"
 
           missing_results=false
           for required_file in functional-report.json functional-results.xml; do
@@ -86,10 +105,11 @@ jobs:
             echo "Functional tests did not produce the expected result files. Check the test container output for the earlier failure." >&2
             exit 1
           fi
+          echo "results_ready=true" >> "$GITHUB_OUTPUT"
           find "${{ env.TEST_RESULTS_DIR }}" -maxdepth 1 -type f | sort
 
       - name: Upload test results
-        if: always()
+        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: functional-test-results-pg${{ env.PG_VERSION }}
@@ -100,7 +120,7 @@ jobs:
           if-no-files-found: error
 
       - name: Generate test summary
-        if: always()
+        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
         shell: bash
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -157,16 +177,66 @@ jobs:
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "${{ runner.temp }}/documentdb-local-logs"
-
-          if ! bash ./scripts/functional_tests/run_with_compose.sh logs > "${{ runner.temp }}/documentdb-local-logs/compose.log" 2>&1; then
-            echo "Failed to capture Docker Compose logs. The stack may not have started." >&2
-          fi
 
           container_id="$(docker compose -f "${{ env.FUNCTIONAL_TESTS_COMPOSE_PATH }}" -p "${{ env.COMPOSE_PROJECT_NAME }}" ps -q documentdb-local || true)"
           if [ -n "$container_id" ]; then
-            docker logs "$container_id" > "${{ runner.temp }}/documentdb-local-logs/container.log" 2>&1 || true
+            docker compose -f "${{ env.FUNCTIONAL_TESTS_COMPOSE_PATH }}" -p "${{ env.COMPOSE_PROJECT_NAME }}" logs documentdb-local > "${{ runner.temp }}/documentdb-local-logs/documentdb-local.log" 2>&1 || true
+            docker logs "$container_id" > "${{ runner.temp }}/documentdb-local-logs/documentdb-local-container.log" 2>&1 || true
             docker cp "$container_id:/var/log/documentdb/." "${{ runner.temp }}/documentdb-local-logs/" || true
+          fi
+
+      - name: Show build log tail
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_log="${{ runner.temp }}/documentdb-local-logs/build.log"
+          if [ ! -f "${build_log}" ]; then
+            echo "No build.log was captured."
+            exit 0
+          fi
+
+          echo "::group::build.log (tail -n 200)"
+          tail -n 200 "${build_log}" || true
+          echo "::endgroup::"
+
+      - name: Show test log tail
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_log="${{ runner.temp }}/documentdb-local-logs/test.log"
+          if [ ! -f "${test_log}" ]; then
+            echo "No test.log was captured."
+            exit 0
+          fi
+
+          echo "::group::test.log (tail -n 200)"
+          tail -n 200 "${test_log}" || true
+          echo "::endgroup::"
+
+      - name: Show documentdb-local Docker log tail
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs_dir="${{ runner.temp }}/documentdb-local-logs"
+          found_log=false
+
+          for log_file in documentdb-local.log documentdb-local-container.log; do
+            log_path="${logs_dir}/${log_file}"
+            if [ -f "${log_path}" ]; then
+              found_log=true
+              echo "::group::${log_file} (tail -n 200)"
+              tail -n 200 "${log_path}" || true
+              echo "::endgroup::"
+            fi
+          done
+
+          if [ "${found_log}" = false ]; then
+            echo "No documentdb-local Docker logs were captured."
           fi
 
       - name: Upload documentdb-local logs
