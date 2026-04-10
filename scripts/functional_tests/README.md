@@ -92,3 +92,13 @@ If local results no longer match CI:
    protected by the pin.
 3. Update the pin and `deselect.list` together through the weekly `update_test_image.yml` workflow
    instead of changing only one of them by hand.
+
+## Image pinning
+
+CI pins the test image by immutable `@sha256:` digest in `test-image-pin.txt`. The weekly
+`update_test_image.yml` workflow resolves the latest image, runs the full test suite, updates
+the deselect list, and opens a PR with both changes.
+
+**Retention:** Pinned digests must remain available in the container registry for the lifetime
+of any open PR that references them. Avoid pruning GHCR package versions that are still
+referenced by `test-image-pin.txt` on any active branch.
