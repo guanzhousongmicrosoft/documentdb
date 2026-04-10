@@ -1,12 +1,15 @@
 name: DocumentDB functional tests
-run-name: ${{ github.event.pull_request.title || github.ref_name }}
+run-name: ${{ github.event_name == 'schedule' && 'daily functional tests (all tests)' || github.event.pull_request.title || github.ref_name }}
 
 concurrency:
-  group: functional-tests-${{ github.event.pull_request.number || github.ref }}
+  group: functional-tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
   push:
     branches:
       - "main"
@@ -39,6 +42,7 @@ jobs:
     timeout-minutes: 90
     name: Functional tests (documentdb-local PG17)
     env:
+      EXCLUDE_DESELECT_FILE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       TEST_SCOPE: full
     steps:
       - name: Checkout repository
@@ -78,6 +82,12 @@ jobs:
           logs_dir="${{ runner.temp }}/documentdb-local-logs"
           test_log="${logs_dir}/test.log"
           mkdir -p "${logs_dir}"
+          extra_args=()
+
+          if [ "${EXCLUDE_DESELECT_FILE}" = "true" ]; then
+            echo "Scheduled run detected: excluding deselect.list and running all tests."
+            extra_args+=( --exclude-deselect-file )
+          fi
 
           echo "Running functional tests; full output is being captured to ${test_log}."
           set +e
@@ -90,6 +100,7 @@ jobs:
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
             --scope "${{ env.TEST_SCOPE }}" \
+            "${extra_args[@]}" \
             2>&1 | tee "${test_log}"
           exit_code=${PIPESTATUS[0]}
           set -e
@@ -146,6 +157,10 @@ jobs:
           print("## Functional Tests")
           print()
           print(f"Scope: `{os.environ['TEST_SCOPE']}`")
+          if os.environ.get("EXCLUDE_DESELECT_FILE") == "true":
+              print("Deselect list: `excluded (running all tests)`")
+          else:
+              print("Deselect list: `applied`")
           print(f"System under test: `{os.environ['DOCUMENTDB_IMAGE']}`")
           print(f"Test image: `{os.environ['TEST_IMAGE']}`")
           print()

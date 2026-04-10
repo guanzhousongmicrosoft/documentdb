@@ -3,7 +3,8 @@
 set -euo pipefail
 
 results_dir="${TEST_RESULTS_DIR:-/app/.test-results}"
-deselect_file="${TEST_DESELECT_FILE:-/workspace/scripts/functional_tests/deselect.list}"
+default_deselect_file="/workspace/scripts/functional_tests/deselect.list"
+deselect_file="${TEST_DESELECT_FILE-${default_deselect_file}}"
 connection_string="${TEST_CONNECTION_STRING:?TEST_CONNECTION_STRING is required}"
 test_scope="${TEST_SCOPE:-smoke}"
 
@@ -32,7 +33,7 @@ case "${test_scope}" in
         ;;
 esac
 
-if [[ -f "${deselect_file}" ]]; then
+if [[ -n "${deselect_file}" && -f "${deselect_file}" ]]; then
     while IFS= read -r nodeid; do
         args+=( "--deselect=${nodeid}" )
     done < <(

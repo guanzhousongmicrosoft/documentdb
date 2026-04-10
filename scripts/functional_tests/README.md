@@ -25,6 +25,15 @@ Run the full suite:
   --scope full
 ```
 
+Run the full suite while excluding `deselect.list`:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh run \
+  --test-image ghcr.io/documentdb/functional-tests:latest \
+  --scope full \
+  --exclude-deselect-file
+```
+
 `--test-image` accepts any Docker image reference or a local image ID. If you omit it, the script falls back to `ghcr.io/documentdb/functional-tests:latest`.
 
 ## Outputs

@@ -33,6 +33,8 @@ Options:
   --test-image <img>   Functional test image reference or local image ID
                        (default: ghcr.io/documentdb/functional-tests:latest)
   --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
+  --exclude-deselect-file
+                       Run the full suite without applying deselect.list
   --skip-package-build Reuse an existing package in --output-dir
   -h, --help           Show this help text
 EOF
@@ -53,6 +55,7 @@ results_dir="${repo_root}/functional-test-results"
 test_scope="smoke"
 compose_config_path="${script_dir}/docker-compose.yml"
 compose_project_name="${COMPOSE_PROJECT_NAME:-documentdb-functional-tests}"
+exclude_deselect_file=false
 skip_package_build=false
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
@@ -105,6 +108,9 @@ while [[ $# -gt 0 ]]; do
         --results-dir)
             shift
             results_dir="$1"
+            ;;
+        --exclude-deselect-file)
+            exclude_deselect_file=true
             ;;
         --skip-package-build)
             skip_package_build=true
@@ -185,6 +191,11 @@ function export_compose_env {
     export DOCDB_USERNAME="${docdb_username}"
     export DOCUMENTDB_IMAGE="${documentdb_image}"
     export PG_VERSION="${pg_version}"
+    if [[ "${exclude_deselect_file}" == true ]]; then
+        export TEST_DESELECT_FILE=""
+    else
+        export TEST_DESELECT_FILE="${TEST_DESELECT_FILE-/workspace/scripts/functional_tests/deselect.list}"
+    fi
     export TEST_SCOPE="${test_scope}"
     export TEST_IMAGE="${test_image}"
     export TEST_RESULTS_DIR="${results_dir}"
