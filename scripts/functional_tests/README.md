@@ -84,7 +84,7 @@ If local results no longer match CI:
 1. Reproduce the CI image locally:
 
    ```bash
-   pinned_image="$(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' scripts/functional_tests/test-image-pin.txt | head -n 1)"
+   pinned_image="$(bash ./scripts/functional_tests/read_pin.sh)"
    ./scripts/functional_tests/run_with_compose.sh run --scope full --test-image "${pinned_image}"
    ```
 

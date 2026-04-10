@@ -174,26 +174,7 @@ function require_docker_compose {
 }
 
 function read_pinned_test_image {
-    local pinned_image
-
-    if [[ ! -f "${test_image_pin_file}" ]]; then
-        return 1
-    fi
-
-    pinned_image="$(
-        sed \
-            -e 's/[[:space:]]*#.*$//' \
-            -e 's/^[[:space:]]*//' \
-            -e 's/[[:space:]]*$//' \
-            -e '/^[[:space:]]*$/d' \
-            "${test_image_pin_file}" | head -n 1
-    )"
-
-    if [[ -z "${pinned_image}" ]]; then
-        return 1
-    fi
-
-    printf '%s\n' "${pinned_image}"
+    bash "${script_dir}/read_pin.sh" "${test_image_pin_file}"
 }
 
 function resolve_default_test_image {
@@ -225,9 +206,14 @@ function resolve_deb_package {
     local abs_output_dir="${repo_root}/${package_output_dir}"
     local package_path
 
+    if [[ ! -d "${abs_output_dir}" ]]; then
+        echo "No Debian package found in ${abs_output_dir}. Run '$0 build' first, remove --skip-package-build, or point --output-dir at a directory containing a built package." >&2
+        exit 1
+    fi
+
     package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name '*.deb' ! -name '*dbgsym*' | sort | head -n 1)"
     if [[ -z "${package_path}" ]]; then
-        echo "No Debian package found in ${abs_output_dir}" >&2
+        echo "No Debian package found in ${abs_output_dir}. Run '$0 build' first, remove --skip-package-build, or point --output-dir at a directory containing a built package." >&2
         exit 1
     fi
 
