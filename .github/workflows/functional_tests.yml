@@ -56,12 +56,19 @@ jobs:
           mkdir -p "${logs_dir}"
 
           echo "Building ${DOCUMENTDB_IMAGE}; full output is being captured to ${build_log}."
+          set +e
           bash ./scripts/functional_tests/run_with_compose.sh build \
             --pg "${{ env.PG_VERSION }}" \
             --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
             --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
-            > "${build_log}" 2>&1
-          echo "Build completed."
+            2>&1 | tee "${build_log}"
+          exit_code=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${exit_code}" -eq 0 ]; then
+            echo "Build completed."
+          fi
+          exit "${exit_code}"
 
       - name: Run functional tests with Docker Compose
         id: run_functional_tests
@@ -73,6 +80,7 @@ jobs:
           mkdir -p "${logs_dir}"
 
           echo "Running functional tests; full output is being captured to ${test_log}."
+          set +e
           bash ./scripts/functional_tests/run_with_compose.sh test \
             --pg "${{ env.PG_VERSION }}" \
             --output-dir "${{ env.PACKAGE_OUTPUT_DIR }}" \
@@ -82,8 +90,14 @@ jobs:
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
             --scope "${{ env.TEST_SCOPE }}" \
-            > "${test_log}" 2>&1
-          echo "Functional test run completed."
+            2>&1 | tee "${test_log}"
+          exit_code=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${exit_code}" -eq 0 ]; then
+            echo "Functional test run completed."
+          fi
+          exit "${exit_code}"
 
       - name: Verify test results
         id: verify_test_results
@@ -187,36 +201,6 @@ jobs:
             docker cp "$container_id:/var/log/documentdb/." "${{ runner.temp }}/documentdb-local-logs/" || true
           fi
 
-      - name: Show build log tail
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          build_log="${{ runner.temp }}/documentdb-local-logs/build.log"
-          if [ ! -f "${build_log}" ]; then
-            echo "No build.log was captured."
-            exit 0
-          fi
-
-          echo "::group::build.log (tail -n 200)"
-          tail -n 200 "${build_log}" || true
-          echo "::endgroup::"
-
-      - name: Show test log tail
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_log="${{ runner.temp }}/documentdb-local-logs/test.log"
-          if [ ! -f "${test_log}" ]; then
-            echo "No test.log was captured."
-            exit 0
-          fi
-
-          echo "::group::test.log (tail -n 200)"
-          tail -n 200 "${test_log}" || true
-          echo "::endgroup::"
-
       - name: Show documentdb-local Docker log tail
         if: failure()
         shell: bash
@@ -239,6 +223,35 @@ jobs:
             echo "No documentdb-local Docker logs were captured."
           fi
 
+      - name: Cleanup local functional test stack
+        id: cleanup_local_stack
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs_dir="${{ runner.temp }}/documentdb-local-logs"
+          cleanup_log="${logs_dir}/cleanup.log"
+          mkdir -p "${logs_dir}"
+
+          echo "Cleaning up local functional test stack; full output is being captured to ${cleanup_log}."
+          bash ./scripts/functional_tests/run_with_compose.sh down > "${cleanup_log}" 2>&1
+          echo "Cleanup completed."
+
+      - name: Show cleanup log tail
+        if: steps.cleanup_local_stack.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup_log="${{ runner.temp }}/documentdb-local-logs/cleanup.log"
+          if [ ! -f "${cleanup_log}" ]; then
+            echo "No cleanup.log was captured."
+            exit 0
+          fi
+
+          echo "::group::cleanup.log (tail -n 200)"
+          tail -n 200 "${cleanup_log}" || true
+          echo "::endgroup::"
+
       - name: Upload documentdb-local logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -246,7 +259,3 @@ jobs:
           name: documentdb-local-logs-pg${{ env.PG_VERSION }}
           overwrite: true
           path: ${{ runner.temp }}/documentdb-local-logs/
-
-      - name: Cleanup local functional test stack
-        if: always()
-        run: bash ./scripts/functional_tests/run_with_compose.sh down
