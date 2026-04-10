@@ -23,6 +23,7 @@ on:
       - "*.md"
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -33,8 +34,9 @@ env:
   DOCUMENTDB_IMAGE: documentdb-local-ci:${{ github.run_id }}-${{ github.run_attempt }}
   DOCDB_USERNAME: docdb_user
   DOCDB_PASSWORD: DocDB_${{ github.run_id }}_${{ github.run_attempt }}
-  TEST_IMAGE: ghcr.io/documentdb/functional-tests:latest
+  TEST_IMAGE_PIN_FILE: scripts/functional_tests/test-image-pin.txt
   TEST_RESULTS_DIR: ${{ github.workspace }}/functional-test-results
+  DAILY_BASELINE_ARTIFACT_NAME: functional-test-daily-baseline-pg17
 
 jobs:
   functional-tests:
@@ -49,6 +51,43 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Resolve test image
+        id: resolve_test_image
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin_file="${{ env.TEST_IMAGE_PIN_FILE }}"
+
+          if [ ! -f "${pin_file}" ]; then
+            echo "Missing pinned test image file: ${pin_file}" >&2
+            exit 1
+          fi
+
+          test_image="$(sed \
+            -e 's/[[:space:]]*#.*$//' \
+            -e 's/^[[:space:]]*//' \
+            -e 's/[[:space:]]*$//' \
+            -e '/^[[:space:]]*$/d' \
+            "${pin_file}" | head -n 1)"
+
+          if [ -z "${test_image}" ]; then
+            echo "No pinned test image found in ${pin_file}" >&2
+            exit 1
+          fi
+
+          case "${test_image}" in
+            ghcr.io/documentdb/functional-tests@sha256:*)
+              ;;
+            *)
+              echo "Pinned test image must use an immutable ghcr.io/documentdb/functional-tests@sha256:<digest> reference." >&2
+              echo "Found: ${test_image}" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "TEST_IMAGE=${test_image}" >> "$GITHUB_ENV"
+          echo "Resolved functional test image: ${test_image}"
 
       - name: Build local documentdb-local image
         id: build_documentdb_local
@@ -133,6 +172,104 @@ jobs:
           echo "results_ready=true" >> "$GITHUB_OUTPUT"
           find "${{ env.TEST_RESULTS_DIR }}" -maxdepth 1 -type f | sort
 
+      - name: Download latest daily baseline
+        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        id: download_daily_baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "baseline_available=false" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            exit 0
+          fi
+
+          output_dir="${{ runner.temp }}/daily-baseline"
+          zip_path="${{ runner.temp }}/daily-baseline.zip"
+          rm -rf "${output_dir}" "${zip_path}"
+          mkdir -p "${output_dir}"
+
+          artifact_id=""
+          baseline_run_url=""
+
+          while IFS= read -r run_id; do
+            [ -n "${run_id}" ] || continue
+
+            candidate_artifact_id="$(gh api \
+              "/repos/${{ github.repository }}/actions/runs/${run_id}/artifacts" \
+              --jq ".artifacts[] | select(.name == \"${{ env.DAILY_BASELINE_ARTIFACT_NAME }}\" and .expired == false) | .id" | head -n 1)"
+
+            if [ -z "${candidate_artifact_id}" ]; then
+              continue
+            fi
+
+            gh api "/repos/${{ github.repository }}/actions/artifacts/${candidate_artifact_id}/zip" > "${zip_path}"
+            unzip -o -q "${zip_path}" -d "${output_dir}"
+
+            baseline_path="${output_dir}/functional-test-daily-baseline.json"
+            if [ ! -f "${baseline_path}" ]; then
+              rm -f "${zip_path}"
+              continue
+            fi
+
+            artifact_id="${candidate_artifact_id}"
+            baseline_run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${run_id}"
+            echo "baseline_available=true" >> "$GITHUB_OUTPUT"
+            echo "baseline_path=${baseline_path}" >> "$GITHUB_OUTPUT"
+            echo "baseline_run_url=${baseline_run_url}" >> "$GITHUB_OUTPUT"
+            break
+          done < <(
+            gh api \
+              "/repos/${{ github.repository }}/actions/workflows/functional_tests.yml/runs?branch=main&event=schedule&status=completed&per_page=20" \
+              --jq '.workflow_runs[].id'
+          )
+
+          if [ -z "${artifact_id}" ]; then
+            echo "No daily baseline artifact found."
+          fi
+
+      - name: Analyze functional test results
+        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        id: analyze_results
+        shell: bash
+        run: |
+          set -euo pipefail
+          analysis_json="${{ runner.temp }}/functional-test-analysis.json"
+          summary_markdown="${{ runner.temp }}/functional-test-summary.md"
+          baseline_output="${{ runner.temp }}/functional-test-daily-baseline.json"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          deselect_mode="applied"
+          extra_args=()
+
+          if [ "${EXCLUDE_DESELECT_FILE}" = "true" ]; then
+            deselect_mode="excluded"
+            extra_args+=( --baseline-output "${baseline_output}" )
+          fi
+
+          if [ -n "${{ steps.download_daily_baseline.outputs.baseline_path }}" ]; then
+            extra_args+=( --baseline-input "${{ steps.download_daily_baseline.outputs.baseline_path }}" )
+          fi
+
+          python3 ./scripts/functional_tests/analyze_results.py \
+            --report "${{ env.TEST_RESULTS_DIR }}/functional-report.json" \
+            --deselect-list scripts/functional_tests/deselect.list \
+            --analysis-json "${analysis_json}" \
+            --summary-markdown "${summary_markdown}" \
+            --scope "${{ env.TEST_SCOPE }}" \
+            --deselect-mode "${deselect_mode}" \
+            --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
+            --test-image "${{ env.TEST_IMAGE }}" \
+            --run-url "${run_url}" \
+            "${extra_args[@]}"
+
+          echo "analysis_json=${analysis_json}" >> "$GITHUB_OUTPUT"
+          echo "summary_markdown=${summary_markdown}" >> "$GITHUB_OUTPUT"
+          if [ -f "${baseline_output}" ]; then
+            echo "baseline_output=${baseline_output}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload test results
         if: always() && steps.verify_test_results.outputs.results_ready == 'true'
         uses: actions/upload-artifact@v4
@@ -142,65 +279,25 @@ jobs:
           path: |
             ${{ env.TEST_RESULTS_DIR }}/functional-report.json
             ${{ env.TEST_RESULTS_DIR }}/functional-results.xml
+            ${{ steps.analyze_results.outputs.analysis_json }}
+            ${{ steps.analyze_results.outputs.summary_markdown }}
+          if-no-files-found: error
+
+      - name: Upload daily baseline
+        if: always() && steps.analyze_results.outputs.baseline_output != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DAILY_BASELINE_ARTIFACT_NAME }}
+          overwrite: true
+          path: ${{ steps.analyze_results.outputs.baseline_output }}
           if-no-files-found: error
 
       - name: Generate test summary
         if: always() && steps.verify_test_results.outputs.results_ready == 'true'
         shell: bash
         run: |
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          import os
-          from pathlib import Path
-
-          report_path = Path(os.environ["TEST_RESULTS_DIR"]) / "functional-report.json"
-          print("## Functional Tests")
-          print()
-          print(f"Scope: `{os.environ['TEST_SCOPE']}`")
-          if os.environ.get("EXCLUDE_DESELECT_FILE") == "true":
-              print("Deselect list: `excluded (running all tests)`")
-          else:
-              print("Deselect list: `applied`")
-          print(f"System under test: `{os.environ['DOCUMENTDB_IMAGE']}`")
-          print(f"Test image: `{os.environ['TEST_IMAGE']}`")
-          print()
-
-          if not report_path.exists():
-              print("No JSON report was generated.")
-              raise SystemExit(0)
-
-          try:
-              report = json.loads(report_path.read_text(encoding="utf-8"))
-          except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-              print(f"JSON report exists but could not be parsed: {exc}")
-              raise SystemExit(0)
-          except OSError as exc:
-              print(f"JSON report could not be read: {exc}")
-              raise SystemExit(0)
-
-          summary = report.get("summary", {})
-          passed = summary.get("passed", 0)
-          failed = summary.get("failed", 0)
-          skipped = summary.get("skipped", 0)
-          total = passed + failed + skipped
-
-          print("| Total | Passed | Failed | Skipped |")
-          print("| --- | --- | --- | --- |")
-          print(f"| {total} | {passed} | {failed} | {skipped} |")
-
-          failed_tests = [
-              test.get("nodeid", "<unknown>")
-              for test in report.get("tests", [])
-              if test.get("outcome") == "failed"
-          ]
-          if failed_tests:
-              print()
-              print("### Failed tests")
-              for name in failed_tests[:20]:
-                  print(f"- `{name}`")
-              if len(failed_tests) > 20:
-                  print(f"- ... and {len(failed_tests) - 20} more")
-          PY
+          set -euo pipefail
+          cat "${{ steps.analyze_results.outputs.summary_markdown }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect documentdb-local logs
         if: always()

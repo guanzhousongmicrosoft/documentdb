@@ -13,28 +13,33 @@ This directory contains the local Docker Compose flow for running DocumentDB fun
 Run the smoke suite:
 
 ```bash
-./scripts/functional_tests/run_with_compose.sh run \
-  --test-image ghcr.io/documentdb/functional-tests:latest
+./scripts/functional_tests/run_with_compose.sh run
 ```
 
 Run the full suite:
 
 ```bash
-./scripts/functional_tests/run_with_compose.sh run \
-  --test-image ghcr.io/documentdb/functional-tests:latest \
-  --scope full
+./scripts/functional_tests/run_with_compose.sh run --scope full
 ```
 
 Run the full suite while excluding `deselect.list`:
 
 ```bash
-./scripts/functional_tests/run_with_compose.sh run \
-  --test-image ghcr.io/documentdb/functional-tests:latest \
-  --scope full \
-  --exclude-deselect-file
+./scripts/functional_tests/run_with_compose.sh run --scope full --exclude-deselect-file
 ```
 
-`--test-image` accepts any Docker image reference or a local image ID. If you omit it, the script falls back to `ghcr.io/documentdb/functional-tests:latest`.
+Run a single test or subset:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh run --scope full --pytest-args "-k test_find_basic_queries"
+```
+
+`--test-image` accepts any Docker image reference or a local image ID. If you omit it, local
+runs fall back to `ghcr.io/documentdb/functional-tests:latest`. In GitHub Actions, the workflow
+resolves the pinned digest from `test-image-pin.txt` so PR validation is stable across test-image
+updates.
+
+`--pytest-args` is passed directly to pytest inside the functional test container.
 
 ## Outputs
 
@@ -68,3 +73,22 @@ Run tests again without rebuilding the local image:
 ./scripts/functional_tests/run_with_compose.sh test \
   --test-image ghcr.io/documentdb/functional-tests:latest
 ```
+
+## Troubleshooting: test image updated
+
+The functional test runner image is external and mutable. Local runs use `:latest` by default,
+but CI pins an immutable digest in `test-image-pin.txt`.
+
+If local results no longer match CI:
+
+1. Reproduce the CI image locally:
+
+   ```bash
+   pinned_image="$(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' scripts/functional_tests/test-image-pin.txt | head -n 1)"
+   ./scripts/functional_tests/run_with_compose.sh run --scope full --test-image "${pinned_image}"
+   ```
+
+2. If `:latest` fails but the pinned image passes, the upstream test image changed and CI is still
+   protected by the pin.
+3. Update the pin and `deselect.list` together through the weekly `update_test_image.yml` workflow
+   instead of changing only one of them by hand.

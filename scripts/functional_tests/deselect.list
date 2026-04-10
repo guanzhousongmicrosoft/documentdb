@@ -23,3 +23,6 @@ compatibility/tests/core/indexes/commands/createIndexes/test_smoke_createIndexes
 compatibility/tests/core/indexes/commands/dropIndexes/test_smoke_dropIndexes.py::test_smoke_dropIndexes
 compatibility/tests/core/indexes/commands/reIndex/test_smoke_reIndex.py::test_smoke_reIndex
 compatibility/tests/core/query-and-write/commands/find/test_find_basic_queries.py::test_find_invalid_collection
+
+# Needs triage -- added by update-test-image workflow when a newly pinned image introduces failures.
+# Categorize these as "Unsupported feature" or "Known product bug" before merging.

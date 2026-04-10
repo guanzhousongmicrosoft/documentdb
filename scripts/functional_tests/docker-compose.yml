@@ -42,6 +42,7 @@ services:
       - /usr/bin/bash
       - /workspace/scripts/functional_tests/run_tests_in_container.sh
     environment:
+      PYTEST_EXTRA_ARGS: ${PYTEST_EXTRA_ARGS:-}
       TEST_CONNECTION_STRING: mongodb://${DOCDB_USERNAME:-docdb_user}:${DOCDB_PASSWORD:-DocDB_local}@documentdb-local:10260/?authMechanism=SCRAM-SHA-256&tls=true&tlsAllowInvalidCertificates=true
       TEST_DESELECT_FILE: ${TEST_DESELECT_FILE-/workspace/scripts/functional_tests/deselect.list}
       TEST_RESULTS_DIR: /app/.test-results

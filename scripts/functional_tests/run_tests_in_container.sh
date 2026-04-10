@@ -7,6 +7,7 @@ default_deselect_file="/workspace/scripts/functional_tests/deselect.list"
 deselect_file="${TEST_DESELECT_FILE-${default_deselect_file}}"
 connection_string="${TEST_CONNECTION_STRING:?TEST_CONNECTION_STRING is required}"
 test_scope="${TEST_SCOPE:-smoke}"
+pytest_extra_args="${PYTEST_EXTRA_ARGS:-}"
 
 mkdir -p "${results_dir}"
 
@@ -43,6 +44,20 @@ if [[ -n "${deselect_file}" && -f "${deselect_file}" ]]; then
             -e 's/[[:space:]]*$//' \
             -e '/^[[:space:]]*$/d' \
             "${deselect_file}"
+    )
+fi
+
+if [[ -n "${pytest_extra_args}" ]]; then
+    while IFS= read -r pytest_arg; do
+        args+=( "${pytest_arg}" )
+    done < <(
+        PYTEST_EXTRA_ARGS="${pytest_extra_args}" python3 -c '
+import os
+import shlex
+
+for item in shlex.split(os.environ["PYTEST_EXTRA_ARGS"]):
+    print(item)
+'
     )
 fi
 

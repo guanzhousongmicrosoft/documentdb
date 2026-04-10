@@ -31,8 +31,10 @@ Options:
   --documentdb-image <img>
                        Local image tag for the built documentdb-local image
   --test-image <img>   Functional test image reference or local image ID
-                       (default: ghcr.io/documentdb/functional-tests:latest)
+                       (default: pinned digest in GitHub Actions, otherwise
+                       ghcr.io/documentdb/functional-tests:latest)
   --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
+  --pytest-args <arg>  Extra pytest arguments, passed through to the test container
   --exclude-deselect-file
                        Run the full suite without applying deselect.list
   --skip-package-build Reuse an existing package in --output-dir
@@ -50,12 +52,15 @@ docdb_username="docdb_user"
 docdb_password="DocDB_local"
 docdb_host_port="10260"
 documentdb_image="documentdb-local-functional:local"
-test_image="${TEST_IMAGE:-ghcr.io/documentdb/functional-tests:latest}"
+default_test_image="ghcr.io/documentdb/functional-tests:latest"
+test_image_pin_file="${TEST_IMAGE_PIN_FILE:-${script_dir}/test-image-pin.txt}"
+test_image="${TEST_IMAGE:-}"
 results_dir="${repo_root}/functional-test-results"
 test_scope="smoke"
 compose_config_path="${script_dir}/docker-compose.yml"
 compose_project_name="${COMPOSE_PROJECT_NAME:-documentdb-functional-tests}"
 exclude_deselect_file=false
+pytest_extra_args=""
 skip_package_build=false
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
@@ -109,6 +114,10 @@ while [[ $# -gt 0 ]]; do
             shift
             results_dir="$1"
             ;;
+        --pytest-args)
+            shift
+            pytest_extra_args="$1"
+            ;;
         --exclude-deselect-file)
             exclude_deselect_file=true
             ;;
@@ -129,6 +138,47 @@ done
 
 function require_docker_compose {
     docker compose version > /dev/null
+}
+
+function read_pinned_test_image {
+    local pinned_image
+
+    if [[ ! -f "${test_image_pin_file}" ]]; then
+        return 1
+    fi
+
+    pinned_image="$(
+        sed \
+            -e 's/[[:space:]]*#.*$//' \
+            -e 's/^[[:space:]]*//' \
+            -e 's/[[:space:]]*$//' \
+            -e '/^[[:space:]]*$/d' \
+            "${test_image_pin_file}" | head -n 1
+    )"
+
+    if [[ -z "${pinned_image}" ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "${pinned_image}"
+}
+
+function resolve_default_test_image {
+    if [[ -n "${test_image}" ]]; then
+        return 0
+    fi
+
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        if test_image="$(read_pinned_test_image)"; then
+            return 0
+        fi
+
+        echo "No pinned functional test image found in ${test_image_pin_file}." >&2
+        echo "Set TEST_IMAGE/--test-image or update the pin file." >&2
+        exit 1
+    fi
+
+    test_image="${default_test_image}"
 }
 
 function build_packages {
@@ -198,6 +248,7 @@ function export_compose_env {
     fi
     export TEST_SCOPE="${test_scope}"
     export TEST_IMAGE="${test_image}"
+    export PYTEST_EXTRA_ARGS="${pytest_extra_args}"
     export TEST_RESULTS_DIR="${results_dir}"
 }
 
@@ -327,6 +378,7 @@ function tear_down_stack {
 
 require_docker_compose
 validate_scope
+resolve_default_test_image
 
 case "${command}" in
     run)
