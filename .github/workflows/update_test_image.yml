@@ -137,7 +137,6 @@ jobs:
           exit_code=${PIPESTATUS[0]}
           set -e
 
-          echo "exit_code=${exit_code}" >> "$GITHUB_OUTPUT"
           if [ "${exit_code}" -eq 0 ]; then
             echo "Functional test run completed without failures."
           else
