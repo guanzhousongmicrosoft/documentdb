@@ -83,7 +83,7 @@ function require_option_value {
     local flag="$1"
     local value="${2-}"
 
-    if [[ -z "${value}" ]] || is_known_option "${value}"; then
+    if is_known_option "${value}"; then
         echo "Missing value for ${flag}" >&2
         exit 1
     fi
