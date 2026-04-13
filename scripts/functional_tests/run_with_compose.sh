@@ -204,18 +204,33 @@ function build_packages {
 
 function resolve_deb_package {
     local abs_output_dir="${repo_root}/${package_output_dir}"
+    local package_glob="${package_os}-postgresql-${pg_version}-documentdb_*.deb"
     local package_path
+    local matches=()
 
     if [[ ! -d "${abs_output_dir}" ]]; then
         echo "No Debian package found in ${abs_output_dir}. Run '$0 build' first, remove --skip-package-build, or point --output-dir at a directory containing a built package." >&2
         exit 1
     fi
 
-    package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name '*.deb' ! -name '*dbgsym*' | sort | head -n 1)"
-    if [[ -z "${package_path}" ]]; then
-        echo "No Debian package found in ${abs_output_dir}. Run '$0 build' first, remove --skip-package-build, or point --output-dir at a directory containing a built package." >&2
+    while IFS= read -r package_match; do
+        matches+=("${package_match}")
+    done < <(
+        find "${abs_output_dir}" -maxdepth 1 -type f -name "${package_glob}" ! -name '*dbgsym*' | sort
+    )
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        echo "No Debian package matching ${package_glob} was found in ${abs_output_dir}. Run '$0 build' first, remove --skip-package-build, or point --output-dir at a directory containing the requested package." >&2
         exit 1
     fi
+
+    if [[ ${#matches[@]} -gt 1 ]]; then
+        echo "Found multiple Debian packages matching ${package_glob} in ${abs_output_dir}. Use a clean output directory or remove the extra packages so the functional test image is built from a single, unambiguous package:" >&2
+        printf '  %s\n' "${matches[@]}" >&2
+        exit 1
+    fi
+
+    package_path="${matches[0]}"
 
     if [[ "${package_path}" != "${repo_root}/"* ]]; then
         echo "Package path must stay under the repository root: ${package_path}" >&2
@@ -227,6 +242,7 @@ function resolve_deb_package {
 
 function resolve_deb_package_for_maintenance {
     local abs_output_dir="${repo_root}/${package_output_dir}"
+    local package_glob="${package_os}-postgresql-${pg_version}-documentdb_*.deb"
     local package_path
 
     if [[ ! -d "${abs_output_dir}" ]]; then
@@ -234,7 +250,7 @@ function resolve_deb_package_for_maintenance {
         return 0
     fi
 
-    package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name '*.deb' ! -name '*dbgsym*' | sort | head -n 1 || true)"
+    package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name "${package_glob}" ! -name '*dbgsym*' | sort | head -n 1 || true)"
     if [[ -z "${package_path}" ]]; then
         echo "${package_output_dir}/placeholder-documentdb.deb"
         return 0

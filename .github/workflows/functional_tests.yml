@@ -123,7 +123,7 @@ jobs:
             --username "${{ env.DOCDB_USERNAME }}" \
             --password "${{ env.DOCDB_PASSWORD }}" \
             --scope "${{ env.TEST_SCOPE }}" \
-            "${extra_args[@]}" \
+            "${extra_args[@]+"${extra_args[@]}"}" \
             2>&1 | tee "${test_log}"
           exit_code=${PIPESTATUS[0]}
           set -e
@@ -156,8 +156,16 @@ jobs:
           echo "results_ready=true" >> "$GITHUB_OUTPUT"
           find "${{ env.TEST_RESULTS_DIR }}" -maxdepth 1 -type f | sort
 
-      - name: Download latest daily baseline
+      - name: Validate functional test report
+        id: validate_test_report
         if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ./scripts/functional_tests/validate_report.py --report "${{ env.TEST_RESULTS_DIR }}/functional-report.json"
+
+      - name: Download latest daily baseline
+        if: always() && steps.validate_test_report.outcome == 'success'
         id: download_daily_baseline
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -215,7 +223,7 @@ jobs:
           fi
 
       - name: Analyze functional test results
-        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        if: always() && steps.validate_test_report.outcome == 'success'
         id: analyze_results
         shell: bash
         run: |
@@ -246,7 +254,7 @@ jobs:
             --documentdb-image "${{ env.DOCUMENTDB_IMAGE }}" \
             --test-image "${{ env.TEST_IMAGE }}" \
             --run-url "${run_url}" \
-            "${extra_args[@]}"
+            "${extra_args[@]+"${extra_args[@]}"}"
 
           echo "analysis_json=${analysis_json}" >> "$GITHUB_OUTPUT"
           echo "summary_markdown=${summary_markdown}" >> "$GITHUB_OUTPUT"
@@ -254,7 +262,7 @@ jobs:
             echo "baseline_output=${baseline_output}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload test results
+      - name: Upload raw test results
         if: always() && steps.verify_test_results.outputs.results_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -263,6 +271,15 @@ jobs:
           path: |
             ${{ env.TEST_RESULTS_DIR }}/functional-report.json
             ${{ env.TEST_RESULTS_DIR }}/functional-results.xml
+          if-no-files-found: error
+
+      - name: Upload test analysis
+        if: always() && steps.analyze_results.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-test-analysis-pg${{ env.PG_VERSION }}
+          overwrite: true
+          path: |
             ${{ steps.analyze_results.outputs.analysis_json }}
             ${{ steps.analyze_results.outputs.summary_markdown }}
           if-no-files-found: error
@@ -277,7 +294,7 @@ jobs:
           if-no-files-found: error
 
       - name: Generate test summary
-        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.analyze_results.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail

@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from update_deselect import parse_deselect_list
+from report_utils import ReportValidationError, load_and_validate_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,38 +44,11 @@ def parse_args() -> argparse.Namespace:
 
 def parse_report(path: Path) -> tuple[dict[str, int], list[str]]:
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise SystemExit(f"Missing report file: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Could not parse JSON report {path}: {exc}") from exc
+        parsed = load_and_validate_report(path)
+    except ReportValidationError as exc:
+        raise SystemExit(f"Invalid functional test report {path}: {exc}") from exc
 
-    summary = report.get("summary", {})
-    passed = int(summary.get("passed", 0))
-    failed = int(summary.get("failed", 0))
-    skipped = int(summary.get("skipped", 0))
-
-    failed_tests: list[str] = []
-    seen = set()
-    for test in report.get("tests", []):
-        if not isinstance(test, dict):
-            continue
-        if test.get("outcome") != "failed":
-            continue
-        nodeid = test.get("nodeid")
-        if isinstance(nodeid, str) and nodeid and nodeid not in seen:
-            seen.add(nodeid)
-            failed_tests.append(nodeid)
-
-    return (
-        {
-            "passed": passed,
-            "failed": failed,
-            "skipped": skipped,
-            "total": passed + failed + skipped,
-        },
-        failed_tests,
-    )
+    return parsed.counts, parsed.failed_tests
 
 
 def load_baseline(path: Path | None) -> dict | None:

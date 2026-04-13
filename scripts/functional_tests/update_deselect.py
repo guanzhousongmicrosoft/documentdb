@@ -7,6 +7,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from report_utils import ReportValidationError, load_and_validate_report
+
 HEADER_LINES = [
     "# One pytest node id per line. Blank lines and comments are ignored.",
     "",
@@ -78,26 +80,11 @@ def parse_args() -> argparse.Namespace:
 
 def parse_report(path: Path) -> set[str]:
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise SystemExit(f"Missing report file: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Could not parse JSON report {path}: {exc}") from exc
+        parsed = load_and_validate_report(path)
+    except ReportValidationError as exc:
+        raise SystemExit(f"Invalid functional test report {path}: {exc}") from exc
 
-    tests = report.get("tests")
-    if not isinstance(tests, list):
-        raise SystemExit(f"Expected 'tests' list in JSON report: {path}")
-
-    failed = set()
-    for test in tests:
-        if not isinstance(test, dict):
-            continue
-        if test.get("outcome") != "failed":
-            continue
-        nodeid = test.get("nodeid")
-        if isinstance(nodeid, str) and nodeid:
-            failed.add(nodeid)
-    return failed
+    return set(parsed.failed_tests)
 
 
 def parse_deselect_list(path: Path) -> dict[str, list[str]]:

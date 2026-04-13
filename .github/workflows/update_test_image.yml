@@ -155,9 +155,28 @@ jobs:
           echo "results_ready=true" >> "$GITHUB_OUTPUT"
           find "${{ env.TEST_RESULTS_DIR }}" -maxdepth 1 -type f | sort
 
+      - name: Validate functional test report
+        id: validate_test_report
+        if: steps.verify_test_results.outputs.results_ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ./scripts/functional_tests/validate_report.py --report "${{ env.TEST_RESULTS_DIR }}/functional-report.json"
+
+      - name: Upload raw test results
+        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-test-image-raw-results
+          overwrite: true
+          path: |
+            ${{ env.TEST_RESULTS_DIR }}/functional-report.json
+            ${{ env.TEST_RESULTS_DIR }}/functional-results.xml
+          if-no-files-found: error
+
       - name: Update deselect list
         id: update_deselect
-        if: steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.validate_test_report.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -169,7 +188,7 @@ jobs:
           echo "summary_json=${summary_json}" >> "$GITHUB_OUTPUT"
 
       - name: Update pinned test image file
-        if: steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.validate_test_report.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -182,7 +201,7 @@ jobs:
 
       - name: Generate PR body
         id: generate_pr_body
-        if: steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.validate_test_report.outcome == 'success'
         shell: bash
         env:
           CURRENT_IMAGE: ${{ steps.resolve_test_image.outputs.current_image }}
@@ -229,22 +248,20 @@ jobs:
 
           echo "pr_body_path=${PR_BODY_PATH}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload update artifacts
-        if: always() && steps.verify_test_results.outputs.results_ready == 'true'
+      - name: Upload update analysis artifacts
+        if: always() && steps.generate_pr_body.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: update-test-image-artifacts
           overwrite: true
           path: |
-            ${{ env.TEST_RESULTS_DIR }}/functional-report.json
-            ${{ env.TEST_RESULTS_DIR }}/functional-results.xml
             ${{ steps.update_deselect.outputs.summary_json }}
             ${{ steps.generate_pr_body.outputs.pr_body_path }}
           if-no-files-found: error
 
       - name: Create or update pull request
         id: create_pull_request
-        if: steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.validate_test_report.outcome == 'success'
         uses: peter-evans/create-pull-request@v8
         with:
           add-paths: |
@@ -262,7 +279,7 @@ jobs:
           body-path: ${{ steps.generate_pr_body.outputs.pr_body_path }}
 
       - name: Write workflow summary
-        if: steps.verify_test_results.outputs.results_ready == 'true'
+        if: steps.validate_test_report.outcome == 'success'
         shell: bash
         env:
           PR_URL: ${{ steps.create_pull_request.outputs.pull-request-url }}
