@@ -6,7 +6,7 @@
 
 # Known product bug in documentdb-local today.
 
-# Needs triage -- added by update-test-image workflow on 2026-04-10.
+# Needs triage -- added by update-test-image workflow on 2026-04-13.
 # Categorize these as "Unsupported feature" or "Known product bug" before merging.
 compatibility/tests/core/aggregation/commands/mapReduce/test_smoke_mapReduce.py::test_smoke_mapReduce
 compatibility/tests/core/collections/capped_collections/test_capped_collections_create.py::test_create_capped_collection

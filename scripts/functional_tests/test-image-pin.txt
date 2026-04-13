@@ -1,4 +1,4 @@
 # Pinned digest of ghcr.io/documentdb/functional-tests
 # Updated automatically by the update-test-image workflow.
 # Do not edit manually -- changes will be overwritten.
-ghcr.io/documentdb/functional-tests@sha256:b125069a0f894dff9b2978ccd2da0e53d7298a66c7ad4e973353c5181fbea661
+ghcr.io/documentdb/functional-tests@sha256:5ffff1e9260243f7639f941259dae8c7c111de104370adc394bc68578476979b
