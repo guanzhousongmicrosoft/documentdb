@@ -206,19 +206,22 @@ def main() -> int:
 
     counts, failed_tests = parse_report(args.report)
     sections = parse_deselect_list(args.deselect_list)
+    unsupported_feature = set(sections["unsupported_feature"])
+    known_product_bug = set(sections["known_product_bug"])
+    needs_triage = set(sections["needs_triage"])
     deselected = {
         nodeid for values in sections.values() for nodeid in values
     }
 
     categories = {
         "unsupported_feature": [
-            nodeid for nodeid in failed_tests if nodeid in set(sections["unsupported_feature"])
+            nodeid for nodeid in failed_tests if nodeid in unsupported_feature
         ],
         "known_product_bug": [
-            nodeid for nodeid in failed_tests if nodeid in set(sections["known_product_bug"])
+            nodeid for nodeid in failed_tests if nodeid in known_product_bug
         ],
         "needs_triage": [
-            nodeid for nodeid in failed_tests if nodeid in set(sections["needs_triage"])
+            nodeid for nodeid in failed_tests if nodeid in needs_triage
         ],
         "new_failures": [
             nodeid for nodeid in failed_tests if nodeid not in deselected
