@@ -1,5 +1,5 @@
 name: DocumentDB functional tests
-run-name: ${{ github.event_name == 'schedule' && 'daily functional tests (all tests)' || github.event.pull_request.title || github.ref_name }}
+run-name: ${{ github.event_name == 'schedule' && 'daily functional tests (all tests)' || github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}
 
 concurrency:
   group: functional-tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -15,12 +15,12 @@ on:
       - "main"
     paths-ignore:
       - ".devcontainer/**"
-      - "*.md"
+      - "**/*.md"
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     paths-ignore:
       - ".devcontainer/**"
-      - "*.md"
+      - "**/*.md"
 
 permissions:
   actions: read
@@ -49,8 +49,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Resolve test image
         id: resolve_test_image

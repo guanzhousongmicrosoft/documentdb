@@ -1,6 +1,8 @@
 name: documentdb-functional-tests
 
 services:
+  # Credentials are ephemeral, per-run test values -- not production secrets.
+  # They are visible in `docker inspect` and process listings by design.
   documentdb-local:
     image: ${DOCUMENTDB_IMAGE:-documentdb-local-functional:local}
     build:
