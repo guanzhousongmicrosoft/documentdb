@@ -1,0 +1,83 @@
+name: Cleanup functional test stack
+description: Collect logs, show tails, clean up the local Compose stack, and upload logs when needed.
+
+inputs:
+  compose_path:
+    description: Docker Compose file used for the stack.
+    required: true
+  project_name:
+    description: Docker Compose project name.
+    required: true
+  logs_dir:
+    description: Directory where collected logs should be stored.
+    required: true
+  artifact_name:
+    description: Artifact name used when uploading logs.
+    required: true
+  cleanup_test_image:
+    description: Optional TEST_IMAGE override used during cleanup.
+    required: false
+    default: ""
+  show_docker_log_tail:
+    description: Show documentdb-local log tails before cleanup.
+    required: false
+    default: "false"
+  upload_logs:
+    description: Upload collected logs even if cleanup succeeds.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Collect documentdb-local logs
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash ./scripts/functional_tests/workflow_ci.sh collect-logs \
+          --compose-path "${{ inputs.compose_path }}" \
+          --project-name "${{ inputs.project_name }}" \
+          --logs-dir "${{ inputs.logs_dir }}"
+
+    - name: Show documentdb-local Docker log tail
+      if: ${{ inputs.show_docker_log_tail == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash ./scripts/functional_tests/workflow_ci.sh show-log-tail \
+          --logs-dir "${{ inputs.logs_dir }}" \
+          --file documentdb-local.log \
+          --file documentdb-local-container.log
+
+    - name: Cleanup local functional test stack
+      id: cleanup
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        args=(
+          cleanup-stack
+          --logs-dir "${{ inputs.logs_dir }}"
+        )
+        if [[ -n "${{ inputs.cleanup_test_image }}" ]]; then
+          args+=( --test-image "${{ inputs.cleanup_test_image }}" )
+        fi
+
+        bash ./scripts/functional_tests/workflow_ci.sh "${args[@]}"
+
+    - name: Show cleanup log tail
+      if: ${{ steps.cleanup.outcome == 'failure' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash ./scripts/functional_tests/workflow_ci.sh show-log-tail \
+          --logs-dir "${{ inputs.logs_dir }}" \
+          --file cleanup.log
+
+    - name: Upload documentdb-local logs
+      if: ${{ inputs.upload_logs == 'true' || steps.cleanup.outcome == 'failure' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        overwrite: true
+        path: ${{ inputs.logs_dir }}/
