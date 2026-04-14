@@ -5,83 +5,52 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 
+function print_help {
+    cat <<EOF
+Usage: $0 [run|build|test|logs|down] [options]
+
+Description:
+  Build documentdb-local, then run the functional test stack with Docker Compose.
+
+Commands:
+  run                  Build packages if needed, build the local image, then run tests
+  build                Build packages if needed, then build the documentdb-local image only
+  test                 Run tests against the already-built documentdb-local image
+  logs                 Show Docker Compose logs for the local stack
+  down                 Stop and remove the local stack
+
+Options:
+  --os <value>         Package OS for packaging/build_packages.sh (default: deb13)
+  --pg <value>         PostgreSQL version (default: 17)
+  --output-dir <dir>   Package output dir relative to the repo root (default: downloaded-artifacts)
+  --base-image <img>   Base image for Dockerfile_gateway (default: debian:trixie-slim)
+  --username <value>   DocumentDB username (default: docdb_user)
+  --password <value>   DocumentDB password (default: DocDB_local)
+  --host-port <value>  Host port to publish DocumentDB on (default: 10260)
+  --scope <value>      Test scope to run: smoke or full (default: smoke)
+  --documentdb-image <img>
+                       Local image tag for the built documentdb-local image
+  --test-image <img>   Functional test image reference or local image ID
+                       (default: pinned digest in GitHub Actions, otherwise
+                       ghcr.io/documentdb/functional-tests:latest)
+  --use-pinned-test-image
+                       Resolve test-image-pin.txt locally to match CI
+  --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
+  --pytest-args <arg>  Extra pytest arguments, passed through to the test container
+  --exclude-deselect-file
+                        Run the full suite without applying deselect.list
+  --skip-package-build Reuse an existing package in --output-dir
+  -h, --help           Show this help text
+EOF
+}
+
 function show_help {
     local exit_code="${1:-0}"
 
     if [[ "${exit_code}" -eq 0 ]]; then
-        cat <<EOF
-Usage: $0 [run|build|test|logs|down] [options]
-
-Description:
-  Build documentdb-local, then run the functional test stack with Docker Compose.
-
-Commands:
-  run                  Build packages if needed, build the local image, then run tests
-  build                Build packages if needed, then build the documentdb-local image only
-  test                 Run tests against the already-built documentdb-local image
-  logs                 Show Docker Compose logs for the local stack
-  down                 Stop and remove the local stack
-
-Options:
-  --os <value>         Package OS for packaging/build_packages.sh (default: deb13)
-  --pg <value>         PostgreSQL version (default: 17)
-  --output-dir <dir>   Package output dir relative to the repo root (default: downloaded-artifacts)
-  --base-image <img>   Base image for Dockerfile_gateway (default: debian:trixie-slim)
-  --username <value>   DocumentDB username (default: docdb_user)
-  --password <value>   DocumentDB password (default: DocDB_local)
-  --host-port <value>  Host port to publish DocumentDB on (default: 10260)
-  --scope <value>      Test scope to run: smoke or full (default: smoke)
-  --documentdb-image <img>
-                       Local image tag for the built documentdb-local image
-  --test-image <img>   Functional test image reference or local image ID
-                       (default: pinned digest in GitHub Actions, otherwise
-                       ghcr.io/documentdb/functional-tests:latest)
-  --use-pinned-test-image
-                       Resolve test-image-pin.txt locally to match CI
-  --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
-  --pytest-args <arg>  Extra pytest arguments, passed through to the test container
-  --exclude-deselect-file
-                       Run the full suite without applying deselect.list
-  --skip-package-build Reuse an existing package in --output-dir
-  -h, --help           Show this help text
-EOF
+        print_help
     else
-        cat <<EOF >&2
-Usage: $0 [run|build|test|logs|down] [options]
-
-Description:
-  Build documentdb-local, then run the functional test stack with Docker Compose.
-
-Commands:
-  run                  Build packages if needed, build the local image, then run tests
-  build                Build packages if needed, then build the documentdb-local image only
-  test                 Run tests against the already-built documentdb-local image
-  logs                 Show Docker Compose logs for the local stack
-  down                 Stop and remove the local stack
-
-Options:
-  --os <value>         Package OS for packaging/build_packages.sh (default: deb13)
-  --pg <value>         PostgreSQL version (default: 17)
-  --output-dir <dir>   Package output dir relative to the repo root (default: downloaded-artifacts)
-  --base-image <img>   Base image for Dockerfile_gateway (default: debian:trixie-slim)
-  --username <value>   DocumentDB username (default: docdb_user)
-  --password <value>   DocumentDB password (default: DocDB_local)
-  --host-port <value>  Host port to publish DocumentDB on (default: 10260)
-  --scope <value>      Test scope to run: smoke or full (default: smoke)
-  --documentdb-image <img>
-                       Local image tag for the built documentdb-local image
-  --test-image <img>   Functional test image reference or local image ID
-                       (default: pinned digest in GitHub Actions, otherwise
-                       ghcr.io/documentdb/functional-tests:latest)
-  --use-pinned-test-image
-                       Resolve test-image-pin.txt locally to match CI
-  --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
-  --pytest-args <arg>  Extra pytest arguments, passed through to the test container
-  --exclude-deselect-file
-                       Run the full suite without applying deselect.list
-  --skip-package-build Reuse an existing package in --output-dir
-  -h, --help           Show this help text
-EOF
+        print_help >&2
     fi
 
     exit "${exit_code}"
