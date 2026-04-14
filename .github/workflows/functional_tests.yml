@@ -137,5 +137,5 @@ jobs:
           logs_dir: ${{ runner.temp }}/documentdb-local-logs
           artifact_name: documentdb-local-logs-pg${{ env.PG_VERSION }}
           cleanup_test_image: ${{ env.TEST_IMAGE }}
-          show_docker_log_tail: ${{ failure() && 'true' || 'false' }}
-          upload_logs: ${{ failure() && 'true' || 'false' }}
+          show_docker_log_tail: ${{ job.status == 'failure' && 'true' || 'false' }}
+          upload_logs: ${{ job.status == 'failure' && 'true' || 'false' }}

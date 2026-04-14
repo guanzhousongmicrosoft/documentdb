@@ -144,5 +144,5 @@ jobs:
           logs_dir: ${{ runner.temp }}/documentdb-update-test-image-logs
           artifact_name: update-test-image-logs
           cleanup_test_image: ${{ steps.resolve_test_image.outputs.latest_image }}
-          show_docker_log_tail: ${{ failure() && 'true' || 'false' }}
-          upload_logs: ${{ failure() && 'true' || 'false' }}
+          show_docker_log_tail: ${{ job.status == 'failure' && 'true' || 'false' }}
+          upload_logs: ${{ job.status == 'failure' && 'true' || 'false' }}
