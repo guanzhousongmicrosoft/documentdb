@@ -1,5 +1,5 @@
 name: DocumentDB functional tests
-run-name: ${{ github.event_name == 'schedule' && 'daily functional tests (all tests)' || github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}
+run-name: "${{ github.event_name == 'schedule' && 'daily functional tests (all tests)' || github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}"
 
 concurrency:
   group: functional-tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
