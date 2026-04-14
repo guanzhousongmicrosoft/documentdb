@@ -8,6 +8,23 @@ This directory contains the local Docker Compose flow for running DocumentDB fun
 - A functional test image to run, provided either as a registry reference or a local image ID
 - A Bash-capable shell. On Windows, use WSL or another environment that can run the Bash helper scripts in this directory.
 
+## Recommended before opening a PR
+
+Run the same test scope and pinned external test image that PR validation uses:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh run --scope full --use-pinned-test-image
+```
+
+This uses `test-image-pin.txt`, applies `deselect.list`, and exercises the same full-suite path
+that PR checks use in GitHub Actions.
+
+To match the scheduled daily run locally, exclude `deselect.list` while keeping the pinned image:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh run --scope full --use-pinned-test-image --exclude-deselect-file
+```
+
 ## Quick start
 
 Run the smoke suite:
@@ -38,6 +55,9 @@ Run a single test or subset:
 runs fall back to `ghcr.io/documentdb/functional-tests:latest`. In GitHub Actions, the workflow
 resolves the pinned digest from `test-image-pin.txt` so PR validation is stable across test-image
 updates.
+
+Use `--use-pinned-test-image` when you want the local run to match CI without manually resolving
+the digest first.
 
 `--pytest-args` is passed directly to pytest inside the functional test container.
 
@@ -84,8 +104,7 @@ If local results no longer match CI:
 1. Reproduce the CI image locally:
 
    ```bash
-   pinned_image="$(bash ./scripts/functional_tests/read_pin.sh)"
-   ./scripts/functional_tests/run_with_compose.sh run --scope full --test-image "${pinned_image}"
+   ./scripts/functional_tests/run_with_compose.sh run --scope full --use-pinned-test-image
    ```
 
 2. If `:latest` fails but the pinned image passes, the upstream test image changed and CI is still

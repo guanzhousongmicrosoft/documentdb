@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: refs/heads/main
 
       - name: Resolve current and latest test image
         id: resolve_test_image
@@ -275,7 +277,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Create or reset the automation branch from the current HEAD.
+          # Create or reset the automation branch from the checked-out main branch.
           git checkout -B "${branch}"
 
           git add scripts/functional_tests/deselect.list scripts/functional_tests/test-image-pin.txt

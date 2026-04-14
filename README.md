@@ -174,6 +174,15 @@ This command builds the PostgreSQL 17 Debian package, builds a local `documentdb
 
 For the full local developer guide, see [scripts/functional_tests/README.md](scripts/functional_tests/README.md).
 
+To match the PR workflow locally before pushing a change:
+
+```bash
+./scripts/functional_tests/run_with_compose.sh run --scope full --use-pinned-test-image
+```
+
+This uses the pinned external test image from `scripts/functional_tests/test-image-pin.txt` and
+applies `deselect.list`, matching the PR validation path in GitHub Actions.
+
 To run the full suite instead:
 
 ```bash

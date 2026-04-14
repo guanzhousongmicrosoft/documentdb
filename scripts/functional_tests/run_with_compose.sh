@@ -6,7 +6,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 
 function show_help {
-    cat <<EOF
+    local exit_code="${1:-0}"
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+        cat <<EOF
 Usage: $0 [run|build|test|logs|down] [options]
 
 Description:
@@ -33,6 +36,8 @@ Options:
   --test-image <img>   Functional test image reference or local image ID
                        (default: pinned digest in GitHub Actions, otherwise
                        ghcr.io/documentdb/functional-tests:latest)
+  --use-pinned-test-image
+                       Resolve test-image-pin.txt locally to match CI
   --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
   --pytest-args <arg>  Extra pytest arguments, passed through to the test container
   --exclude-deselect-file
@@ -40,7 +45,46 @@ Options:
   --skip-package-build Reuse an existing package in --output-dir
   -h, --help           Show this help text
 EOF
-    exit 0
+    else
+        cat <<EOF >&2
+Usage: $0 [run|build|test|logs|down] [options]
+
+Description:
+  Build documentdb-local, then run the functional test stack with Docker Compose.
+
+Commands:
+  run                  Build packages if needed, build the local image, then run tests
+  build                Build packages if needed, then build the documentdb-local image only
+  test                 Run tests against the already-built documentdb-local image
+  logs                 Show Docker Compose logs for the local stack
+  down                 Stop and remove the local stack
+
+Options:
+  --os <value>         Package OS for packaging/build_packages.sh (default: deb13)
+  --pg <value>         PostgreSQL version (default: 17)
+  --output-dir <dir>   Package output dir relative to the repo root (default: downloaded-artifacts)
+  --base-image <img>   Base image for Dockerfile_gateway (default: debian:trixie-slim)
+  --username <value>   DocumentDB username (default: docdb_user)
+  --password <value>   DocumentDB password (default: DocDB_local)
+  --host-port <value>  Host port to publish DocumentDB on (default: 10260)
+  --scope <value>      Test scope to run: smoke or full (default: smoke)
+  --documentdb-image <img>
+                       Local image tag for the built documentdb-local image
+  --test-image <img>   Functional test image reference or local image ID
+                       (default: pinned digest in GitHub Actions, otherwise
+                       ghcr.io/documentdb/functional-tests:latest)
+  --use-pinned-test-image
+                       Resolve test-image-pin.txt locally to match CI
+  --results-dir <dir>  Results directory (default: <repo>/functional-test-results)
+  --pytest-args <arg>  Extra pytest arguments, passed through to the test container
+  --exclude-deselect-file
+                       Run the full suite without applying deselect.list
+  --skip-package-build Reuse an existing package in --output-dir
+  -h, --help           Show this help text
+EOF
+    fi
+
+    exit "${exit_code}"
 }
 
 command="run"
@@ -55,6 +99,7 @@ documentdb_image="documentdb-local-functional:local"
 default_test_image="ghcr.io/documentdb/functional-tests:latest"
 test_image_pin_file="${TEST_IMAGE_PIN_FILE:-${script_dir}/test-image-pin.txt}"
 test_image="${TEST_IMAGE:-}"
+use_pinned_test_image=false
 results_dir="${repo_root}/functional-test-results"
 test_scope="smoke"
 compose_config_path="${script_dir}/docker-compose.yml"
@@ -70,7 +115,7 @@ fi
 
 function is_known_option {
     case "$1" in
-        --os|--pg|--output-dir|--base-image|--username|--password|--host-port|--scope|--documentdb-image|--test-image|--results-dir|--pytest-args|--exclude-deselect-file|--skip-package-build|-h|--help)
+        --os|--pg|--output-dir|--base-image|--username|--password|--host-port|--scope|--documentdb-image|--test-image|--use-pinned-test-image|--results-dir|--pytest-args|--exclude-deselect-file|--skip-package-build|-h|--help)
             return 0
             ;;
         *)
@@ -83,7 +128,7 @@ function require_option_value {
     local flag="$1"
     local value="${2-}"
 
-    if is_known_option "${value}"; then
+    if [[ -z "${value}" ]] || is_known_option "${value}"; then
         echo "Missing value for ${flag}" >&2
         exit 1
     fi
@@ -141,6 +186,9 @@ while [[ $# -gt 0 ]]; do
             require_option_value "--test-image" "${1-}"
             test_image="$1"
             ;;
+        --use-pinned-test-image)
+            use_pinned_test_image=true
+            ;;
         --results-dir)
             shift
             require_option_value "--results-dir" "${1-}"
@@ -158,12 +206,11 @@ while [[ $# -gt 0 ]]; do
             skip_package_build=true
             ;;
         -h|--help)
-            show_help
+            show_help 0
             ;;
         *)
-            echo "Unknown argument: $1"
-            show_help
-            exit 1
+            echo "Unknown argument: $1" >&2
+            show_help 1
             ;;
     esac
     shift
@@ -171,6 +218,13 @@ done
 
 function require_docker_compose {
     docker compose version > /dev/null
+}
+
+function validate_option_combinations {
+    if [[ -n "${test_image}" && "${use_pinned_test_image}" == true ]]; then
+        echo "Use either --test-image or --use-pinned-test-image, not both." >&2
+        exit 1
+    fi
 }
 
 function read_pinned_test_image {
@@ -182,7 +236,7 @@ function resolve_default_test_image {
         return 0
     fi
 
-    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    if [[ "${GITHUB_ACTIONS:-}" == "true" || "${use_pinned_test_image}" == true ]]; then
         if test_image="$(read_pinned_test_image)"; then
             return 0
         fi
@@ -435,6 +489,7 @@ function tear_down_stack {
     docker compose -f "${compose_config_path}" -p "${compose_project_name}" down --volumes --remove-orphans
 }
 
+validate_option_combinations
 require_docker_compose
 validate_scope
 resolve_default_test_image
@@ -456,8 +511,7 @@ case "${command}" in
         tear_down_stack
         ;;
     *)
-        echo "Unknown command: ${command}"
-        show_help
-        exit 1
+        echo "Unknown command: ${command}" >&2
+        show_help 1
         ;;
 esac
