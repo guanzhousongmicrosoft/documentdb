@@ -263,27 +263,53 @@ jobs:
       - name: Create or update pull request
         id: create_pull_request
         if: always() && steps.validate_test_report.outcome == 'success'
-        uses: peter-evans/create-pull-request@v8
-        with:
-          add-paths: |
-            scripts/functional_tests/deselect.list
-            scripts/functional_tests/test-image-pin.txt
-          branch: automation/update-functional-test-image
-          delete-branch: true
-          commit-message: |
-            Update functional test image pin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="automation/update-functional-test-image"
+          title="Update functional test image pin"
+          body_file="${{ steps.generate_pr_body.outputs.pr_body_path }}"
 
-            Refresh scripts/functional_tests/test-image-pin.txt and deselect.list
-            from the latest functional test image.
-          signoff: true
-          title: Update functional test image pin
-          body-path: ${{ steps.generate_pr_body.outputs.pr_body_path }}
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create or reset the automation branch from the current HEAD.
+          git checkout -B "${branch}"
+
+          git add scripts/functional_tests/deselect.list scripts/functional_tests/test-image-pin.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -s -m "Update functional test image pin" \
+            -m "Refresh scripts/functional_tests/test-image-pin.txt and deselect.list
+          from the latest functional test image."
+
+          git push --force-with-lease origin "${branch}"
+
+          # Create the PR if it does not exist yet; otherwise update the body.
+          existing_pr="$(gh pr list --head "${branch}" --base main --json url --jq '.[0].url' || true)"
+          if [ -n "${existing_pr}" ]; then
+            gh pr edit "${existing_pr}" --body-file "${body_file}"
+            echo "pr_url=${existing_pr}" >> "$GITHUB_OUTPUT"
+          else
+            pr_url="$(gh pr create \
+              --head "${branch}" \
+              --base main \
+              --title "${title}" \
+              --body-file "${body_file}")"
+            echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Write workflow summary
         if: always() && steps.validate_test_report.outcome == 'success'
         shell: bash
         env:
-          PR_URL: ${{ steps.create_pull_request.outputs.pull-request-url }}
+          PR_URL: ${{ steps.create_pull_request.outputs.pr_url }}
         run: |
           set -euo pipefail
           {
