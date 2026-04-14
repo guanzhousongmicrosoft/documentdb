@@ -16,6 +16,13 @@ from update_deselect import parse_deselect_list
 from report_utils import ReportValidationError, load_and_validate_report
 
 
+def _nonempty_path(value: str) -> Path | None:
+    """Convert a string to a Path, treating empty strings as None."""
+    if not value.strip():
+        return None
+    return Path(value)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -37,8 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--documentdb-image", required=True)
     parser.add_argument("--test-image", required=True)
     parser.add_argument("--run-url")
-    parser.add_argument("--baseline-input", type=Path)
-    parser.add_argument("--baseline-output", type=Path)
+    parser.add_argument("--baseline-input", type=_nonempty_path)
+    parser.add_argument("--baseline-output", type=_nonempty_path)
     return parser.parse_args()
 
 
