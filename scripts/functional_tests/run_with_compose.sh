@@ -246,12 +246,14 @@ function resolve_deb_package_for_maintenance {
     local package_path
 
     if [[ ! -d "${abs_output_dir}" ]]; then
+        echo "Warning: package output directory ${abs_output_dir} does not exist; using placeholder for DEB_PACKAGE_REL_PATH (build-time only, safe for non-build commands)." >&2
         echo "${package_output_dir}/placeholder-documentdb.deb"
         return 0
     fi
 
     package_path="$(find "${abs_output_dir}" -maxdepth 1 -type f -name "${package_glob}" ! -name '*dbgsym*' | sort | head -n 1 || true)"
     if [[ -z "${package_path}" ]]; then
+        echo "Warning: no package matching ${package_glob} in ${abs_output_dir}; using placeholder for DEB_PACKAGE_REL_PATH (build-time only, safe for non-build commands)." >&2
         echo "${package_output_dir}/placeholder-documentdb.deb"
         return 0
     fi
@@ -413,13 +415,23 @@ function test_stack {
     run_test_service
 }
 
+# For commands that only manage existing containers (logs, down), the deb
+# package path is never used -- it is a build-time argument only. Export a
+# placeholder so docker compose can parse the file without error.
+function prepare_management_environment {
+    export DEB_PACKAGE_REL_PATH="unused-for-management-commands"
+    export DOCUMENTDB_IMAGE="${documentdb_image}"
+    export TEST_IMAGE="${test_image}"
+    export TEST_RESULTS_DIR="${results_dir}"
+}
+
 function show_logs {
-    prepare_maintenance_environment
+    prepare_management_environment
     docker compose -f "${compose_config_path}" -p "${compose_project_name}" logs
 }
 
 function tear_down_stack {
-    prepare_maintenance_environment
+    prepare_management_environment
     docker compose -f "${compose_config_path}" -p "${compose_project_name}" down --volumes --remove-orphans
 }
 

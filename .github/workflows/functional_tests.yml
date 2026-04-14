@@ -184,18 +184,39 @@ jobs:
           artifact_id=""
           baseline_run_url=""
 
+          # Fetch recent scheduled run IDs into a temp file so we can check the
+          # exit status explicitly. If the API call fails, skip baseline comparison
+          # instead of iterating over error output.
+          run_ids_file="${{ runner.temp }}/baseline-run-ids.txt"
+          if ! gh api \
+            "/repos/${{ github.repository }}/actions/workflows/functional_tests.yml/runs?branch=main&event=schedule&status=completed&per_page=20" \
+            --jq '.workflow_runs[].id' > "${run_ids_file}" 2>/dev/null; then
+            echo "Could not fetch scheduled workflow runs; skipping baseline comparison."
+            rm -f "${run_ids_file}"
+            exit 0
+          fi
+
           while IFS= read -r run_id; do
             [ -n "${run_id}" ] || continue
 
+            # Guard against malformed API responses.
+            if ! [[ "${run_id}" =~ ^[0-9]+$ ]]; then
+              continue
+            fi
+
             candidate_artifact_id="$(gh api \
               "/repos/${{ github.repository }}/actions/runs/${run_id}/artifacts" \
-              --jq ".artifacts[] | select(.name == \"${{ env.DAILY_BASELINE_ARTIFACT_NAME }}\" and .expired == false) | .id" | head -n 1)"
+              --jq ".artifacts[] | select(.name == \"${{ env.DAILY_BASELINE_ARTIFACT_NAME }}\" and .expired == false) | .id" 2>/dev/null | head -n 1 || true)"
 
             if [ -z "${candidate_artifact_id}" ]; then
               continue
             fi
 
-            gh api "/repos/${{ github.repository }}/actions/artifacts/${candidate_artifact_id}/zip" > "${zip_path}"
+            if ! gh api "/repos/${{ github.repository }}/actions/artifacts/${candidate_artifact_id}/zip" > "${zip_path}" 2>/dev/null; then
+              rm -f "${zip_path}"
+              continue
+            fi
+
             unzip -o -q "${zip_path}" -d "${output_dir}"
 
             baseline_path="${output_dir}/functional-test-daily-baseline.json"
@@ -210,11 +231,9 @@ jobs:
             echo "baseline_path=${baseline_path}" >> "$GITHUB_OUTPUT"
             echo "baseline_run_url=${baseline_run_url}" >> "$GITHUB_OUTPUT"
             break
-          done < <(
-            gh api \
-              "/repos/${{ github.repository }}/actions/workflows/functional_tests.yml/runs?branch=main&event=schedule&status=completed&per_page=20" \
-              --jq '.workflow_runs[].id'
-          )
+          done < "${run_ids_file}"
+
+          rm -f "${run_ids_file}"
 
           if [ -z "${artifact_id}" ]; then
             echo "No daily baseline artifact found."
