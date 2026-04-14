@@ -36,6 +36,10 @@ jobs:
         with:
           ref: refs/heads/main
 
+      - name: Mask ephemeral test credentials
+        shell: bash
+        run: echo "::add-mask::${{ env.DOCDB_PASSWORD }}"
+
       - name: Resolve current and latest test image
         id: resolve_test_image
         shell: bash
@@ -291,7 +295,7 @@ jobs:
             -m "Refresh scripts/functional_tests/test-image-pin.txt and deselect.list
           from the latest functional test image."
 
-          git push --force-with-lease origin "${branch}"
+          git push --force origin "${branch}"
 
           # Create the PR if it does not exist yet; otherwise update the body.
           existing_pr="$(gh pr list --head "${branch}" --base main --json url --jq '.[0].url' || true)"

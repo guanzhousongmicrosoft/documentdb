@@ -343,7 +343,7 @@ function export_compose_env {
         export TEST_DESELECT_FILE="${TEST_DESELECT_FILE-/workspace/scripts/functional_tests/deselect.list}"
     fi
     export TEST_SCOPE="${test_scope}"
-    export TEST_IMAGE="${test_image}"
+    export TEST_IMAGE="${test_image:-${default_test_image}}"
     export PYTEST_EXTRA_ARGS="${pytest_extra_args}"
     export TEST_RESULTS_DIR="${results_dir}"
 }
@@ -475,7 +475,7 @@ function test_stack {
 function prepare_management_environment {
     export DEB_PACKAGE_REL_PATH="unused-for-management-commands"
     export DOCUMENTDB_IMAGE="${documentdb_image}"
-    export TEST_IMAGE="${test_image}"
+    export TEST_IMAGE="${test_image:-${default_test_image}}"
     export TEST_RESULTS_DIR="${results_dir}"
 }
 

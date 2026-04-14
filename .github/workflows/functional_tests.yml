@@ -50,6 +50,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Mask ephemeral test credentials
+        shell: bash
+        run: echo "::add-mask::${{ env.DOCDB_PASSWORD }}"
+
       - name: Resolve test image
         id: resolve_test_image
         shell: bash
