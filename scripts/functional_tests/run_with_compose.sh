@@ -293,7 +293,9 @@ function prepare_results_dir {
     mkdir -p "${results_dir}"
     results_dir="$(cd "${results_dir}" && pwd)"
     rm -f "${results_dir}/functional-report.json" "${results_dir}/functional-results.xml"
-    chmod 0775 "${results_dir}"
+    # Must be world-writable: the functional-test container runs as a different
+    # UID (testrunner) than the host, so group-only (0775) is insufficient.
+    chmod 0777 "${results_dir}"
 }
 
 function export_compose_env {
