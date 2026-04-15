@@ -293,7 +293,7 @@ function prepare_results_dir {
     mkdir -p "${results_dir}"
     results_dir="$(cd "${results_dir}" && pwd)"
     rm -f "${results_dir}/functional-report.json" "${results_dir}/functional-results.xml"
-    chmod 0777 "${results_dir}"
+    chmod 0775 "${results_dir}"
 }
 
 function export_compose_env {
