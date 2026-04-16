@@ -20,6 +20,7 @@ class ParsedReport:
     counts: dict[str, int]
     failed_tests: list[str]
     exitcode: int
+    outcomes_by_nodeid: dict[str, str]
 
 
 def _parse_int(value: object, *, field_name: str, path: Path) -> int:
@@ -115,6 +116,7 @@ def load_and_validate_report(path: Path) -> ParsedReport:
 
     outcome_counts: Counter[str] = Counter()
     failed_tests: list[str] = []
+    outcomes_by_nodeid: dict[str, str] = {}
     seen_nodeids: set[str] = set()
 
     for index, test in enumerate(tests, start=1):
@@ -137,6 +139,7 @@ def load_and_validate_report(path: Path) -> ParsedReport:
             )
 
         outcome_counts[outcome] += 1
+        outcomes_by_nodeid[nodeid] = outcome
         if outcome == "failed":
             failed_tests.append(nodeid)
 
@@ -188,4 +191,9 @@ def load_and_validate_report(path: Path) -> ParsedReport:
             f"{path}: report summary contains unsupported outcome counts: {', '.join(sorted(unsupported_summary_keys))}"
         )
 
-    return ParsedReport(counts=counts, failed_tests=failed_tests, exitcode=exitcode)
+    return ParsedReport(
+        counts=counts,
+        failed_tests=failed_tests,
+        exitcode=exitcode,
+        outcomes_by_nodeid=outcomes_by_nodeid,
+    )

@@ -121,3 +121,21 @@ the deselect list, and opens a PR with both changes.
 **Retention:** Pinned digests must remain available in the container registry for the lifetime
 of any open PR that references them. Avoid pruning GHCR package versions that are still
 referenced by `test-image-pin.txt` on any active branch.
+
+## Daily history analysis
+
+The scheduled daily workflow also analyzes a rolling history of recent daily runs using the raw
+`functional-report.json` artifacts. The default window is **7 daily runs** (the current run plus
+up to 6 previous scheduled runs), which is large enough to surface pass/fail flips without making
+artifact downloads or summaries too noisy.
+
+The history summary groups tests into:
+
+- `stable_pass`: passed in every analyzed daily run
+- `stable_fail`: failed in every analyzed daily run
+- `flaky`: had at least one passing run and at least one failing run
+- `missing_or_skipped`: was skipped or absent in at least one analyzed run
+
+The labels are intentionally conservative. A test is only considered `stable_pass` or
+`stable_fail` when it has the same outcome in every analyzed run. When fewer than 7 valid daily
+runs are available, the summary calls out that the history is still sparse.

@@ -36,7 +36,9 @@ env:
   DOCDB_PASSWORD: DocDB_${{ github.run_id }}_${{ github.run_attempt }}
   TEST_IMAGE_PIN_FILE: scripts/functional_tests/test-image-pin.txt
   TEST_RESULTS_DIR: ${{ github.workspace }}/functional-test-results
+  RAW_RESULTS_ARTIFACT_NAME: functional-test-results-pg17
   DAILY_BASELINE_ARTIFACT_NAME: functional-test-daily-baseline-pg17
+  DAILY_HISTORY_WINDOW: "7"
 
 jobs:
   functional-tests:
@@ -91,12 +93,26 @@ jobs:
         if: always() && steps.run_stack.outputs.results_ready == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: functional-test-results-pg${{ env.PG_VERSION }}
+          name: ${{ env.RAW_RESULTS_ARTIFACT_NAME }}
           overwrite: true
           path: |
             ${{ env.TEST_RESULTS_DIR }}/functional-report.json
             ${{ env.TEST_RESULTS_DIR }}/functional-results.xml
           if-no-files-found: error
+
+      - name: Download recent daily raw results
+        if: always() && github.event_name == 'schedule' && steps.run_stack.outputs.report_valid == 'true'
+        id: download_daily_history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: bash ./scripts/functional_tests/workflow_ci.sh download-daily-history --repository "${{ github.repository }}" --artifact-name "${{ env.RAW_RESULTS_ARTIFACT_NAME }}" --output-dir "${{ runner.temp }}/daily-history" --window-size "${{ env.DAILY_HISTORY_WINDOW }}" --github-output "$GITHUB_OUTPUT" --server-url "${{ github.server_url }}"
+
+      - name: Analyze recent daily history
+        if: always() && github.event_name == 'schedule' && steps.run_stack.outputs.report_valid == 'true'
+        id: analyze_history
+        shell: bash
+        run: bash ./scripts/functional_tests/workflow_ci.sh analyze-daily-history --current-report "${{ env.TEST_RESULTS_DIR }}/functional-report.json" --current-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --history-manifest "${{ steps.download_daily_history.outputs.history_manifest }}" --requested-window "${{ env.DAILY_HISTORY_WINDOW }}" --analysis-json "${{ runner.temp }}/functional-test-history-analysis.json" --summary-markdown "${{ runner.temp }}/functional-test-history-summary.md" --github-output "$GITHUB_OUTPUT"
 
       - name: Upload test analysis
         if: always() && steps.analyze_results.outcome == 'success'
@@ -118,10 +134,26 @@ jobs:
           path: ${{ steps.analyze_results.outputs.baseline_output }}
           if-no-files-found: error
 
+      - name: Upload daily history analysis
+        if: always() && steps.analyze_history.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: functional-test-history-analysis-pg${{ env.PG_VERSION }}
+          overwrite: true
+          path: |
+            ${{ steps.analyze_history.outputs.analysis_json }}
+            ${{ steps.analyze_history.outputs.summary_markdown }}
+          if-no-files-found: error
+
       - name: Generate test summary
         if: steps.analyze_results.outcome == 'success'
         shell: bash
         run: cat "${{ steps.analyze_results.outputs.summary_markdown }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate daily history summary
+        if: steps.analyze_history.outcome == 'success'
+        shell: bash
+        run: cat "${{ steps.analyze_history.outputs.summary_markdown }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce functional test outcome
         if: always()

@@ -466,6 +466,149 @@ function download_daily_baseline {
     fi
 }
 
+function download_daily_history {
+    local repository=""
+    local artifact_name=""
+    local output_dir=""
+    local window_size=""
+    local github_output=""
+    local server_url=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repository)
+                shift
+                require_option_value "--repository" "${1-}"
+                repository="$1"
+                ;;
+            --artifact-name)
+                shift
+                require_option_value "--artifact-name" "${1-}"
+                artifact_name="$1"
+                ;;
+            --output-dir)
+                shift
+                require_option_value "--output-dir" "${1-}"
+                output_dir="$1"
+                ;;
+            --window-size)
+                shift
+                require_option_value "--window-size" "${1-}"
+                window_size="$1"
+                ;;
+            --github-output)
+                shift
+                require_option_value "--github-output" "${1-}"
+                github_output="$1"
+                ;;
+            --server-url)
+                shift
+                require_option_value "--server-url" "${1-}"
+                server_url="$1"
+                ;;
+            *)
+                die "Unknown argument for download-daily-history: $1"
+                ;;
+        esac
+        shift
+    done
+
+    [[ -n "${repository}" ]] || die "--repository is required"
+    [[ -n "${artifact_name}" ]] || die "--artifact-name is required"
+    [[ -n "${output_dir}" ]] || die "--output-dir is required"
+    [[ -n "${window_size}" ]] || die "--window-size is required"
+    [[ -n "${github_output}" ]] || die "--github-output is required"
+    [[ -n "${server_url}" ]] || die "--server-url is required"
+
+    local manifest_path="${output_dir}/history-manifest.tsv"
+    local run_list_file="${output_dir}/scheduled-runs.tsv"
+    local target_previous_runs=$((window_size - 1))
+    local max_candidates=$((window_size * 4))
+    local downloaded_runs=0
+
+    append_output "${github_output}" "history_manifest" "${manifest_path}"
+    append_output "${github_output}" "history_run_count" "0"
+
+    rm -rf "${output_dir}"
+    mkdir -p "${output_dir}"
+    : > "${manifest_path}"
+
+    if (( target_previous_runs <= 0 )); then
+        return 0
+    fi
+
+    if (( max_candidates < 20 )); then
+        max_candidates=20
+    elif (( max_candidates > 100 )); then
+        max_candidates=100
+    fi
+
+    if ! gh api \
+        "/repos/${repository}/actions/workflows/functional_tests.yml/runs?branch=main&event=schedule&status=completed&per_page=${max_candidates}" \
+        --jq '.workflow_runs[] | [.id, .html_url, .created_at] | @tsv' > "${run_list_file}" 2>/dev/null; then
+        echo "Could not fetch scheduled workflow runs; skipping daily history download."
+        rm -f "${run_list_file}"
+        return 0
+    fi
+
+    while IFS=$'\t' read -r run_id run_url completed_at; do
+        [[ -n "${run_id}" ]] || continue
+        if ! [[ "${run_id}" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+
+        local artifact_id
+        artifact_id="$(gh api \
+            "/repos/${repository}/actions/runs/${run_id}/artifacts" \
+            --jq ".artifacts[] | select(.name == \"${artifact_name}\" and .expired == false) | .id" 2>/dev/null | head -n 1 || true)"
+        if [[ -z "${artifact_id}" ]]; then
+            continue
+        fi
+
+        local zip_path="${output_dir}/run-${run_id}.zip"
+        local extract_dir="${output_dir}/run-${run_id}"
+        local report_path="${extract_dir}/functional-report.json"
+
+        rm -rf "${zip_path}" "${extract_dir}"
+        mkdir -p "${extract_dir}"
+
+        if ! gh api "/repos/${repository}/actions/artifacts/${artifact_id}/zip" > "${zip_path}" 2>/dev/null; then
+            rm -f "${zip_path}"
+            rm -rf "${extract_dir}"
+            continue
+        fi
+
+        if ! unzip -o -q "${zip_path}" -d "${extract_dir}"; then
+            rm -f "${zip_path}"
+            rm -rf "${extract_dir}"
+            continue
+        fi
+        rm -f "${zip_path}"
+
+        if [[ ! -f "${report_path}" ]]; then
+            rm -rf "${extract_dir}"
+            continue
+        fi
+
+        if [[ -z "${run_url}" ]]; then
+            run_url="${server_url}/${repository}/actions/runs/${run_id}"
+        fi
+        printf '%s\t%s\t%s\t%s\n' "${run_id}" "${completed_at}" "${run_url}" "${report_path}" >> "${manifest_path}"
+        downloaded_runs=$((downloaded_runs + 1))
+
+        if (( downloaded_runs >= target_previous_runs )); then
+            break
+        fi
+    done < "${run_list_file}"
+
+    rm -f "${run_list_file}"
+    append_output "${github_output}" "history_run_count" "${downloaded_runs}"
+
+    if (( downloaded_runs == 0 )); then
+        echo "No historical daily raw-result artifacts found."
+    fi
+}
+
 function analyze_results_for_workflow {
     local report=""
     local deselect_list=""
@@ -584,6 +727,79 @@ function analyze_results_for_workflow {
     if [[ -n "${baseline_output}" && -f "${baseline_output}" ]]; then
         append_output "${github_output}" "baseline_output" "${baseline_output}"
     fi
+}
+
+function analyze_daily_history {
+    local current_report=""
+    local current_run_url=""
+    local history_manifest=""
+    local requested_window=""
+    local analysis_json=""
+    local summary_markdown=""
+    local github_output=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --current-report)
+                shift
+                require_option_value "--current-report" "${1-}"
+                current_report="$1"
+                ;;
+            --current-run-url)
+                shift
+                require_option_value "--current-run-url" "${1-}"
+                current_run_url="$1"
+                ;;
+            --history-manifest)
+                shift
+                require_option_value "--history-manifest" "${1-}"
+                history_manifest="$1"
+                ;;
+            --requested-window)
+                shift
+                require_option_value "--requested-window" "${1-}"
+                requested_window="$1"
+                ;;
+            --analysis-json)
+                shift
+                require_option_value "--analysis-json" "${1-}"
+                analysis_json="$1"
+                ;;
+            --summary-markdown)
+                shift
+                require_option_value "--summary-markdown" "${1-}"
+                summary_markdown="$1"
+                ;;
+            --github-output)
+                shift
+                require_option_value "--github-output" "${1-}"
+                github_output="$1"
+                ;;
+            *)
+                die "Unknown argument for analyze-daily-history: $1"
+                ;;
+        esac
+        shift
+    done
+
+    [[ -n "${current_report}" ]] || die "--current-report is required"
+    [[ -n "${current_run_url}" ]] || die "--current-run-url is required"
+    [[ -n "${history_manifest}" ]] || die "--history-manifest is required"
+    [[ -n "${requested_window}" ]] || die "--requested-window is required"
+    [[ -n "${analysis_json}" ]] || die "--analysis-json is required"
+    [[ -n "${summary_markdown}" ]] || die "--summary-markdown is required"
+    [[ -n "${github_output}" ]] || die "--github-output is required"
+
+    append_output "${github_output}" "analysis_json" "${analysis_json}"
+    append_output "${github_output}" "summary_markdown" "${summary_markdown}"
+
+    python3 ./scripts/functional_tests/analyze_history.py \
+        --current-report "${current_report}" \
+        --current-run-url "${current_run_url}" \
+        --history-manifest "${history_manifest}" \
+        --requested-window "${requested_window}" \
+        --analysis-json "${analysis_json}" \
+        --summary-markdown "${summary_markdown}"
 }
 
 function enforce_stack_outcome {
@@ -940,6 +1156,12 @@ case "${subcommand}" in
         ;;
     analyze-results)
         analyze_results_for_workflow "$@"
+        ;;
+    download-daily-history)
+        download_daily_history "$@"
+        ;;
+    analyze-daily-history)
+        analyze_daily_history "$@"
         ;;
     enforce-stack-outcome)
         enforce_stack_outcome "$@"
