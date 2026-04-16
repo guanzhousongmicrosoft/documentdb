@@ -101,7 +101,7 @@ jobs:
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
     - name: Show version
-      run: echo "Using DOCUMENTDB_VERSION=${{ needs.prepare.outputs.documentdb_version }}"
+      run: echo "Using DOCUMENTDB_VERSION=${{ needs.build-and-push.outputs.documentdb_version }}"
     - name: Set Default Values
       run: |
         echo "MANIFEST_TAG=pg${{ matrix.pg_version }}-${{ needs.build-and-push.outputs.documentdb_version }}" >> $GITHUB_ENV

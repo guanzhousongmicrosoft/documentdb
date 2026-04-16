@@ -1,0 +1,93 @@
+name: Run functional test stack
+description: Build documentdb-local, run functional tests, and validate the report.
+
+inputs:
+  logs_dir:
+    description: Directory to store build and test logs.
+    required: true
+  build_test_image:
+    description: Optional TEST_IMAGE override used during the build command.
+    required: false
+    default: ""
+  pg_version:
+    description: PostgreSQL version passed to run_with_compose.sh.
+    required: true
+  package_output_dir:
+    description: Package output directory passed to run_with_compose.sh.
+    required: true
+  documentdb_image:
+    description: Local documentdb image tag.
+    required: true
+  test_image:
+    description: Functional test image reference.
+    required: true
+  results_dir:
+    description: Directory for JSON and JUnit test outputs.
+    required: true
+  username:
+    description: Ephemeral functional test username.
+    required: true
+  password:
+    description: Ephemeral functional test password.
+    required: true
+  scope:
+    description: Functional test scope.
+    required: true
+  exclude_deselect_file:
+    description: Run the test suite without deselect.list.
+    required: false
+    default: "false"
+  allow_test_exit_code_1:
+    description: Treat pytest exit code 1 as an allowed outcome.
+    required: false
+    default: "false"
+
+outputs:
+  build_success:
+    description: Whether the documentdb-local build completed successfully.
+    value: ${{ steps.run.outputs.build_success }}
+  test_exit_code:
+    description: Exit code returned by the functional test run.
+    value: ${{ steps.run.outputs.test_exit_code }}
+  results_ready:
+    description: Whether the expected result files were produced.
+    value: ${{ steps.run.outputs.results_ready }}
+  report_valid:
+    description: Whether the JSON test report passed validation.
+    value: ${{ steps.run.outputs.report_valid }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        args=(
+          run-functional-test-stack
+          --logs-dir "${{ inputs.logs_dir }}"
+          --pg "${{ inputs.pg_version }}"
+          --output-dir "${{ inputs.package_output_dir }}"
+          --documentdb-image "${{ inputs.documentdb_image }}"
+          --test-image "${{ inputs.test_image }}"
+          --results-dir "${{ inputs.results_dir }}"
+          --username "${{ inputs.username }}"
+          --password "${{ inputs.password }}"
+          --scope "${{ inputs.scope }}"
+          --github-output "$GITHUB_OUTPUT"
+        )
+
+        if [[ -n "${{ inputs.build_test_image }}" ]]; then
+          args+=( --build-test-image "${{ inputs.build_test_image }}" )
+        fi
+
+        if [[ "${{ inputs.exclude_deselect_file }}" == "true" ]]; then
+          args+=( --exclude-deselect-file )
+        fi
+
+        if [[ "${{ inputs.allow_test_exit_code_1 }}" == "true" ]]; then
+          args+=( --allow-test-exit-code-1 )
+        fi
+
+        bash ./scripts/functional_tests/workflow_ci.sh "${args[@]}"
