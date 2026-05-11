@@ -67,7 +67,7 @@ jobs:
         echo "documentdb_version=$DOCUMENTDB_VERSION" >> $GITHUB_OUTPUT
     - name: Build Debian Package
       run: |
-        DEB_BUILD_OPTIONS=nocheck ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts
+        ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts
         ls -R downloaded-artifacts
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
