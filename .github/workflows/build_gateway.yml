@@ -37,6 +37,7 @@ jobs:
   build-and-push:
     name: Build and Push Images
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64]
         include:
