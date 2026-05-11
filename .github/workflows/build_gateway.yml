@@ -88,6 +88,7 @@ jobs:
         IMAGE=ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:$TAG
         CONTAINER_NAME=documentdb-local-smoke-pg${{ matrix.pg_version }}-${{ matrix.arch }}
         SMOKE_DIR=$(mktemp -d)
+        chmod 755 "$SMOKE_DIR"
         dump_logs=true
         cleanup() {
           if [ "$dump_logs" = "true" ]; then
