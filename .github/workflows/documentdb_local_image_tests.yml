@@ -1,0 +1,373 @@
+name: DocumentDB local image tests
+run-name: ${{ github.event.pull_request.title || '' }}
+concurrency:
+  group: documentdb-local-image-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'main'
+    paths-ignore:
+      - '.devcontainer/**'
+      - '**/*.md'
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths-ignore:
+      - '.devcontainer/**'
+      - '**/*.md'
+
+env:
+  IMAGE_REF: documentdb-local:image-tests
+  DOCUMENTDB_USER: docdb_admin
+  DOCUMENTDB_PORT: '10260'
+
+# Matrix policy:
+#   - PG 17 and PG 18 only. PG17 is what `documentdb-local:latest` ships as,
+#     so it matches the image most users pull. PG18 is the divergent case
+#     (no upstream `rum`, must use `documentdb_extended_rum`).
+#   - amd64 and arm64. The image is published to both architectures; the
+#     test surface should fail loudly if either arch breaks.
+#   - PG 15 / 16 add no unique signal that PG 17 does not already cover at
+#     this layer; gateway_tests.yml and regress_tests.yml exercise them at
+#     the extension/SQL layer where the differences actually live.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build-image: 2 PG x 2 arch = 4 jobs. Each one builds the deb, builds the
+  # documentdb-local image natively on the matching arch runner, and uploads
+  # the saved image as a workflow artifact for the downstream test jobs.
+  # ---------------------------------------------------------------------------
+  build-image:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Build PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build Debian package
+        run: |
+          ./packaging/build_packages.sh \
+            --os deb13 \
+            --pg ${{ matrix.pg_version }} \
+            --output-dir downloaded-artifacts
+          ls -la downloaded-artifacts/
+
+      - name: Build documentdb-local image
+        run: |
+          set -euo pipefail
+          DEB_FILE=$(find downloaded-artifacts -maxdepth 1 -type f -name '*.deb' \
+                       ! -name '*dbgsym*' | sort | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "No non-dbgsym .deb package found in downloaded-artifacts/" >&2
+            ls -la downloaded-artifacts/ >&2
+            exit 1
+          fi
+          echo "Building ${IMAGE_REF} from ${DEB_FILE} for linux/${{ matrix.arch }}"
+          docker build \
+            --platform linux/${{ matrix.arch }} \
+            --build-arg BASE_IMAGE=debian:trixie-slim \
+            --build-arg POSTGRES_VERSION=${{ matrix.pg_version }} \
+            --build-arg "DEB_PACKAGE_REL_PATH=${DEB_FILE}" \
+            -t "$IMAGE_REF" \
+            -f packaging/gateway/docker/Dockerfile_documentdb_local .
+          docker image inspect "$IMAGE_REF" \
+            --format 'Built {{.RepoTags}} ({{.Architecture}}, size={{.Size}} bytes)'
+
+      - name: Save image as artifact
+        run: |
+          mkdir -p /tmp/image
+          docker save "$IMAGE_REF" \
+            | gzip > "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+          ls -lh /tmp/image/
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # data-plane-tests: every tests/*.js file under integration-tests/ executed
+  # against a single short-lived container per (PG, arch) via run.sh. Covers
+  # connectivity, CRUD, query/update operators, indexes, aggregation,
+  # collection management, BSON types, cursors/projection, and error handling.
+  # ---------------------------------------------------------------------------
+  data-plane-tests:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Data-plane PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: |
+          docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+          docker image inspect "$IMAGE_REF" --format '{{.RepoTags}} ({{.Architecture}})'
+
+      - name: Run data-plane integration tests
+        run: |
+          mkdir -p .test-results/data-plane
+          ./documentdb-local/integration-tests/run.sh \
+            --image "$IMAGE_REF" \
+            --user "$DOCUMENTDB_USER" \
+            --port "$DOCUMENTDB_PORT" \
+            --results-dir ".test-results/data-plane"
+
+      - name: Upload data-plane logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tests-logs-data-plane-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/data-plane/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # auth-tests: correct creds, wrong password, wrong user, unauthenticated,
+  # --create-user false clean start.
+  # ---------------------------------------------------------------------------
+  auth-tests:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Auth PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Run auth scenarios
+        run: |
+          mkdir -p .test-results/auth
+          ./documentdb-local/integration-tests/scenarios/auth.sh \
+            "$IMAGE_REF" \
+            .test-results/auth
+
+      - name: Upload auth logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tests-logs-auth-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/auth/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # tls-tests: reuses the existing run_documentdb_local_tls_tests.sh which
+  # exercises default allowTLS, --tlsMode requireTLS, and TLS_MODE env var,
+  # plus rejection of an invalid TLS_MODE value.
+  # ---------------------------------------------------------------------------
+  tls-tests:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: TLS PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Run TLS-mode tests
+        run: |
+          mkdir -p .test-results/tls
+          ./documentdb-local/scripts/run_documentdb_local_tls_tests.sh \
+            "$IMAGE_REF" \
+            .test-results/tls
+
+      - name: Upload TLS logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tests-logs-tls-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/tls/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # init-data-tests: --init-data true (built-in sampledb), custom volume-
+  # mounted scripts, --skip-init-data, and rejection of invalid JS.
+  # ---------------------------------------------------------------------------
+  init-data-tests:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Init-data PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Run init-data scenarios
+        run: |
+          mkdir -p .test-results/init-data
+          ./documentdb-local/integration-tests/scenarios/init-data.sh \
+            "$IMAGE_REF" \
+            .test-results/init-data
+
+      - name: Upload init-data logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tests-logs-init-data-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/init-data/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # persistence-tests: write data + custom index in container A on shared
+  # /data volume, restart in container B, verify content + index survived
+  # and post-restart writes succeed.
+  # ---------------------------------------------------------------------------
+  persistence-tests:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Persistence PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Run persistence scenario
+        run: |
+          mkdir -p .test-results/persistence
+          ./documentdb-local/integration-tests/scenarios/persistence.sh \
+            "$IMAGE_REF" \
+            .test-results/persistence
+
+      - name: Upload persistence logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tests-logs-persistence-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/persistence/
+          retention-days: 7
