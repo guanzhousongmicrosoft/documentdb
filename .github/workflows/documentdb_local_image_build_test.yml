@@ -1,0 +1,177 @@
+name: DocumentDB local image build test
+run-name: ${{ github.event.pull_request.title || '' }}
+concurrency:
+  group: documentdb-local-image-build-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'main'
+    paths-ignore:
+      - '.devcontainer/**'
+      - '**/*.md'
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths-ignore:
+      - '.devcontainer/**'
+      - '**/*.md'
+
+env:
+  IMAGE_REF: documentdb-local:image-build-test
+  # actions/upload-artifact@v4 and actions/download-artifact@v4 are still
+  # built on Node.js 20, which the GitHub Actions runner will deprecate on
+  # 2026-06-02 (forced to Node.js 24) and remove on 2026-09-16. Opting in
+  # to Node.js 24 now avoids the deprecation warning and prevents future
+  # breakage when the default flips. See:
+  # https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+# Matrix policy:
+#   - PG 17 (what `documentdb-local:latest` ships as) and PG 18 (the
+#     divergent case: no upstream `rum`, uses `documentdb_extended_rum`).
+#   - amd64 (ubuntu-22.04) and arm64 (ubuntu-22.04-arm) so both
+#     architectures of the published image are validated natively.
+# This gives 4 builds per phase. PG 15 / 16 are covered at the SQL/Rust
+# layer by gateway_tests.yml and regress_tests.yml; they add no unique
+# signal at this image layer.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build-image: validate the documentdb-local image actually builds from
+  # the PR's source, per (PG, arch). The artifact is then handed to
+  # image-test so the smoke test runs against the exact image that built.
+  # ---------------------------------------------------------------------------
+  build-image:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Build PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build Debian package
+        run: |
+          ./packaging/build_packages.sh \
+            --os deb13 \
+            --pg ${{ matrix.pg_version }} \
+            --output-dir downloaded-artifacts
+          ls -la downloaded-artifacts/
+
+      - name: Build documentdb-local image
+        run: |
+          set -euo pipefail
+          DEB_FILE=$(find downloaded-artifacts -maxdepth 1 -type f -name '*.deb' \
+                       ! -name '*dbgsym*' | sort | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "No non-dbgsym .deb package found in downloaded-artifacts/" >&2
+            ls -la downloaded-artifacts/ >&2
+            exit 1
+          fi
+          echo "Building ${IMAGE_REF} from ${DEB_FILE} for linux/${{ matrix.arch }}"
+          docker build \
+            --platform linux/${{ matrix.arch }} \
+            --build-arg BASE_IMAGE=debian:trixie-slim \
+            --build-arg POSTGRES_VERSION=${{ matrix.pg_version }} \
+            --build-arg "DEB_PACKAGE_REL_PATH=${DEB_FILE}" \
+            -t "$IMAGE_REF" \
+            -f packaging/gateway/docker/Dockerfile_documentdb_local .
+          docker image inspect "$IMAGE_REF" \
+            --format 'Built {{.RepoTags}} ({{.Architecture}}, size={{.Size}} bytes)'
+
+      - name: Save image as artifact
+        run: |
+          mkdir -p /tmp/image
+          docker save "$IMAGE_REF" \
+            | gzip > "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+          ls -lh /tmp/image/
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # image-test: minimal Python unittest that boots the prebuilt image and
+  # verifies the documentdb-local contract (container ready, mongosh ping
+  # works, auth is enforced). Deliberately narrow - the wire-protocol /
+  # aggregation surface is covered by the upstream functional-tests image
+  # referenced from documentdb-local/functional-tests/config/image.yml.
+  # ---------------------------------------------------------------------------
+  image-test:
+    needs: build-image
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    name: Image test PG${{ matrix.pg_version }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download documentdb-local image
+        uses: actions/download-artifact@v4
+        with:
+          name: documentdb-local-image-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          path: /tmp/image
+
+      - name: Load documentdb-local image
+        run: |
+          docker load < "/tmp/image/documentdb-local-pg${{ matrix.pg_version }}-${{ matrix.arch }}.tar.gz"
+          docker image inspect "$IMAGE_REF" --format '{{.RepoTags}} ({{.Architecture}})'
+
+      - name: Run documentdb-local image test
+        env:
+          DOCUMENTDB_LOCAL_IMAGE: ${{ env.IMAGE_REF }}
+        run: |
+          python3 -m unittest discover -v \
+            -s documentdb-local/scripts/documentdb_local_tests \
+            -p 'test_image.py'
+
+      - name: Capture container logs on failure
+        if: failure()
+        run: |
+          mkdir -p .test-results/image-test
+          # Capture logs from any docker containers spawned by the test
+          # whose name matches the test's prefix.
+          for c in $(docker ps -a --filter "name=docdb-image-test-" --format '{{.Names}}'); do
+            docker logs "$c" > ".test-results/image-test/${c}.log" 2>&1 || true
+          done
+
+      - name: Upload image-test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-test-logs-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+          overwrite: true
+          path: .test-results/image-test/
+          retention-days: 7
