@@ -29,6 +29,7 @@ so the same script works locally and in CI:
 from __future__ import annotations
 
 import os
+import pathlib
 import secrets
 import string
 import subprocess
@@ -41,6 +42,12 @@ READY_LOG = "=== DocumentDB is ready ==="
 DEFAULT_READY_TIMEOUT = int(os.environ.get("DOCUMENTDB_READY_TIMEOUT", "240"))
 DEFAULT_PORT = 10260
 DEFAULT_USERNAME = "docdb_admin"
+# Directory where container logs are persisted before the container is
+# removed. CI uploads the contents of this directory as an artifact when a
+# job fails, so logs must be written here BEFORE `docker rm -f` runs.
+LOG_DIR = pathlib.Path(
+    os.environ.get("DOCUMENTDB_LOCAL_LOG_DIR", ".test-results/image-test")
+)
 
 
 def _random_password(length: int = 32) -> str:
@@ -125,8 +132,29 @@ class DocumentDBLocalImageTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.container:
+            cls._persist_container_logs()
             _docker("rm", "-f", cls.container, check=False)
             cls.container = None
+
+    @classmethod
+    def _persist_container_logs(cls) -> None:
+        """Write `docker logs <container>` to disk so the CI artifact step
+        can find them. Must run BEFORE `docker rm -f`, because logs vanish
+        with the container."""
+        if not cls.container:
+            return
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            logs = _docker("logs", cls.container, check=False)
+            log_path = LOG_DIR / f"{cls.container}.log"
+            log_path.write_text(
+                f"--- stdout ---\n{logs.stdout}\n"
+                f"--- stderr ---\n{logs.stderr}\n",
+                encoding="utf-8",
+            )
+        except (OSError, subprocess.SubprocessError):
+            # Best-effort: never let log persistence mask the real failure.
+            pass
 
     @classmethod
     def _cleanup_with_logs(cls, message: str) -> None:
@@ -138,6 +166,7 @@ class DocumentDBLocalImageTests(unittest.TestCase):
                 (logs.stdout + logs.stderr).splitlines()[-60:]
             )
             log_excerpt = f"\n--- container logs (last 60 lines) ---\n{tail}"
+            cls._persist_container_logs()
             _docker("rm", "-f", cls.container, check=False)
             cls.container = None
         raise AssertionError(f"setUpClass failed: {message}{log_excerpt}")
