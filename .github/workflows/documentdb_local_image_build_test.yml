@@ -81,13 +81,22 @@ jobs:
       - name: Build documentdb-local image
         run: |
           set -euo pipefail
-          DEB_FILE=$(find downloaded-artifacts -maxdepth 1 -type f -name '*.deb' \
-                       ! -name '*dbgsym*' | sort | head -1)
-          if [ -z "$DEB_FILE" ]; then
+          DEB_FILES=()
+          while IFS= read -r line; do
+            DEB_FILES+=("$line")
+          done < <(find downloaded-artifacts -maxdepth 1 -type f -name '*.deb' \
+                     ! -name '*dbgsym*' | sort)
+          if [ "${#DEB_FILES[@]}" -eq 0 ]; then
             echo "No non-dbgsym .deb package found in downloaded-artifacts/" >&2
             ls -la downloaded-artifacts/ >&2
             exit 1
           fi
+          if [ "${#DEB_FILES[@]}" -gt 1 ]; then
+            echo "Expected exactly 1 non-dbgsym .deb package, found ${#DEB_FILES[@]}:" >&2
+            printf '  %s\n' "${DEB_FILES[@]}" >&2
+            exit 1
+          fi
+          DEB_FILE="${DEB_FILES[0]}"
           echo "Building ${IMAGE_REF} from ${DEB_FILE} for linux/${{ matrix.arch }}"
           docker build \
             --platform linux/${{ matrix.arch }} \
