@@ -38,7 +38,7 @@
 %global debug_package %{nil}
 
 Name:           %{pkgname}
-Version:        0.111.0
+Version:        0.112.0
 Release:        1%{?dist}
 Summary:        Document-oriented NoSQL engine for PostgreSQL
 License:        MIT AND Apache-2.0 AND BSD-3-Clause AND PostgreSQL

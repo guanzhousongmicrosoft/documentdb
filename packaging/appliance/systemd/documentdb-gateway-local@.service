@@ -1,0 +1,49 @@
+[Unit]
+Description=DocumentDB Gateway (local, PostgreSQL %i)
+Documentation=https://github.com/documentdb/documentdb
+# Greenfield default: order on the per-major private PG service template.
+# In brownfield mode documentdb-setup writes a per-instance drop-in at
+# /etc/systemd/system/documentdb-gateway-local@%i.service.d/brownfield.conf
+# that resets these lists and re-points them at the adopted system PG
+# service (e.g. postgresql@18-main.service or postgresql-18.service).
+# See packaging-design.md §4.4.
+After=documentdb-postgresql@%i.service
+Requires=documentdb-postgresql@%i.service
+PartOf=documentdb-local@%i.target
+
+[Service]
+Type=simple
+User=documentdb-gateway
+Group=documentdb-gateway
+WorkingDirectory=/var/lib/documentdb-local/%i/gateway
+UMask=0077
+# Per-major TLS state directory. The auto-gen path defaults to
+# /var/lib/documentdb-gateway/tls (the Workflow B path), which is NOT
+# in this unit's ReadWritePaths and would be blocked by
+# ProtectSystem=strict. Pin to the per-major writable tree so each
+# major's gateway owns its own cert/key pair — matches the design's
+# per-major isolation. EnvironmentFile= below can still override.
+Environment=DOCUMENTDB_TLS_STATE_DIR=/var/lib/documentdb-local/%i/gateway/tls
+EnvironmentFile=-/etc/documentdb/local/%i/gateway.env
+ExecStart=/usr/bin/documentdb-gateway run
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Hardened sandboxing
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+ReadWritePaths=/var/lib/documentdb-local/%i/gateway /run/documentdb-local/%i /run/documentdb-local/%i/postgresql
+
+[Install]
+WantedBy=documentdb-local@%i.target

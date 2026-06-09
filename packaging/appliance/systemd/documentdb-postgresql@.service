@@ -1,0 +1,49 @@
+[Unit]
+Description=DocumentDB PostgreSQL %i
+Documentation=https://github.com/documentdb/documentdb
+After=network.target
+PartOf=documentdb-local@%i.target
+ConditionPathExists=/etc/documentdb/local/%i/setup.conf
+
+[Service]
+# Run the helper as documentdb-local so the postmaster lives in this
+# unit's cgroup (a child started via runuser would otherwise be tracked
+# as "does not belong to service" by systemd). The per-major
+# runtime/socket directories live under /run, which only root can
+# create; ExecStartPre=+ runs as root regardless of User= and creates
+# them before the main ExecStart drops privileges naturally via User=.
+# We intentionally do NOT set PIDFile=: systemd 245+'s PIDFile policy
+# refuses to track a PID file unless it's owned by root or by the
+# resolved unit User=, and on some kernels the resolution races with
+# ExecStartPre=+ such that systemd thinks the unit is still effectively
+# root when it reads the postmaster.pid (owned by documentdb-local).
+# Dropping PIDFile= lets GuessMainPID= (default) walk the unit's cgroup
+# to find the postmaster process, which is robust against the runuser
+# / forking dance.
+Type=forking
+User=documentdb-local
+Group=documentdb-local
+ExecStartPre=+/usr/share/documentdb/scripts/documentdb_postgresql_service.sh prepare-runtime %i
+ExecStart=/usr/share/documentdb/scripts/documentdb_postgresql_service.sh start %i
+ExecReload=/usr/share/documentdb/scripts/documentdb_postgresql_service.sh reload %i
+ExecStop=/usr/share/documentdb/scripts/documentdb_postgresql_service.sh stop %i
+TimeoutStartSec=120
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=10
+
+# Sandboxing (reviewer-flagged should-fix E by Opus 4.6 / Opus 4.8):
+# Match the gateway unit's defense-in-depth posture. /var/lib/documentdb-local
+# and /run/documentdb-local are kept writable via ReadWritePaths because
+# the data dir and socket dir live there.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/documentdb-local /run/documentdb-local /var/log/documentdb-local
+
+[Install]
+WantedBy=documentdb-local@%i.target

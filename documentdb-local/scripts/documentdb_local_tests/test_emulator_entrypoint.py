@@ -93,12 +93,21 @@ json.dump(data, sys.stdout)
             "#!/bin/sh\necho gateway-stub-started\n",
         )
         self._write_exec(
+            self.gateway_scripts / "utils.sh",
+            '#!/bin/sh\nSetupCustomAdminUser() { echo "stub-user-created"; }\n',
+        )
+        self._write_exec(
             self.gateway_scripts / "start_oss_server.sh",
             "#!/bin/sh\necho oss-server-stub-started\n",
         )
         self._write_exec(
             self.gateway_scripts / "init_documentdb_data.sh",
             "#!/bin/sh\necho init-script-stub-started\n",
+        )
+        # Stub the gateway binary so the entrypoint can exec it
+        self._write_exec(
+            self.bin_dir / "documentdb_gateway",
+            "#!/bin/sh\necho gateway-daemon-stub-started\n",
         )
 
     def tearDown(self):
@@ -123,6 +132,9 @@ json.dump(data, sys.stdout)
                 "DATA_PATH": str(self.data_dir),
                 "USERNAME": "default_user",
                 "OWNER": "documentdb",
+                "DOCUMENTDB_CONFIG_FILE": str(
+                    self.gateway_target_dir / "test_config.json"
+                ),
             }
         )
         if extra_env:
@@ -137,9 +149,8 @@ json.dump(data, sys.stdout)
         )
 
     def _read_config(self):
-        with (self.gateway_target_dir / "SetupConfiguration_temp.json").open(
-            "r", encoding="utf-8"
-        ) as file:
+        config_path = self.gateway_target_dir / "test_config.json"
+        with config_path.open("r", encoding="utf-8") as file:
             return json.load(file)
 
     def test_default_mode_sets_allowTLS_in_config(self):

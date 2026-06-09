@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # Cleanup function to handle container shutdown gracefully
+configFile=""
+
 cleanup() {
     echo "Shutting down DocumentDB components..."
     
@@ -23,8 +25,17 @@ cleanup() {
     exit 0
 }
 
+cleanup_temp_config() {
+    # Only clean up files we created via mktemp; if the caller provided
+    # DOCUMENTDB_CONFIG_FILE, the caller owns the lifecycle.
+    if [ -z "${DOCUMENTDB_CONFIG_FILE:-}" ] && [ -n "${configFile:-}" ] && [ -f "$configFile" ]; then
+        rm -f "$configFile"
+    fi
+}
+
 # Set up signal handlers for graceful shutdown
 trap cleanup SIGTERM SIGINT
+trap cleanup_temp_config EXIT
 
 # Function to start log streaming
 start_log_streaming() {
@@ -232,7 +243,22 @@ do
   esac
 done
 
-# Set default values if not provided
+# Set default values if not provided.
+#
+# Track whether USERNAME / PASSWORD came from the operator (CLI flag or
+# explicit env var) vs. fell back to the built-in default. The built-in
+# defaults exist for legacy / evaluation use, but a loud warning is
+# printed when they apply because anyone reachable on the published port
+# can authenticate with default_user / Admin100. A future major version
+# will refuse to start without --password / PASSWORD set explicitly.
+USERNAME_FROM_DEFAULT=false
+PASSWORD_FROM_DEFAULT=false
+if [ -z "${USERNAME:-}" ]; then
+    USERNAME_FROM_DEFAULT=true
+fi
+if [ -z "${PASSWORD:-}" ]; then
+    PASSWORD_FROM_DEFAULT=true
+fi
 export OWNER=${OWNER:-$(whoami)}
 export DATA_PATH=${DATA_PATH:-/data}
 export DOCUMENTDB_PORT=${DOCUMENTDB_PORT:-10260}
@@ -252,6 +278,23 @@ export POSTGRES_LOG_VERSION=${PG_VERSION_USED:-17}
 export SYSTEM_POSTGRES_LOG=${SYSTEM_POSTGRES_LOG:-/var/log/postgresql/postgresql-${POSTGRES_LOG_VERSION}-main.log}
 export DOCUMENTDB_RUNTIME_USER=${DOCUMENTDB_RUNTIME_USER:-documentdb}
 export DOCUMENTDB_RUNTIME_GROUP=${DOCUMENTDB_RUNTIME_GROUP:-$DOCUMENTDB_RUNTIME_USER}
+
+# Resolve script and data directories.
+# Package-installed paths take priority over the legacy Docker layout.
+# CONFIG_DIR can be overridden for testing.
+if [ -d "/usr/share/documentdb/scripts" ]; then
+    SCRIPT_DIR="/usr/share/documentdb/scripts"
+    SAMPLE_DATA_DIR="/usr/share/documentdb/sample-data"
+    CONFIG_DIR="${CONFIG_DIR:-/etc/documentdb/gateway}"
+elif [ -n "${GATEWAY_HOME:-}" ]; then
+    SCRIPT_DIR="${GATEWAY_HOME}/scripts"
+    SAMPLE_DATA_DIR="${GATEWAY_HOME}/sample-data"
+    CONFIG_DIR="${CONFIG_DIR:-${GATEWAY_HOME}/pg_documentdb_gw}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SAMPLE_DATA_DIR="$(dirname "$SCRIPT_DIR")/sample-data"
+    CONFIG_DIR="${CONFIG_DIR:-$(dirname "$SCRIPT_DIR")/pg_documentdb_gw}"
+fi
 
 # Setup centralized log directory structure
 echo "Setting up centralized log directory at $DOCUMENTDB_LOG_DIR..."
@@ -276,6 +319,42 @@ echo "  $DOCUMENTDB_LOG_DIR/postgres/pglog.log (will be symlinked)"
 if [ -z "${PASSWORD:-}" ]; then
     echo "Error: PASSWORD is required. Please provide a password using --password argument or PASSWORD environment variable."
     exit 1
+fi
+
+# Loud, unmissable warning when the operator did NOT supply an explicit
+# username / password and we fell back to the built-in defaults. These
+# defaults are well-known, public, and not safe outside short-lived
+# evaluation. Refusing to start by default is the eventual goal; for now
+# we keep the legacy compatibility but make the noise hard to miss.
+# Operators who knowingly want the defaults (for example CI smoke tests
+# that depend on the historical defaults) can suppress with
+# DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true.
+if [ "${PASSWORD_FROM_DEFAULT}" = "true" ] || [ "${USERNAME_FROM_DEFAULT}" = "true" ]; then
+    if [ "${DOCUMENTDB_ALLOW_DEFAULT_PASSWORD:-false}" != "true" ]; then
+        cat >&2 <<'WARN'
+========================================================================
+WARNING: DocumentDB is starting with the BUILT-IN DEFAULT CREDENTIALS.
+========================================================================
+
+  Username: default_user   (because --username / USERNAME was not set)
+  Password: Admin100       (because --password / PASSWORD was not set)
+
+These credentials are PUBLIC and well-known. Any client that can reach
+the gateway port can authenticate as the admin user. Do NOT use this
+configuration outside short-lived local evaluation.
+
+To suppress this warning intentionally (for example in evaluation
+scripts), set DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true. To fix:
+
+  docker run ... --env USERNAME=<your-user> --env PASSWORD=<your-pw> ...
+  or
+  documentdb-local --username <your-user> --password <your-pw>
+
+In a future release the emulator will REFUSE to start when --password
+and --username are not provided, so please migrate now.
+========================================================================
+WARN
+    fi
 fi
 
 echo "Using username: $USERNAME"
@@ -395,7 +474,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     fi
     start_oss_server_args+=(-d "$DATA_PATH" -p "$POSTGRESQL_PORT")
 
-    $GATEWAY_HOME/scripts/start_oss_server.sh "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
+    "$SCRIPT_DIR/start_oss_server.sh" "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
 
     echo "OSS server started."
     echo "[ENTRYPOINT] Setting up PostgreSQL log streaming..."
@@ -457,10 +536,9 @@ else
 fi
 
 # Setting up the configuration file
-mkdir -p "$GATEWAY_HOME/pg_documentdb_gw/target"
-configFile="$GATEWAY_HOME/pg_documentdb_gw/target/SetupConfiguration_temp.json"
-cp "$GATEWAY_HOME/pg_documentdb_gw/SetupConfiguration.json" "$configFile"
-sudo chmod 755 "$configFile"
+configFile="${DOCUMENTDB_CONFIG_FILE:-$(mktemp /tmp/SetupConfiguration_XXXXXX.json)}"
+cp "$CONFIG_DIR/SetupConfiguration.json" "$configFile"
+chmod 600 "$configFile"
 
 if [ -n "${DOCUMENTDB_PORT:-}" ]; then
     echo "Updating GatewayListenPort in the configuration file..."
@@ -489,10 +567,14 @@ mv "$configFile.tmp" "$configFile"
 echo "Starting gateway in the background..."
 if [ "$CREATE_USER" = "false" ]; then
     echo "Skipping user creation and starting the gateway..."
-    $GATEWAY_HOME/scripts/build_and_start_gateway.sh -s -d $configFile -P $POSTGRESQL_PORT -o $OWNER | tee -a "$GATEWAY_LOG" &
 else
-    $GATEWAY_HOME/scripts/build_and_start_gateway.sh -u $USERNAME -p $PASSWORD -d $configFile -P $POSTGRESQL_PORT -o $OWNER | tee -a "$GATEWAY_LOG" &
+    # Create the admin user before starting the gateway.
+    . "$SCRIPT_DIR/utils.sh"
+    SetupCustomAdminUser "$USERNAME" "$PASSWORD" "$POSTGRESQL_PORT" "$OWNER"
 fi
+
+# Launch the gateway binary directly — no source-tree build needed.
+/usr/bin/documentdb-gateway "$configFile" 2>&1 | tee -a "$GATEWAY_LOG" &
 
 gateway_pid=$! # Capture the PID of the gateway process
 
@@ -521,10 +603,10 @@ if [ -d "$INIT_DATA_PATH" ] && [ "$(ls -A "$INIT_DATA_PATH"/*.js 2>/dev/null)" ]
     echo "Initializing database with custom data from: $INIT_DATA_PATH"
     
     # Use the dedicated initialization script
-    init_script="$GATEWAY_HOME/scripts/init_documentdb_data.sh"
+    init_script="$SCRIPT_DIR/init_documentdb_data.sh"
     if [ -f "$init_script" ]; then
         echo "Using custom initialization data from: $INIT_DATA_PATH"
-        if "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -p "$PASSWORD" -d "$INIT_DATA_PATH" -v; then
+        if DOCUMENTDB_PASSWORD="$PASSWORD" "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -d "$INIT_DATA_PATH" -v; then
             echo "Custom data initialization completed."
             custom_data_initialized=true
         else
@@ -541,12 +623,12 @@ if [ "$INIT_DATA" = "true" ]; then
     echo "Initializing database with built-in sample data..."
     
     # Use the sample data directory
-    sample_data_path="$GATEWAY_HOME/sample-data"
-    init_script="$GATEWAY_HOME/scripts/init_documentdb_data.sh"
+    sample_data_path="$SAMPLE_DATA_DIR"
+    init_script="$SCRIPT_DIR/init_documentdb_data.sh"
     
     if [ -f "$init_script" ] && [ -d "$sample_data_path" ]; then
         echo "Loading sample data from: $sample_data_path"
-        if "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -p "$PASSWORD" -d "$sample_data_path" -v; then
+        if DOCUMENTDB_PASSWORD="$PASSWORD" "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -d "$sample_data_path" -v; then
             echo "Sample data initialization completed."
         else
             echo "Error: Sample data initialization failed"
