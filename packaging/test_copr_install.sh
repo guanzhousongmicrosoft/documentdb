@@ -198,6 +198,7 @@ SETUP_LOG=/tmp/documentdb-setup.log
 documentdb-setup \
     --username "${USERNAME}" \
     --password-file "${PASSWORD_FILE}" \
+    --yes \
     --verbose \
     > "${SETUP_LOG}" 2>&1 &
 SETUP_PID=$!
