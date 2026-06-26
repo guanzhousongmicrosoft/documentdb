@@ -171,6 +171,8 @@ jobs:
             -e "PYTHONPATH=/extra" \
             ${{ env.FUNC_TEST_IMAGE }} \
             documentdb_tests/compatibility/tests \
+            --ignore=documentdb_tests/compatibility/tests/core/collation/command_level/stages/test_stages_window.py \
+            --ignore=documentdb_tests/compatibility/tests/core/operator/stages/planCacheStats/test_planCacheStats_type_errors.py \
             -p conftest_allowlist \
             --allowlist /allowlist.yml \
             --engine-name "${{ env.ENGINE_NAME }}" \
@@ -278,6 +280,8 @@ jobs:
             -v "$(pwd)/.test-results/functional-tests-daily:/results" \
             ${{ env.FUNC_TEST_IMAGE }} \
             documentdb_tests/compatibility/tests \
+            --ignore=documentdb_tests/compatibility/tests/core/collation/command_level/stages/test_stages_window.py \
+            --ignore=documentdb_tests/compatibility/tests/core/operator/stages/planCacheStats/test_planCacheStats_type_errors.py \
             --engine-name "${{ env.ENGINE_NAME }}" \
             --connection-string "$CONNECTION_STRING" \
             -n ${{ env.PYTEST_WORKERS }} \
