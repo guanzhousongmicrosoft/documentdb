@@ -114,7 +114,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && (inputs.test_scope || 'allowlist') == 'allowlist')
     needs: [validate-config, build-documentdb-local]
     runs-on: *functional_tests_runner
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -164,27 +164,33 @@ jobs:
           mkdir -p .test-results/functional-tests
           chmod 777 .test-results/functional-tests
 
+          # Run the FULL upstream suite the same way the daily job does, then
+          # enforce the allowlist from the produced report in the next step
+          # (functional_gate summarize-gate). We deliberately do NOT use the
+          # conftest_allowlist plugin to pre-filter here: under pytest-xdist,
+          # deselecting ~2k of the ~12.5k collected items concentrates load so
+          # that a single engine-crashing test kills an xdist worker, which
+          # raises a fatal "INTERNALERROR: assert not crashitem" and aborts the
+          # whole session before any report is written. Running the full suite
+          # (like the daily job) tolerates worker/engine crashes — xdist marks
+          # the crashed test failed and the engine auto-restarts — so a complete
+          # report is always produced and the allowlist contract is enforced
+          # against it. Known engine-crasher files are still --ignore'd below.
           docker run --rm --network host \
-            -v "$(pwd)/documentdb-local/functional-tests/config/allowlist.yml:/allowlist.yml:ro" \
-            -v "$(pwd)/documentdb-local/functional-tests/tools/conftest_allowlist.py:/extra/conftest_allowlist.py:ro" \
             -v "$(pwd)/.test-results/functional-tests:/results" \
-            -e "PYTHONPATH=/extra" \
             ${{ env.FUNC_TEST_IMAGE }} \
             documentdb_tests/compatibility/tests \
             --ignore=documentdb_tests/compatibility/tests/core/collation/command_level/stages/test_stages_window.py \
             --ignore=documentdb_tests/compatibility/tests/core/operator/stages/planCacheStats/test_planCacheStats_type_errors.py \
             --ignore=documentdb_tests/compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py \
             --ignore=documentdb_tests/compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py \
-            -p conftest_allowlist \
-            --allowlist /allowlist.yml \
             --engine-name "${{ env.ENGINE_NAME }}" \
-            --allowlist-engine-name "${{ env.ENGINE_NAME }}" \
             --connection-string "$CONNECTION_STRING" \
-            -m "not no_parallel" \
             -n ${{ env.PYTEST_WORKERS }} \
             --json-report --json-report-file=/results/report.json \
             --junitxml=/results/results.xml \
-            -v
+            -v \
+            || true  # Tolerate non-allowlisted failures; summarize-gate enforces the allowlist contract
 
       - name: Summarize gate results
         if: always()
