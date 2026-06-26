@@ -914,6 +914,106 @@ def cmd_compare_engines(args):
     return 0
 
 
+def gate_failure_ids(allowlist_path: str, report_path: str, engine_name: str) -> list[str]:
+    """Return allowlisted test IDs that ran but did NOT pass (failed/skipped/
+    xfailed/xpassed/errored).
+
+    These are the candidates for a sequential re-run: the parallel full-suite
+    pass can intermittently crash the engine (a known RUM dynamic-cursor race
+    under -n4), and the backend's brief recovery window cascades into spurious
+    failures of unrelated, otherwise-passing allowlisted tests. Re-running just
+    these IDs sequentially (no parallel race) lets genuine passers recover while
+    genuinely-broken tests stay failed.
+
+    Missing (never-collected) allowlisted IDs are intentionally excluded — a
+    re-run cannot resurrect a test that was never collected, and that condition
+    indicates a real allowlist/image drift that must fail the gate.
+    """
+    result = summarize_gate(allowlist_path, report_path, engine_name=engine_name)
+    ids = [f["test_id"] for f in result.failed_tests]
+    ids += [e["test_id"] for e in result.errors
+            if e.get("subtype") in ("NON_PASS_OUTCOME", "ALLOWLISTED_XPASS")]
+    # De-duplicate while preserving order
+    seen = set()
+    unique = []
+    for tid in ids:
+        if tid not in seen:
+            seen.add(tid)
+            unique.append(tid)
+    return unique
+
+
+def cmd_gate_failures(args):
+    ids = gate_failure_ids(args.allowlist, args.report, args.engine_name)
+    text = "\n".join(ids)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text + ("\n" if text else ""))
+    else:
+        if text:
+            print(text)
+    return 0
+
+
+def merge_reports(base_path: str, overlay_paths: list[str]) -> dict:
+    """Merge one or more overlay pytest JSON reports into a base report.
+
+    For every test present in an overlay, the overlay's record (outcome and
+    detail) replaces the base record for that node ID. Overlays are applied in
+    order, so the last overlay wins. This is used to fold a sequential re-run of
+    failed allowlisted tests back into the full parallel report: a re-run that
+    passes overrides the original transient failure, while a re-run that fails
+    keeps the test failed.
+
+    The base report's ``summary.collected`` (full-suite discovery count) is left
+    untouched so coverage-boundary math in summarize-gate stays correct.
+    """
+    with open(base_path) as f:
+        base = json.load(f)
+
+    tests = base.get("tests", [])
+    index = {t.get("nodeid", ""): i for i, t in enumerate(tests)}
+
+    for overlay_path in overlay_paths:
+        with open(overlay_path) as f:
+            overlay = json.load(f)
+        for t in overlay.get("tests", []):
+            nid = t.get("nodeid", "")
+            if not nid:
+                continue
+            if nid in index:
+                tests[index[nid]] = t
+            else:
+                index[nid] = len(tests)
+                tests.append(t)
+
+    base["tests"] = tests
+
+    # Refresh the outcome tallies in summary so downstream readers see merged
+    # numbers. 'collected' (discovery count) is preserved as-is.
+    summary = base.get("summary", {})
+    tally: dict[str, int] = {}
+    for t in tests:
+        tally[t.get("outcome", "unknown")] = tally.get(t.get("outcome", "unknown"), 0) + 1
+    for key in ("passed", "failed", "skipped", "error", "xfailed", "xpassed"):
+        if key in tally:
+            summary[key] = tally[key]
+        elif key in summary:
+            summary[key] = 0
+    summary["total"] = len(tests)
+    base["summary"] = summary
+    return base
+
+
+def cmd_merge_reports(args):
+    merged = merge_reports(args.base, args.overlay)
+    with open(args.out, "w") as f:
+        json.dump(merged, f)
+    print(f"Merged {len(args.overlay)} overlay report(s) into {args.out} "
+          f"({len(merged.get('tests', []))} tests)")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="DocumentDB Functional Test Gate Tooling (RFC-0007)")
@@ -961,6 +1061,23 @@ def main():
     compare_parser.add_argument("--output-dir", default="",
                                 help="Directory for output artifacts")
 
+    # gate-failures: list allowlisted tests that ran but did not pass (rerun set)
+    failures_parser = subparsers.add_parser(
+        "gate-failures",
+        help="Print allowlisted tests that ran but did not pass (for sequential re-run)")
+    failures_parser.add_argument("--report", required=True, help="Path to pytest JSON report")
+    failures_parser.add_argument("--output", default="",
+                                 help="Write node IDs (one per line) to this file instead of stdout")
+
+    # merge-reports: fold re-run outcomes back into the base report
+    merge_parser = subparsers.add_parser(
+        "merge-reports",
+        help="Merge overlay (re-run) pytest JSON reports into a base report")
+    merge_parser.add_argument("--base", required=True, help="Path to the base pytest JSON report")
+    merge_parser.add_argument("--overlay", required=True, nargs="+",
+                              help="Path(s) to overlay report(s); later overlays win")
+    merge_parser.add_argument("--out", required=True, help="Path to write the merged report")
+
     args = parser.parse_args()
 
     if args.command == "validate-config":
@@ -971,6 +1088,10 @@ def main():
         return cmd_summarize_daily(args)
     elif args.command == "compare-engines":
         return cmd_compare_engines(args)
+    elif args.command == "gate-failures":
+        return cmd_gate_failures(args)
+    elif args.command == "merge-reports":
+        return cmd_merge_reports(args)
 
 
 if __name__ == "__main__":

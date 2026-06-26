@@ -31,6 +31,8 @@ from functional_gate import (
     summarize_daily,
     render_daily_markdown,
     derive_area,
+    gate_failure_ids,
+    merge_reports,
 )
 
 
@@ -897,3 +899,113 @@ class TestCompareEngines:
         assert data["engine_a"] == "pgmongo"
         assert data["engine_b"] == "documentdb"
         assert data["total_compared"] == 1
+
+
+class TestGateFailureIds:
+    """gate_failure_ids selects allowlisted tests that ran but did not pass."""
+
+    def test_returns_failed_and_nonpass_excludes_missing_and_passed(self, tmp_path):
+        allowlist = write_v2_allowlist(tmp_path, [
+            "tests/test_a.py::passed",
+            "tests/test_a.py::failed",
+            "tests/test_a.py::skipped",
+            "tests/test_a.py::xfailed",
+            "tests/test_a.py::missing",  # not present in the report
+        ])
+        report = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::passed", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::failed", "outcome": "failed"},
+            {"nodeid": "tests/test_a.py::skipped", "outcome": "skipped"},
+            {"nodeid": "tests/test_a.py::xfailed", "outcome": "xfailed"},
+            # non-allowlisted failure must be ignored
+            {"nodeid": "tests/test_a.py::other", "outcome": "failed"},
+        ], summary={"collected": 5, "total": 5})
+
+        ids = gate_failure_ids(allowlist, report, "documentdb")
+
+        assert "tests/test_a.py::failed" in ids
+        assert "tests/test_a.py::skipped" in ids
+        assert "tests/test_a.py::xfailed" in ids
+        assert "tests/test_a.py::passed" not in ids
+        assert "tests/test_a.py::missing" not in ids  # missing is never re-run
+        assert "tests/test_a.py::other" not in ids  # non-allowlisted ignored
+
+    def test_empty_when_all_pass(self, tmp_path):
+        allowlist = write_v2_allowlist(tmp_path, ["tests/test_a.py::one"])
+        report = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::one", "outcome": "passed"},
+        ], summary={"collected": 1, "total": 1})
+        assert gate_failure_ids(allowlist, report, "documentdb") == []
+
+
+class TestMergeReports:
+    """merge_reports folds re-run outcomes into the base report (overlay wins)."""
+
+    def test_overlay_pass_overrides_base_failure(self, tmp_path):
+        base = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::flaky", "outcome": "failed"},
+            {"nodeid": "tests/test_a.py::solid", "outcome": "passed"},
+        ], summary={"collected": 2, "total": 2, "passed": 1, "failed": 1}, filename="base.json")
+        overlay = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::flaky", "outcome": "passed"},
+        ], summary={"collected": 1, "total": 1, "passed": 1}, filename="rerun.json")
+
+        merged = merge_reports(base, [overlay])
+
+        outcomes = {t["nodeid"]: t["outcome"] for t in merged["tests"]}
+        assert outcomes["tests/test_a.py::flaky"] == "passed"
+        assert outcomes["tests/test_a.py::solid"] == "passed"
+        # collected (discovery count) is preserved from the base
+        assert merged["summary"]["collected"] == 2
+        # tallies are refreshed
+        assert merged["summary"]["passed"] == 2
+        assert merged["summary"].get("failed", 0) == 0
+
+    def test_overlay_failure_keeps_test_failed(self, tmp_path):
+        base = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::broken", "outcome": "failed"},
+        ], summary={"collected": 1, "total": 1, "failed": 1}, filename="base.json")
+        overlay = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::broken", "outcome": "failed"},
+        ], summary={"collected": 1, "total": 1, "failed": 1}, filename="rerun.json")
+
+        merged = merge_reports(base, [overlay])
+        outcomes = {t["nodeid"]: t["outcome"] for t in merged["tests"]}
+        assert outcomes["tests/test_a.py::broken"] == "failed"
+
+    def test_merge_then_summarize_gate_passes(self, tmp_path):
+        """End-to-end: a re-run that passes the failures flips the gate to PASS."""
+        allowlist = write_v2_allowlist(tmp_path, [
+            "tests/test_a.py::one",
+            "tests/test_a.py::two",
+        ])
+        base = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::two", "outcome": "failed"},
+        ], summary={"collected": 2, "total": 2}, filename="base.json")
+        overlay = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::two", "outcome": "passed"},
+        ], summary={"collected": 1, "total": 1}, filename="rerun.json")
+
+        merged = merge_reports(base, [overlay])
+        merged_path = tmp_path / "merged.json"
+        merged_path.write_text(json.dumps(merged))
+
+        result = summarize_gate(allowlist, str(merged_path), engine_name="documentdb")
+        assert result.outcome == "PASS"
+        assert result.passed == 2
+        assert result.failed == 0
+
+    def test_overlay_can_add_new_test(self, tmp_path):
+        base = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::one", "outcome": "passed"},
+        ], summary={"collected": 1, "total": 1}, filename="base.json")
+        overlay = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::new", "outcome": "passed"},
+        ], summary={"collected": 1, "total": 1}, filename="rerun.json")
+
+        merged = merge_reports(base, [overlay])
+        ids = {t["nodeid"] for t in merged["tests"]}
+        assert ids == {"tests/test_a.py::one", "tests/test_a.py::new"}
+        # collected preserved from base
+        assert merged["summary"]["collected"] == 1

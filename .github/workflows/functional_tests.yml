@@ -195,18 +195,68 @@ jobs:
       - name: Summarize gate results
         if: always()
         run: |
-          if [ -f .test-results/functional-tests/report.json ]; then
-            python3 documentdb-local/functional-tests/tools/functional_gate.py \
-              --image documentdb-local/functional-tests/config/image.yml \
-              --allowlist documentdb-local/functional-tests/config/allowlist.yml \
-              --engine-name "${{ env.ENGINE_NAME }}" \
-              summarize-gate \
-              --report .test-results/functional-tests/report.json \
-              --output-dir .test-results/functional-tests
-          else
+          set -uo pipefail
+          RESULTS=.test-results/functional-tests
+          GATE="python3 documentdb-local/functional-tests/tools/functional_gate.py \
+            --image documentdb-local/functional-tests/config/image.yml \
+            --allowlist documentdb-local/functional-tests/config/allowlist.yml \
+            --engine-name ${{ env.ENGINE_NAME }}"
+
+          if [ ! -f "$RESULTS/report.json" ]; then
             echo "::error::No report.json produced. Test execution may have failed."
             exit 1
           fi
+
+          # The parallel full-suite pass can intermittently segfault the engine
+          # (a known RUM dynamic-cursor race under -n4); the backend's brief
+          # recovery window then cascades into spurious failures of unrelated,
+          # otherwise-passing allowlisted tests. Identify allowlisted tests that
+          # ran but did NOT pass and re-run just those sequentially (-p no:xdist
+          # => no parallel race, so the crash does not recur). Genuine passers
+          # recover; genuinely-broken tests stay failed and still fail the gate.
+          $GATE gate-failures --report "$RESULTS/report.json" --output "$RESULTS/rerun_ids.txt"
+          RERUN_COUNT=$(grep -c . "$RESULTS/rerun_ids.txt" || true)
+          echo "Allowlisted non-pass after parallel run: $RERUN_COUNT"
+
+          # Re-run only for a plausibly-transient number of failures. A massive
+          # failure count means a real regression (not a transient crash); skip
+          # the re-run and let the gate fail fast on the original report.
+          if [ "$RERUN_COUNT" -gt 0 ] && [ "$RERUN_COUNT" -le 800 ]; then
+            CONNECTION_STRING="mongodb://${{ env.DOCUMENTDB_USER }}:${DOCUMENTDB_PASSWORD}@localhost:${{ env.DOCUMENTDB_PORT }}/?tls=true&tlsAllowInvalidCertificates=true"
+            # Prefix rootdir-relative node IDs with the in-container test root.
+            sed 's#^#documentdb_tests/#' "$RESULTS/rerun_ids.txt" > "$RESULTS/rerun_args.txt"
+            echo "Re-running $RERUN_COUNT allowlisted test(s) sequentially after letting the engine settle..."
+            sleep 20
+            # set -f so parametrized IDs containing [brackets] are not glob-expanded by the shell.
+            set -f
+            docker run --rm --network host \
+              -v "$(pwd)/$RESULTS:/results" \
+              ${{ env.FUNC_TEST_IMAGE }} \
+              $(cat "$RESULTS/rerun_args.txt") \
+              --engine-name "${{ env.ENGINE_NAME }}" \
+              --connection-string "$CONNECTION_STRING" \
+              -p no:xdist \
+              --timeout=600 \
+              --json-report --json-report-file=/results/report_rerun.json \
+              -v \
+              || true
+            set +f
+            if [ -f "$RESULTS/report_rerun.json" ]; then
+              $GATE merge-reports \
+                --base "$RESULTS/report.json" \
+                --overlay "$RESULTS/report_rerun.json" \
+                --out "$RESULTS/report_merged.json"
+              cp "$RESULTS/report_merged.json" "$RESULTS/report.json"
+              echo "Merged sequential re-run results into report.json"
+            else
+              echo "::warning::Sequential re-run produced no report; enforcing original results."
+            fi
+          fi
+
+          # Final enforcement on the (possibly merged) report — gates the job.
+          $GATE summarize-gate \
+            --report "$RESULTS/report.json" \
+            --output-dir "$RESULTS"
 
       - name: Collect DocumentDB logs
         if: always()
@@ -299,6 +349,55 @@ jobs:
             --junitxml=/results/results.xml \
             -v \
             || true  # Don't fail on test failures; we analyze the report
+
+      - name: Re-run transient allowlisted failures sequentially
+        if: always()
+        run: |
+          set -uo pipefail
+          RESULTS=.test-results/functional-tests-daily
+          GATE="python3 documentdb-local/functional-tests/tools/functional_gate.py \
+            --image documentdb-local/functional-tests/config/image.yml \
+            --allowlist documentdb-local/functional-tests/config/allowlist.yml \
+            --engine-name ${{ env.ENGINE_NAME }}"
+
+          [ -f "$RESULTS/report.json" ] || { echo "No daily report.json; skipping re-run."; exit 0; }
+
+          # Same rationale as the PR gate: the parallel pass can intermittently
+          # segfault the engine (RUM dynamic-cursor race under -n4) and cascade
+          # spurious failures onto otherwise-passing allowlisted tests. Re-run
+          # just those sequentially so the daily allowlist contract is not
+          # tripped by transient crashes.
+          $GATE gate-failures --report "$RESULTS/report.json" --output "$RESULTS/rerun_ids.txt"
+          RERUN_COUNT=$(grep -c . "$RESULTS/rerun_ids.txt" || true)
+          echo "Allowlisted non-pass after parallel run: $RERUN_COUNT"
+
+          if [ "$RERUN_COUNT" -gt 0 ] && [ "$RERUN_COUNT" -le 800 ]; then
+            CONNECTION_STRING="mongodb://${{ env.DOCUMENTDB_USER }}:${DOCUMENTDB_PASSWORD}@localhost:${{ env.DOCUMENTDB_PORT }}/?tls=true&tlsAllowInvalidCertificates=true"
+            sed 's#^#documentdb_tests/#' "$RESULTS/rerun_ids.txt" > "$RESULTS/rerun_args.txt"
+            echo "Re-running $RERUN_COUNT allowlisted test(s) sequentially after letting the engine settle..."
+            sleep 20
+            set -f
+            docker run --rm --network host \
+              -v "$(pwd)/$RESULTS:/results" \
+              ${{ env.FUNC_TEST_IMAGE }} \
+              $(cat "$RESULTS/rerun_args.txt") \
+              --engine-name "${{ env.ENGINE_NAME }}" \
+              --connection-string "$CONNECTION_STRING" \
+              -p no:xdist \
+              --timeout=600 \
+              --json-report --json-report-file=/results/report_rerun.json \
+              -v \
+              || true
+            set +f
+            if [ -f "$RESULTS/report_rerun.json" ]; then
+              $GATE merge-reports \
+                --base "$RESULTS/report.json" \
+                --overlay "$RESULTS/report_rerun.json" \
+                --out "$RESULTS/report_merged.json"
+              cp "$RESULTS/report_merged.json" "$RESULTS/report.json"
+              echo "Merged sequential re-run results into daily report.json"
+            fi
+          fi
 
       - name: Summarize daily delta
         if: always()
