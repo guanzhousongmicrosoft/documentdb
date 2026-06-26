@@ -207,6 +207,10 @@ jobs:
             exit 1
           fi
 
+          # Enforce against this report; updated to the merged report if a
+          # sequential re-run is performed below.
+          FINAL_REPORT="$RESULTS/report.json"
+
           # The parallel full-suite pass can intermittently segfault the engine
           # (a known RUM dynamic-cursor race under -n4); the backend's brief
           # recovery window then cascades into spurious failures of unrelated,
@@ -242,12 +246,16 @@ jobs:
               || true
             set +f
             if [ -f "$RESULTS/report_rerun.json" ]; then
+              # Enforce on the merged report directly. We do NOT overwrite
+              # report.json: it is written inside the container and is owned by
+              # the container UID, so an in-place cp/truncate fails with
+              # "Permission denied" on the host runner.
               $GATE merge-reports \
                 --base "$RESULTS/report.json" \
                 --overlay "$RESULTS/report_rerun.json" \
                 --out "$RESULTS/report_merged.json"
-              cp "$RESULTS/report_merged.json" "$RESULTS/report.json"
-              echo "Merged sequential re-run results into report.json"
+              FINAL_REPORT="$RESULTS/report_merged.json"
+              echo "Merged sequential re-run results into $FINAL_REPORT"
             else
               echo "::warning::Sequential re-run produced no report; enforcing original results."
             fi
@@ -255,7 +263,7 @@ jobs:
 
           # Final enforcement on the (possibly merged) report — gates the job.
           $GATE summarize-gate \
-            --report "$RESULTS/report.json" \
+            --report "$FINAL_REPORT" \
             --output-dir "$RESULTS"
 
       - name: Collect DocumentDB logs
@@ -394,7 +402,11 @@ jobs:
                 --base "$RESULTS/report.json" \
                 --overlay "$RESULTS/report_rerun.json" \
                 --out "$RESULTS/report_merged.json"
-              cp "$RESULTS/report_merged.json" "$RESULTS/report.json"
+              # report.json is written inside the container and owned by the
+              # container UID, so an in-place cp/truncate fails with "Permission
+              # denied"; rm+mv works because the results dir is world-writable.
+              rm -f "$RESULTS/report.json"
+              mv "$RESULTS/report_merged.json" "$RESULTS/report.json"
               echo "Merged sequential re-run results into daily report.json"
             fi
           fi
