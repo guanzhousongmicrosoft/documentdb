@@ -11,8 +11,10 @@
 #       Almost every entry should stay a bare string. See the README section
 #       "Adding an engine-scoped test" before reaching for the dict form.
 #
-# This list was generated from the intersection of passing tests across
-# multiple scheduled daily full-suite runs (non-flaky passers only).
+# Generated from the intersection of passing tests across multiple scheduled
+# daily full-suite runs (non-flaky passers only). Tests from engine-crashing
+# files (setUnion_core, setUnion_type_dedup, stages_window,
+# planCacheStats_type_errors) are excluded and --ignore'd in the workflow.
 schema_version: 2
 
 tests:
@@ -984,26 +986,6 @@ tests:
   - compatibility/tests/core/operator/expressions/accumulator/min/test_min_tie_breaking.py::test_min_tie_breaking_cases[tie_int64_double_first]
   - compatibility/tests/core/operator/expressions/accumulator/min/test_min_tie_breaking.py::test_min_tie_breaking_cases[tie_int64_int32_first]
   - compatibility/tests/core/operator/expressions/accumulator/min/test_smoke_expression_min.py::test_smoke_expression_min
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[comm_overlapping_ab]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[comm_overlapping_ba]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[comm_overlapping_reversed_elements]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_disjoint]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_intra_and_inter_duplicates]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_intra_duplicates]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_large_overlap]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_overlapping]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[core_three_arrays]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[identity_empty_with_duplicates]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[identity_empty_with_values]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[identity_two_empties]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[identity_values_with_empty]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[nested_deeply_nested]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[nested_different_order_distinct]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[nested_identical_dedup]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[nested_not_flattened]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[self_distinct_elements]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[self_empty]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py::test_setunion_core[self_with_duplicates]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_input_forms.py::test_setunion_input_forms[arity_large_args]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_input_forms.py::test_setunion_input_forms[arity_many_arrays]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_input_forms.py::test_setunion_input_forms[arity_single_array]
@@ -1077,32 +1059,6 @@ tests:
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_numeric_edge_cases.py::test_setunion_numeric_edge_cases[zero_decimal_pos_then_neg]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_numeric_edge_cases.py::test_setunion_numeric_edge_cases[zero_double_neg_then_pos]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_numeric_edge_cases.py::test_setunion_numeric_edge_cases[zero_double_pos_then_neg]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[binary_dedup_different_subtypes_same_bytes]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[binary_dedup_identical]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[bool_dedup_distinct]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[bool_dedup_distinct_from_int_false]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[bool_dedup_distinct_from_int_true]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[code_dedup_identical]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[datetime_dedup_datetime]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[datetime_dedup_objectid]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[datetime_dedup_timestamp]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[minmax_dedup_maxkey]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[minmax_dedup_minkey]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[obj_dedup_different_key_sets]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[obj_dedup_different_values]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[obj_dedup_identical]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[obj_dedup_key_order_distinct]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[regex_dedup_different_flags]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[regex_dedup_different_patterns]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_case_sensitive]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_cjk]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_emoji]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_empty_strings]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_identical]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_latin_extended]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_no_unicode_normalization]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_null_byte]
-  - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py::test_setunion_type_dedup[str_dedup_null_byte_distinct_from_prefix]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_validation.py::test_setunion_type_validation[bare_array_field]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_validation.py::test_setunion_type_validation[bare_missing_field]
   - compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_validation.py::test_setunion_type_validation[bare_nested_array_field]
