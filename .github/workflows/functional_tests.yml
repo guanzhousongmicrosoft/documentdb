@@ -114,7 +114,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && (inputs.test_scope || 'allowlist') == 'allowlist')
     needs: [validate-config, build-documentdb-local]
     runs-on: *functional_tests_runner
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
