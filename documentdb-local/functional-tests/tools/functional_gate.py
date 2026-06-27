@@ -186,6 +186,40 @@ def load_allowlist_ids(path: str, engine_name: str) -> set[str]:
     return in_scope
 
 
+def shard_allowlist_ids(allowlist_path: str, engine_name: str,
+                        num_shards: int, shard_id: int, prefix: str = "") -> list[str]:
+    """Return the allowlisted test IDs assigned to one shard.
+
+    IDs are sorted for determinism, then distributed round-robin (stride
+    slicing ``ids[shard_id::num_shards]``) so every shard gets a roughly equal,
+    interleaved slice across all test areas — this keeps per-shard runtime even
+    rather than clustering a slow directory onto one shard. The union of all
+    shards is exactly the full allowlist with no overlap.
+
+    ``prefix`` (e.g. ``documentdb_tests/``) is prepended to each rootdir-relative
+    node ID so the result can be passed straight to pytest in the container.
+    """
+    if num_shards < 1:
+        raise ValueError(f"num_shards must be >= 1, got {num_shards}")
+    if not (0 <= shard_id < num_shards):
+        raise ValueError(f"shard_id must be in [0, {num_shards}), got {shard_id}")
+    ids = sorted(load_allowlist_ids(allowlist_path, engine_name))
+    return [prefix + tid for tid in ids[shard_id::num_shards]]
+
+
+def cmd_shard_allowlist(args):
+    ids = shard_allowlist_ids(args.allowlist, args.engine_name,
+                              args.num_shards, args.shard_id, args.prefix)
+    text = "\n".join(ids)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text + ("\n" if text else ""))
+    else:
+        if text:
+            print(text)
+    return 0
+
+
 def validate_allowlist_config(path: str) -> list[ConfigError]:
     """Validate allowlist.yml and return a list of errors (empty = valid)."""
     try:
@@ -1078,6 +1112,17 @@ def main():
                               help="Path(s) to overlay report(s); later overlays win")
     merge_parser.add_argument("--out", required=True, help="Path to write the merged report")
 
+    # shard-allowlist: print the allowlisted node IDs assigned to one shard
+    shard_parser = subparsers.add_parser(
+        "shard-allowlist",
+        help="Print the allowlisted test node IDs for one shard (round-robin split)")
+    shard_parser.add_argument("--num-shards", type=int, required=True, help="Total number of shards")
+    shard_parser.add_argument("--shard-id", type=int, required=True, help="This shard's index [0, num-shards)")
+    shard_parser.add_argument("--prefix", default="",
+                              help="String prepended to each node ID (e.g. 'documentdb_tests/')")
+    shard_parser.add_argument("--output", default="",
+                              help="Write node IDs (one per line) to this file instead of stdout")
+
     args = parser.parse_args()
 
     if args.command == "validate-config":
@@ -1092,6 +1137,8 @@ def main():
         return cmd_gate_failures(args)
     elif args.command == "merge-reports":
         return cmd_merge_reports(args)
+    elif args.command == "shard-allowlist":
+        return cmd_shard_allowlist(args)
 
 
 if __name__ == "__main__":

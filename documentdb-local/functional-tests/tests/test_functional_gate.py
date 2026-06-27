@@ -33,6 +33,7 @@ from functional_gate import (
     derive_area,
     gate_failure_ids,
     merge_reports,
+    shard_allowlist_ids,
 )
 
 
@@ -1009,3 +1010,57 @@ class TestMergeReports:
         assert ids == {"tests/test_a.py::one", "tests/test_a.py::new"}
         # collected preserved from base
         assert merged["summary"]["collected"] == 1
+
+
+class TestShardAllowlist:
+    """shard_allowlist_ids partitions the allowlist into disjoint, even shards."""
+
+    def test_partition_is_complete_disjoint_and_even(self, tmp_path):
+        entries = [f"tests/test_{i}.py::t" for i in range(103)]
+        allowlist = write_v2_allowlist(tmp_path, entries)
+        num_shards = 4
+        shards = [
+            set(shard_allowlist_ids(allowlist, "documentdb", num_shards, k))
+            for k in range(num_shards)
+        ]
+        union = set().union(*shards)
+        # complete
+        assert union == set(entries)
+        # disjoint
+        for i in range(num_shards):
+            for j in range(i + 1, num_shards):
+                assert not (shards[i] & shards[j])
+        # even (max-min <= 1 for round-robin)
+        sizes = sorted(len(s) for s in shards)
+        assert sizes[-1] - sizes[0] <= 1
+
+    def test_prefix_is_applied(self, tmp_path):
+        allowlist = write_v2_allowlist(tmp_path, ["tests/test_a.py::t"])
+        out = shard_allowlist_ids(allowlist, "documentdb", 1, 0, prefix="documentdb_tests/")
+        assert out == ["documentdb_tests/tests/test_a.py::t"]
+
+    def test_single_shard_returns_all_sorted(self, tmp_path):
+        entries = ["tests/test_b.py::t", "tests/test_a.py::t"]
+        allowlist = write_v2_allowlist(tmp_path, entries)
+        out = shard_allowlist_ids(allowlist, "documentdb", 1, 0)
+        assert out == sorted(entries)
+
+    def test_invalid_shard_id_raises(self, tmp_path):
+        allowlist = write_v2_allowlist(tmp_path, ["tests/test_a.py::t"])
+        with pytest.raises(ValueError):
+            shard_allowlist_ids(allowlist, "documentdb", 4, 4)
+        with pytest.raises(ValueError):
+            shard_allowlist_ids(allowlist, "documentdb", 0, 0)
+
+    def test_engine_scoping_respected(self, tmp_path):
+        path = tmp_path / "allowlist.yml"
+        path.write_text(yaml.dump({
+            "schema_version": 2,
+            "tests": [
+                "tests/test_a.py::all_engines",
+                {"id": "tests/test_b.py::pgmongo_only", "engines": ["pgmongo"]},
+            ],
+        }))
+        # documentdb sees only the unscoped entry
+        out = shard_allowlist_ids(str(path), "documentdb", 1, 0)
+        assert out == ["tests/test_a.py::all_engines"]

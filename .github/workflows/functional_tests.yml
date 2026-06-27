@@ -105,7 +105,15 @@ jobs:
           retention-days: 1
 
   # -----------------------------------------------------------------------
-  # Job 3: PR gate - run allowlisted tests against documentdb-local
+  # Job 3: PR gate - run the allowlisted tests against documentdb-local,
+  # sharded across parallel runners for bounded, low-variance wall-clock.
+  #
+  # Each shard runs a disjoint, round-robin slice of the allowlist (its own
+  # engine container), sequentially re-runs its own transient failures, and
+  # uploads its slice's report. The combine job (Job 3b) merges all slices and
+  # enforces the allowlist contract. Sharding replaced a single full-suite job
+  # whose ~12.5k-test run took 60-120+min on 2-core hosted runners and
+  # intermittently tripped the job timeout.
   # -----------------------------------------------------------------------
   functional-pr-gate:
     if: >
@@ -114,7 +122,13 @@ jobs:
       (github.event_name == 'workflow_dispatch' && (inputs.test_scope || 'allowlist') == 'allowlist')
     needs: [validate-config, build-documentdb-local]
     runs-on: *functional_tests_runner
-    timeout-minutes: 120
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      NUM_SHARDS: 4
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -158,80 +172,60 @@ jobs:
           docker pull "$IMAGE"
           echo "FUNC_TEST_IMAGE=$IMAGE" >> $GITHUB_ENV
 
-      - name: Run allowlist gate
+      - name: Run allowlist gate shard
         run: |
+          set -uo pipefail
+          RESULTS=.test-results/functional-tests
+          mkdir -p "$RESULTS"
+          chmod 777 "$RESULTS"
+          GATE="python3 documentdb-local/functional-tests/tools/functional_gate.py \
+            --image documentdb-local/functional-tests/config/image.yml \
+            --allowlist documentdb-local/functional-tests/config/allowlist.yml \
+            --engine-name ${{ env.ENGINE_NAME }}"
           CONNECTION_STRING="mongodb://${{ env.DOCUMENTDB_USER }}:${DOCUMENTDB_PASSWORD}@localhost:${{ env.DOCUMENTDB_PORT }}/?tls=true&tlsAllowInvalidCertificates=true"
-          mkdir -p .test-results/functional-tests
-          chmod 777 .test-results/functional-tests
 
-          # Run the FULL upstream suite the same way the daily job does, then
-          # enforce the allowlist from the produced report in the next step
-          # (functional_gate summarize-gate). We deliberately do NOT use the
-          # conftest_allowlist plugin to pre-filter here: under pytest-xdist,
-          # deselecting ~2k of the ~12.5k collected items concentrates load so
-          # that a single engine-crashing test kills an xdist worker, which
-          # raises a fatal "INTERNALERROR: assert not crashitem" and aborts the
-          # whole session before any report is written. Running the full suite
-          # (like the daily job) tolerates worker/engine crashes — xdist marks
-          # the crashed test failed and the engine auto-restarts — so a complete
-          # report is always produced and the allowlist contract is enforced
-          # against it. Known engine-crasher files are still --ignore'd below.
+          # Resolve this shard's slice of the allowlist (rootdir-relative IDs
+          # prefixed for the container's pytest rootdir). The allowlist already
+          # excludes the known engine-crasher files, so no --ignore is needed.
+          $GATE shard-allowlist \
+            --num-shards "$NUM_SHARDS" \
+            --shard-id "${{ matrix.shard }}" \
+            --prefix documentdb_tests/ \
+            --output "$RESULTS/shard_ids.txt"
+          SHARD_COUNT=$(grep -c . "$RESULTS/shard_ids.txt" || true)
+          echo "Shard ${{ matrix.shard }}/$NUM_SHARDS: running $SHARD_COUNT allowlisted test(s)"
+
+          # Run exactly this shard's allowlisted tests in parallel. set -f so
+          # parametrized IDs containing [brackets] are not glob-expanded.
+          set -f
           docker run --rm --network host \
-            -v "$(pwd)/.test-results/functional-tests:/results" \
+            -v "$(pwd)/$RESULTS:/results" \
             ${{ env.FUNC_TEST_IMAGE }} \
-            documentdb_tests/compatibility/tests \
-            --ignore=documentdb_tests/compatibility/tests/core/collation/command_level/stages/test_stages_window.py \
-            --ignore=documentdb_tests/compatibility/tests/core/operator/stages/planCacheStats/test_planCacheStats_type_errors.py \
-            --ignore=documentdb_tests/compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_core.py \
-            --ignore=documentdb_tests/compatibility/tests/core/operator/expressions/accumulator/setUnion/test_setUnion_type_dedup.py \
+            $(cat "$RESULTS/shard_ids.txt") \
             --engine-name "${{ env.ENGINE_NAME }}" \
             --connection-string "$CONNECTION_STRING" \
             -n ${{ env.PYTEST_WORKERS }} \
             --json-report --json-report-file=/results/report.json \
             --junitxml=/results/results.xml \
             -v \
-            || true  # Tolerate non-allowlisted failures; summarize-gate enforces the allowlist contract
+            || true
+          set +f
 
-      - name: Summarize gate results
-        if: always()
-        run: |
-          set -uo pipefail
-          RESULTS=.test-results/functional-tests
-          GATE="python3 documentdb-local/functional-tests/tools/functional_gate.py \
-            --image documentdb-local/functional-tests/config/image.yml \
-            --allowlist documentdb-local/functional-tests/config/allowlist.yml \
-            --engine-name ${{ env.ENGINE_NAME }}"
+          [ -f "$RESULTS/report.json" ] || { echo "::error::Shard produced no report.json"; exit 1; }
 
-          if [ ! -f "$RESULTS/report.json" ]; then
-            echo "::error::No report.json produced. Test execution may have failed."
-            exit 1
-          fi
-
-          # Enforce against this report; updated to the merged report if a
-          # sequential re-run is performed below.
-          FINAL_REPORT="$RESULTS/report.json"
-
-          # The parallel full-suite pass can intermittently segfault the engine
-          # (a known RUM dynamic-cursor race under -n4); the backend's brief
-          # recovery window then cascades into spurious failures of unrelated,
-          # otherwise-passing allowlisted tests. Identify allowlisted tests that
-          # ran but did NOT pass and re-run just those sequentially (-p no:xdist
-          # => no parallel race, so the crash does not recur). Genuine passers
-          # recover; genuinely-broken tests stay failed and still fail the gate.
+          # The parallel pass can intermittently segfault the engine (known RUM
+          # dynamic-cursor race under -n4); its brief recovery window cascades
+          # spurious failures onto otherwise-passing allowlisted tests. Re-run
+          # just this shard's failures sequentially (-p no:xdist => no race) and
+          # merge so transient victims recover; genuine failures stay failed.
           $GATE gate-failures --report "$RESULTS/report.json" --output "$RESULTS/rerun_ids.txt"
           RERUN_COUNT=$(grep -c . "$RESULTS/rerun_ids.txt" || true)
-          echo "Allowlisted non-pass after parallel run: $RERUN_COUNT"
+          echo "Shard ${{ matrix.shard }} non-pass after parallel run: $RERUN_COUNT"
 
-          # Re-run only for a plausibly-transient number of failures. A massive
-          # failure count means a real regression (not a transient crash); skip
-          # the re-run and let the gate fail fast on the original report.
           if [ "$RERUN_COUNT" -gt 0 ] && [ "$RERUN_COUNT" -le 800 ]; then
-            CONNECTION_STRING="mongodb://${{ env.DOCUMENTDB_USER }}:${DOCUMENTDB_PASSWORD}@localhost:${{ env.DOCUMENTDB_PORT }}/?tls=true&tlsAllowInvalidCertificates=true"
-            # Prefix rootdir-relative node IDs with the in-container test root.
             sed 's#^#documentdb_tests/#' "$RESULTS/rerun_ids.txt" > "$RESULTS/rerun_args.txt"
-            echo "Re-running $RERUN_COUNT allowlisted test(s) sequentially after letting the engine settle..."
+            echo "Re-running $RERUN_COUNT test(s) sequentially after letting the engine settle..."
             sleep 20
-            # set -f so parametrized IDs containing [brackets] are not glob-expanded by the shell.
             set -f
             docker run --rm --network host \
               -v "$(pwd)/$RESULTS:/results" \
@@ -246,35 +240,30 @@ jobs:
               || true
             set +f
             if [ -f "$RESULTS/report_rerun.json" ]; then
-              # Enforce on the merged report directly. We do NOT overwrite
-              # report.json: it is written inside the container and is owned by
-              # the container UID, so an in-place cp/truncate fails with
-              # "Permission denied" on the host runner.
               $GATE merge-reports \
                 --base "$RESULTS/report.json" \
                 --overlay "$RESULTS/report_rerun.json" \
-                --out "$RESULTS/report_merged.json"
-              FINAL_REPORT="$RESULTS/report_merged.json"
-              echo "Merged sequential re-run results into $FINAL_REPORT"
-            else
-              echo "::warning::Sequential re-run produced no report; enforcing original results."
+                --out "$RESULTS/report_shard.json"
+              echo "Merged sequential re-run results for shard ${{ matrix.shard }}"
             fi
           fi
 
-          # Final enforcement on the (possibly merged) report — gates the job.
-          $GATE summarize-gate \
-            --report "$FINAL_REPORT" \
-            --output-dir "$RESULTS"
+          # Canonical per-shard report for the combine job: merged if a re-run
+          # happened, otherwise the original parallel report. report.json is
+          # container-owned, so copy with python to avoid permission issues.
+          if [ ! -f "$RESULTS/report_shard.json" ]; then
+            python3 -c "import shutil; shutil.copy('$RESULTS/report.json', '$RESULTS/report_shard.json')"
+          fi
 
       - name: Collect DocumentDB logs
         if: always()
-        run: docker logs documentdb > .test-results/functional-tests/documentdb.log 2>&1 || true
+        run: docker logs documentdb > .test-results/functional-tests/documentdb-shard-${{ matrix.shard }}.log 2>&1 || true
 
-      - name: Upload test results
+      - name: Upload shard report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: functional-test-results
+          name: gate-shard-${{ matrix.shard }}
           overwrite: true
           path: .test-results/functional-tests/
 
@@ -285,6 +274,73 @@ jobs:
           docker rm documentdb 2>/dev/null || true
 
   # -----------------------------------------------------------------------
+  # Job 3b: PR gate combine - merge all shard reports and enforce the
+  # allowlist contract once over the full set.
+  # -----------------------------------------------------------------------
+  functional-pr-gate-combine:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.test_scope || 'allowlist') == 'allowlist')
+    needs: [functional-pr-gate]
+    runs-on: *functional_tests_runner
+    timeout-minutes: 15
+    env:
+      NUM_SHARDS: 4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-shard-*
+          path: shard-artifacts
+
+      - name: Merge shard reports and enforce allowlist
+        run: |
+          set -uo pipefail
+          OUT=.test-results/functional-tests
+          mkdir -p "$OUT"
+          GATE="python3 documentdb-local/functional-tests/tools/functional_gate.py \
+            --image documentdb-local/functional-tests/config/image.yml \
+            --allowlist documentdb-local/functional-tests/config/allowlist.yml \
+            --engine-name ${{ env.ENGINE_NAME }}"
+
+          # Collect each shard's canonical report.
+          mapfile -t SHARD_REPORTS < <(find shard-artifacts -name report_shard.json | sort)
+          echo "Found ${#SHARD_REPORTS[@]} shard report(s) of $NUM_SHARDS expected:"
+          printf '  %s\n' "${SHARD_REPORTS[@]}"
+          if [ "${#SHARD_REPORTS[@]}" -ne "$NUM_SHARDS" ]; then
+            echo "::error::Expected $NUM_SHARDS shard reports but found ${#SHARD_REPORTS[@]}. A shard job likely failed to produce results."
+            exit 1
+          fi
+
+          # Merge disjoint shard reports into one combined report (first as base,
+          # the rest as overlays) and enforce the allowlist over the full set.
+          BASE="${SHARD_REPORTS[0]}"
+          OVERLAYS=("${SHARD_REPORTS[@]:1}")
+          $GATE merge-reports --base "$BASE" --overlay "${OVERLAYS[@]}" --out "$OUT/report.json"
+
+          # Preserve shard logs in the combined artifact for debugging.
+          find shard-artifacts -name 'documentdb-shard-*.log' -exec cp {} "$OUT/" \; 2>/dev/null || true
+
+          $GATE summarize-gate \
+            --report "$OUT/report.json" \
+            --output-dir "$OUT"
+
+      - name: Upload combined gate results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-test-results
+          overwrite: true
+          path: .test-results/functional-tests/
+
+  # -----------------------------------------------------------------------
   # Job 4: Daily delta - full suite visibility report
   # -----------------------------------------------------------------------
   daily-functional-delta:
@@ -293,7 +349,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.test_scope == 'all')
     needs: [validate-config, build-documentdb-local]
     runs-on: *functional_tests_runner
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
