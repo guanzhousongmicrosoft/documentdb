@@ -195,6 +195,17 @@ jobs:
           SHARD_COUNT=$(grep -c . "$RESULTS/shard_ids.txt" || true)
           echo "Shard ${{ matrix.shard }}/$NUM_SHARDS: running $SHARD_COUNT allowlisted test(s)"
 
+          # Refuse to run with an empty slice. An empty shard_ids.txt would leave
+          # the docker pytest invocation below with NO positional args, making
+          # pytest collect the entire upstream suite (including the engine-crasher
+          # files the allowlist purposely excludes), which could spuriously pass
+          # this shard and mask problems. Only reachable if NUM_SHARDS exceeds the
+          # per-engine allowlist size.
+          if [ "$SHARD_COUNT" -eq 0 ]; then
+            echo "::error::Shard ${{ matrix.shard }}: empty allowlist slice — refusing to run pytest with no positional args (NUM_SHARDS too large for the allowlist?)"
+            exit 1
+          fi
+
           # Run exactly this shard's allowlisted tests in parallel. set -f so
           # parametrized IDs containing [brackets] are not glob-expanded.
           set -f
@@ -218,11 +229,15 @@ jobs:
           # spurious failures onto otherwise-passing allowlisted tests. Re-run
           # just this shard's failures sequentially (-p no:xdist => no race) and
           # merge so transient victims recover; genuine failures stay failed.
+          # The 200 cap is a PER-SHARD budget: round-robin sharding spreads a
+          # systemic regression evenly across shards, so a ~800 gate-wide budget
+          # maps to ~200/shard. Above it, treat the failures as a real regression,
+          # skip the re-run, and let them fail the gate.
           $GATE gate-failures --report "$RESULTS/report.json" --output "$RESULTS/rerun_ids.txt"
           RERUN_COUNT=$(grep -c . "$RESULTS/rerun_ids.txt" || true)
           echo "Shard ${{ matrix.shard }} non-pass after parallel run: $RERUN_COUNT"
 
-          if [ "$RERUN_COUNT" -gt 0 ] && [ "$RERUN_COUNT" -le 800 ]; then
+          if [ "$RERUN_COUNT" -gt 0 ] && [ "$RERUN_COUNT" -le 200 ]; then
             sed 's#^#documentdb_tests/#' "$RESULTS/rerun_ids.txt" > "$RESULTS/rerun_args.txt"
             echo "Re-running $RERUN_COUNT test(s) sequentially after letting the engine settle..."
             sleep 20
@@ -323,7 +338,7 @@ jobs:
           # the rest as overlays) and enforce the allowlist over the full set.
           BASE="${SHARD_REPORTS[0]}"
           OVERLAYS=("${SHARD_REPORTS[@]:1}")
-          $GATE merge-reports --base "$BASE" --overlay "${OVERLAYS[@]}" --out "$OUT/report.json"
+          $GATE merge-reports --base "$BASE" --overlay "${OVERLAYS[@]}" --out "$OUT/report.json" --sum-collected
 
           # Preserve shard logs in the combined artifact for debugging.
           find shard-artifacts -name 'documentdb-shard-*.log' -exec cp {} "$OUT/" \; 2>/dev/null || true
@@ -454,16 +469,21 @@ jobs:
               || true
             set +f
             if [ -f "$RESULTS/report_rerun.json" ]; then
-              $GATE merge-reports \
-                --base "$RESULTS/report.json" \
-                --overlay "$RESULTS/report_rerun.json" \
-                --out "$RESULTS/report_merged.json"
               # report.json is written inside the container and owned by the
               # container UID, so an in-place cp/truncate fails with "Permission
               # denied"; rm+mv works because the results dir is world-writable.
-              rm -f "$RESULTS/report.json"
-              mv "$RESULTS/report_merged.json" "$RESULTS/report.json"
-              echo "Merged sequential re-run results into daily report.json"
+              # Guard the destructive rm/mv on merge success so a failed merge
+              # does not delete the original report.
+              if $GATE merge-reports \
+                  --base "$RESULTS/report.json" \
+                  --overlay "$RESULTS/report_rerun.json" \
+                  --out "$RESULTS/report_merged.json" \
+                && rm -f "$RESULTS/report.json" \
+                && mv "$RESULTS/report_merged.json" "$RESULTS/report.json"; then
+                echo "Merged sequential re-run results into daily report.json"
+              else
+                echo "::warning::Re-run merge failed; enforcing original parallel results."
+              fi
             fi
           fi
 

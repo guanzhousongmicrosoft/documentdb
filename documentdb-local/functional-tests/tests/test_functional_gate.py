@@ -1008,8 +1008,30 @@ class TestMergeReports:
         merged = merge_reports(base, [overlay])
         ids = {t["nodeid"] for t in merged["tests"]}
         assert ids == {"tests/test_a.py::one", "tests/test_a.py::new"}
-        # collected preserved from base
+        # collected preserved from base (default re-run merge)
         assert merged["summary"]["collected"] == 1
+
+    def test_sum_collected_combines_shard_discovery_counts(self, tmp_path):
+        """Shard-combine merge sums collected across disjoint shard reports."""
+        shard0 = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_a.py::s0", "outcome": "passed"},
+        ], summary={"collected": 2620, "total": 2620}, filename="s0.json")
+        shard1 = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_b.py::s1", "outcome": "passed"},
+        ], summary={"collected": 2620, "total": 2620}, filename="s1.json")
+        shard2 = make_pytest_report(tmp_path, [
+            {"nodeid": "tests/test_c.py::s2", "outcome": "passed"},
+        ], summary={"collected": 2621, "total": 2621}, filename="s2.json")
+
+        # default: preserves base's collected (wrong for shard combine)
+        default_merge = merge_reports(shard0, [shard1, shard2])
+        assert default_merge["summary"]["collected"] == 2620
+
+        # sum_collected: sums across all shard reports
+        summed = merge_reports(shard0, [shard1, shard2], sum_collected=True)
+        assert summed["summary"]["collected"] == 2620 + 2620 + 2621
+        ids = {t["nodeid"] for t in summed["tests"]}
+        assert ids == {"tests/test_a.py::s0", "tests/test_b.py::s1", "tests/test_c.py::s2"}
 
 
 class TestShardAllowlist:

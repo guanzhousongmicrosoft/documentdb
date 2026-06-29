@@ -989,7 +989,8 @@ def cmd_gate_failures(args):
     return 0
 
 
-def merge_reports(base_path: str, overlay_paths: list[str]) -> dict:
+def merge_reports(base_path: str, overlay_paths: list[str],
+                  sum_collected: bool = False) -> dict:
     """Merge one or more overlay pytest JSON reports into a base report.
 
     For every test present in an overlay, the overlay's record (outcome and
@@ -999,18 +1000,28 @@ def merge_reports(base_path: str, overlay_paths: list[str]) -> dict:
     passes overrides the original transient failure, while a re-run that fails
     keeps the test failed.
 
-    The base report's ``summary.collected`` (full-suite discovery count) is left
-    untouched so coverage-boundary math in summarize-gate stays correct.
+    ``summary.collected`` handling depends on the merge mode:
+
+    * ``sum_collected=False`` (default, **re-run merge**): the base report holds
+      the full collected population and each overlay is a subset re-run of it, so
+      the base's ``collected`` is preserved.
+    * ``sum_collected=True`` (**shard-combine merge**): the base and overlays are
+      *disjoint* shard reports, so ``collected`` is summed across all inputs so
+      the coverage-boundary math in summarize-gate reflects the whole set rather
+      than just shard 0's slice.
     """
     with open(base_path) as f:
         base = json.load(f)
 
     tests = base.get("tests", [])
     index = {t.get("nodeid", ""): i for i, t in enumerate(tests)}
+    collected_total = (base.get("summary", {}) or {}).get("collected", 0) or 0
 
     for overlay_path in overlay_paths:
         with open(overlay_path) as f:
             overlay = json.load(f)
+        if sum_collected:
+            collected_total += (overlay.get("summary", {}) or {}).get("collected", 0) or 0
         for t in overlay.get("tests", []):
             nid = t.get("nodeid", "")
             if not nid:
@@ -1024,7 +1035,7 @@ def merge_reports(base_path: str, overlay_paths: list[str]) -> dict:
     base["tests"] = tests
 
     # Refresh the outcome tallies in summary so downstream readers see merged
-    # numbers. 'collected' (discovery count) is preserved as-is.
+    # numbers. 'collected' is preserved (re-run) or summed (shard-combine).
     summary = base.get("summary", {})
     tally: dict[str, int] = {}
     for t in tests:
@@ -1035,12 +1046,15 @@ def merge_reports(base_path: str, overlay_paths: list[str]) -> dict:
         elif key in summary:
             summary[key] = 0
     summary["total"] = len(tests)
+    if sum_collected:
+        summary["collected"] = collected_total
     base["summary"] = summary
     return base
 
 
 def cmd_merge_reports(args):
-    merged = merge_reports(args.base, args.overlay)
+    merged = merge_reports(args.base, args.overlay,
+                           sum_collected=getattr(args, "sum_collected", False))
     with open(args.out, "w") as f:
         json.dump(merged, f)
     print(f"Merged {len(args.overlay)} overlay report(s) into {args.out} "
@@ -1111,6 +1125,10 @@ def main():
     merge_parser.add_argument("--overlay", required=True, nargs="+",
                               help="Path(s) to overlay report(s); later overlays win")
     merge_parser.add_argument("--out", required=True, help="Path to write the merged report")
+    merge_parser.add_argument("--sum-collected", action="store_true",
+                              help="Sum summary.collected across base+overlays (disjoint "
+                                   "shard-combine merge) instead of preserving the base's "
+                                   "(default: preserve, for re-run merges)")
 
     # shard-allowlist: print the allowlisted node IDs assigned to one shard
     shard_parser = subparsers.add_parser(
