@@ -1,0 +1,14 @@
+# Every packaging build uses the repo root as docker build context; keep it
+# lean. Nothing below is COPY'd by any Dockerfile: the packaging entrypoints
+# strip `internal` from the Makefile before building, and the CI test
+# allowlists under functional-tests are only read on the runner itself.
+# NOTE: .git is deliberately NOT excluded — generate_extension_version.sh
+# reads the git index inside the build container to stamp GIT_VERSION into
+# the extension; excluding it would ship "unknown" version metadata.
+.github
+internal
+documentdb-local/functional-tests
+rfcs
+# Local cargo build output; container builds produce their own target dirs.
+pg_documentdb_gw/target
+pg_documentdb_gw_host/target
