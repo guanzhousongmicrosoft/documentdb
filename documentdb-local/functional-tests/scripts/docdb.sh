@@ -52,6 +52,11 @@ warn() { printf '[docdb] WARNING: %s\n' "$*" >&2; }
 err()  { printf '[docdb] ERROR: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# `shift 2` does not shift when only one argument remains, and this script runs
+# without `set -e`, so an option missing its value would spin its parsing loop
+# forever. Every option that consumes a value must guard with this first.
+need_arg() { [ "$2" -ge 2 ] || die "$1 needs a value"; }
+
 usage() {
   cat <<'EOF'
 docdb: one entry point for documentdb-local functional testing and packaging.
@@ -120,7 +125,7 @@ cmd_suite() {
       local sha=""
       while [ $# -gt 0 ]; do
         case "$1" in
-          --sha) [ $# -ge 2 ] || die "--sha needs a value"; sha="$2"; shift 2 ;;
+          --sha) need_arg "$1" $#; sha="$2"; shift 2 ;;
           *) die "unknown option for 'suite pin': $1" ;;
         esac
       done
@@ -170,9 +175,9 @@ cmd_xfail() {
   local sub="${1:-status}"; shift || true
   case "${sub}" in
     status)
-      printf '  %-46s %s entries\n' "config/oss_ci_failing_tests.txt" "$(grep -c '::' "${FAILING_LIST}" 2>/dev/null || echo 0)"
-      printf '  %-46s %s entries\n' "config/oss_ci_flaky_tests.txt"   "$(grep -c '::' "${FLAKY_LIST}" 2>/dev/null || echo 0)"
-      printf '  %-46s %s entries\n' "config/ci_crash_tests.txt"       "$(grep -cv '^\s*\(#\|$\)' "${CRASH_LIST}" 2>/dev/null || echo 0)"
+      printf '  %-46s %s entries\n' "config/oss_ci_failing_tests.txt" "$(grep -c '::' "${FAILING_LIST}" 2>/dev/null || true)"
+      printf '  %-46s %s entries\n' "config/oss_ci_flaky_tests.txt"   "$(grep -c '::' "${FLAKY_LIST}" 2>/dev/null || true)"
+      printf '  %-46s %s entries\n' "config/ci_crash_tests.txt"       "$(grep -cv '^\s*\(#\|$\)' "${CRASH_LIST}" 2>/dev/null || true)"
       echo
       echo "failing = xfail(strict): must fail, and an unexpected pass fails the gate."
       echo "flaky   = xfail(non-strict): may pass or fail."
@@ -186,8 +191,20 @@ cmd_xfail() {
         printf '%s\n' "${id}" >> "${list}"; info "added to config/$(basename "${list}")"
       else
         grep -qxF "${id}" "${list}" || { info "not listed"; return 0; }
-        grep -vxF "${id}" "${list}" > "${list}.tmp" && mv "${list}.tmp" "${list}"
-        info "removed from config/$(basename "${list}")"
+        # grep -v exits 1 when it selects nothing, which happens when the entry
+        # being removed is the list's only line. Without treating that as
+        # success the mv is skipped, the list keeps the entry, a stale .tmp is
+        # left behind, and the message below still claims the removal happened.
+        local tmp="${list}.tmp.$$"
+        grep -vxF "${id}" "${list}" > "${tmp}"
+        local grc=$?
+        if [ "${grc}" -le 1 ]; then
+          mv "${tmp}" "${list}" || { rm -f "${tmp}"; die "cannot update ${list}"; }
+          info "removed from config/$(basename "${list}")"
+        else
+          rm -f "${tmp}"
+          die "failed to read ${list} (grep exit ${grc})"
+        fi
       fi
       ;;
     reconcile)
@@ -196,7 +213,7 @@ cmd_xfail() {
       local report="" extra=()
       while [ $# -gt 0 ]; do
         case "$1" in
-          --report) report="${2:-}"; shift 2 ;;
+          --report) need_arg "$1" $#; report="$2"; shift 2 ;;
           *) extra+=("$1"); shift ;;
         esac
       done
@@ -217,7 +234,7 @@ cmd_xfail() {
       local out="" ; local -a reports=()
       while [ $# -gt 0 ]; do
         case "$1" in
-          --out) out="${2:-}"; shift 2 ;;
+          --out) need_arg "$1" $#; out="$2"; shift 2 ;;
           *) reports+=("$1"); shift ;;
         esac
       done
@@ -258,9 +275,9 @@ cmd_build() {
   local target=both os="" pg="" passthru=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --target) target="${2:-}"; shift 2 ;;
-      --os) os="${2:-}"; shift 2 ;;
-      --pg) pg="${2:-}"; shift 2 ;;
+      --target) need_arg "$1" $#; target="$2"; shift 2 ;;
+      --os) need_arg "$1" $#; os="$2"; shift 2 ;;
+      --pg) need_arg "$1" $#; pg="$2"; shift 2 ;;
       -h|--help)
         cat <<'EOF'
 docdb build [--target image|packages|both] [--os <os>] [--pg <version>] [-- <extra args>]

@@ -118,9 +118,9 @@ Modes: `gate` (full suite under the xfail model — the CI gate), `single`
 ## Build the image and packages
 
 ```bash
-$docdb build --target packages --os deb --pg 16
+$docdb build --target packages --os ubuntu22.04 --pg 16
 $docdb build --target image
-$docdb build --target both --os deb --pg 16
+$docdb build --target both --os ubuntu22.04 --pg 16
 ```
 
 `packages` wraps `packaging/build_packages.sh`; `image` builds the

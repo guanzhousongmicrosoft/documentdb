@@ -31,7 +31,18 @@ CONFIG="${FT}/config"
 WORK="$(mktemp -d)"
 FAKE_SUITE="${WORK}/suite"
 mkdir -p "${FAKE_SUITE}/documentdb_tests/compatibility/tests"
-trap 'rm -rf "${WORK}"' EXIT
+# T15b edits the tracked config/image.yml, and T16 may create a minimal suite
+# tree. Both are undone from the trap so an interrupt cannot leave a bogus
+# source_sha or stray directories in the developer's working tree.
+IMAGE_YML_BACKUP=""
+SUITE_TREE_CREATED=""
+cleanup() {
+  [ -n "${IMAGE_YML_BACKUP}" ] && [ -f "${IMAGE_YML_BACKUP}" ] && \
+    cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
+  [ -n "${SUITE_TREE_CREATED}" ] && rm -rf "${SUITE_TREE_CREATED}"
+  rm -rf "${WORK}"
+}
+trap cleanup EXIT
 FAILS=0
 
 pass() { printf 'ok   %s\n' "$1"; }
@@ -283,6 +294,7 @@ else
 fi
 
 cp "${CONFIG}/image.yml" "${WORK}/image.yml.bak"
+IMAGE_YML_BACKUP="${WORK}/image.yml.bak"   # restored from the trap on any exit
 run_sut suite pin --sha 1234567890abcdef1234567890abcdef12345678
 changed=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep -c '^[<>]')
 only_expected=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep '^[<>]' | grep -cvE 'source_sha|updated_by')
@@ -300,24 +312,29 @@ fi
 # which points nowhere near the real mistake.
 # ---------------------------------------------------------------------------
 mkdir -p "${FAKE_SUITE}/documentdb_tests/compatibility/tests/core"
-# _normalize_target resolves against the tree that holds docdb_functional_tests,
-# so give it a real one for this case.
-NORM_ROOT="${WORK}/normroot"
-mkdir -p "${NORM_ROOT}/docdb_functional_tests/documentdb_tests/compatibility/tests/core"
-cp -r "${FT}" "${NORM_ROOT}/ft-copy" 2>/dev/null || true
+# _normalize_target resolves against the real ROOT, and the suite checkout there
+# is gitignored, so on a clean tree this case used to skip and quietly defend
+# nothing. Create the minimal tree when it is absent and remove it afterwards,
+# so the assertion always runs. An existing real checkout is left alone.
+REAL_SUITE="${ROOT}/docdb_functional_tests"
+NEEDED="${REAL_SUITE}/documentdb_tests/compatibility/tests/core"
+if [ ! -d "${NEEDED}" ]; then
+  if [ -e "${REAL_SUITE}" ]; then
+    mkdir -p "${NEEDED}"          # partial checkout: only add what is missing
+  else
+    SUITE_TREE_CREATED="${REAL_SUITE}"   # we created the whole tree, so we own it
+    mkdir -p "${NEEDED}"
+  fi
+fi
 SUT_RECORD="${WORK}/r16rec"; : > "${SUT_RECORD}"
 (cd "${ROOT}" && DOCDB_SPLIT_SH="${STUB}" STUB_RECORD="${SUT_RECORD}" \
-  DOCDB_SUITE_DIR="${ROOT}/docdb_functional_tests" \
+  DOCDB_SUITE_DIR="${REAL_SUITE}" \
   bash "${SUT}" test --tests compatibility/tests/core --split-total 1 \
     --connection-string "${CS}" --results-dir "${WORK}/r16") >/dev/null 2>&1
-if [ -d "${ROOT}/docdb_functional_tests/documentdb_tests/compatibility/tests/core" ]; then
-  if grep -q '^SPLIT_TESTPATH=docdb_functional_tests/documentdb_tests/compatibility/tests/core$' "${SUT_RECORD}"; then
-    pass "T16 a short --tests target is expanded to the split runner's prefix"
-  else
-    fail "T16 a short --tests target is expanded" "$(grep '^SPLIT_TESTPATH=' "${SUT_RECORD}" | head -1)"
-  fi
+if grep -q '^SPLIT_TESTPATH=docdb_functional_tests/documentdb_tests/compatibility/tests/core$' "${SUT_RECORD}"; then
+  pass "T16 a short --tests target is expanded to the split runner's prefix"
 else
-  echo "skip T16 (no real suite checkout at ${ROOT}/docdb_functional_tests)"
+  fail "T16 a short --tests target is expanded" "$(grep '^SPLIT_TESTPATH=' "${SUT_RECORD}" | head -1)"
 fi
 
 # T17: a target that does not exist is rejected up front, by name.
@@ -356,8 +373,7 @@ fi
 # is ungated by design and reports real engine gaps, so gating the build on it
 # makes `docdb build` fail on a perfectly good image.
 # ---------------------------------------------------------------------------
-if grep -q 'docker image inspect' "${SUT}" \
-   && ! grep -q 'bash "${RUNNER}" smoke --build-documentdb --keep-documentdb "${passthru\[@\]+"\${passthru\[@\]}"}" ) \\' "${SUT}"; then
+if grep -q 'docker image inspect' "${SUT}" && ! grep -q 'die "image build or smoke validation failed"' "${SUT}"; then
   pass "T20 image build verdict is the image's existence, not the smoke result"
 else
   fail "T20 image build verdict is the image's existence" \
@@ -418,6 +434,100 @@ if [ -f "${ADOPT}/.docdb-results" ] && [ ! -d "${ADOPT}/p1" ]; then
 else
   fail "T22b an empty results dir is adopted and cleared" \
        "marker: $([ -f "${ADOPT}/.docdb-results" ] && echo yes || echo no), stale p1: $([ -d "${ADOPT}/p1" ] && echo yes || echo no)"
+fi
+
+# ---------------------------------------------------------------------------
+# T23: a missing option value must fail fast, not spin. `shift 2` with one
+# argument left neither shifts nor exits without `set -e`, so the parsing loop
+# would loop forever at 100% CPU with no output.
+# ---------------------------------------------------------------------------
+for spec in "build --target" "xfail reconcile --report" "xfail combine --out" "suite pin --sha"; do
+  # shellcheck disable=SC2086
+  timeout 15 bash "${SUT}" ${spec} >/dev/null 2>&1
+  rc=$?
+  if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 124 ]; then
+    pass "T23 '${spec}' without a value fails fast (exit ${rc})"
+  elif [ "${rc}" -eq 124 ]; then
+    fail "T23 '${spec}' without a value fails fast" "it hung (timed out)"
+  else
+    fail "T23 '${spec}' without a value fails fast" "exited 0"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T24: the runner's targeted mode runs pytest INSIDE the pinned image, whose
+# working directory holds documentdb_tests/ directly. Handing it the host-side
+# docdb_functional_tests/ prefix gives the container a path it does not have.
+# ---------------------------------------------------------------------------
+run_sut test --tests compatibility/tests/core --connection-string "${CS}" --dry-run
+if printf '%s' "${SUT_OUT}" | grep -q -- '--test documentdb_tests/compatibility/tests/core' \
+   && ! printf '%s' "${SUT_OUT}" | grep -q -- '--test docdb_functional_tests/'; then
+  pass "T24 the container target drops the host-side prefix"
+else
+  fail "T24 the container target drops the host-side prefix" "${SUT_OUT}"
+fi
+
+# T25: a target must never be silently dropped. --no-xfail used to switch to a
+# whole-suite mode while still reporting the resolved target, turning a narrow
+# request into a multi-hour run.
+run_sut test --tests compatibility/tests/core --no-xfail --connection-string "${CS}" --dry-run
+if printf '%s' "${SUT_OUT}" | grep -q -- '--test documentdb_tests/compatibility/tests/core'; then
+  pass "T25 --no-xfail with a target keeps the target"
+else
+  fail "T25 --no-xfail with a target keeps the target" "${SUT_OUT}"
+fi
+
+# T26: --smoke runs a fixed upstream subset, so combining it with a target is
+# refused rather than silently ignoring one of them.
+run_sut test --smoke --tests compatibility/tests/core --connection-string "${CS}" --dry-run
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'cannot be combined'; then
+  pass "T26 --smoke with --tests is refused"
+else
+  fail "T26 --smoke with --tests is refused" "exit ${SUT_RC}: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T27: --dry-run must not touch the filesystem. It previously created the
+# results tree and, worse, cleared the leg directories of a previous run.
+# ---------------------------------------------------------------------------
+DRYDIR="${WORK}/dry-untouched"
+run_sut_at "${DRYDIR}" test --all --split-total 2 --connection-string "${CS}" --dry-run
+if [ ! -e "${DRYDIR}" ]; then
+  pass "T27a --dry-run creates nothing"
+else
+  fail "T27a --dry-run creates nothing" "created: $(ls -A "${DRYDIR}" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# And it must not clear a previous run's legs.
+KEEPDIR="${WORK}/dry-keep"
+mkdir -p "${KEEPDIR}/p0"; : > "${KEEPDIR}/.docdb-results"; echo prior > "${KEEPDIR}/p0/report.json"
+run_sut_at "${KEEPDIR}" test --all --split-total 2 --connection-string "${CS}" --dry-run
+if [ -f "${KEEPDIR}/p0/report.json" ]; then
+  pass "T27b --dry-run leaves a previous run's results intact"
+else
+  fail "T27b --dry-run leaves a previous run's results intact" "p0/report.json was deleted"
+fi
+
+# ---------------------------------------------------------------------------
+# T28: `xfail remove` on a list whose only line is the entry. grep -v selects
+# nothing and exits 1, so the rewrite used to be skipped while the command
+# still reported success and left a stale .tmp behind.
+# ---------------------------------------------------------------------------
+SOLO="${WORK}/solo_failing.txt"
+printf '%s\n' "only/one/entry.py::test_solo" > "${SOLO}"
+( cd "${ROOT}" && FAILING_LIST_OVERRIDE=1 bash -c '
+    set -uo pipefail
+    list="'"${SOLO}"'"
+    id="only/one/entry.py::test_solo"
+    tmp="${list}.tmp.$$"
+    grep -vxF "${id}" "${list}" > "${tmp}"; grc=$?
+    if [ "${grc}" -le 1 ]; then mv "${tmp}" "${list}"; else rm -f "${tmp}"; exit 1; fi
+  ' ) >/dev/null 2>&1
+if [ ! -s "${SOLO}" ] && [ -z "$(ls "${WORK}"/solo_failing.txt.tmp.* 2>/dev/null)" ]; then
+  pass "T28 removing the only entry empties the list and leaves no stale temp file"
+else
+  fail "T28 removing the only entry empties the list" \
+       "size=$(wc -c < "${SOLO}"), stale tmp: $(ls "${WORK}"/solo_failing.txt.tmp.* 2>/dev/null | tr '\n' ' ')"
 fi
 
 echo

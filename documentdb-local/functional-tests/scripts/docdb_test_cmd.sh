@@ -21,7 +21,7 @@
 # suite's conftest never loads), which points nowhere near the real mistake.
 _PFX="docdb_functional_tests/documentdb_tests/"
 _normalize_target() {
-  local raw="$1" candidate path
+  local raw="$1" require_exists="${2:-1}" candidate path
   raw="${raw#./}"; raw="${raw#"${ROOT}/"}"
   case "${raw}" in
     "${_PFX}"*|docdb_functional_tests/*) candidate="${raw}" ;;
@@ -30,8 +30,13 @@ _normalize_target() {
     *)
       if [ -e "${ROOT}/${raw%%::*}" ]; then candidate="${raw}"; else candidate="${_PFX}${raw}"; fi ;;
   esac
-  path="${ROOT}/${candidate%%::*}"
-  [ -e "${path}" ] || return 1
+  # A dry run still needs the resolved form to be honest about what it would
+  # run, but it must not require a suite checkout to be present, so the
+  # existence check is skipped there.
+  if [ "${require_exists}" = 1 ]; then
+    path="${ROOT}/${candidate%%::*}"
+    [ -e "${path}" ] || return 1
+  fi
   printf '%s' "${candidate}"
 }
 
@@ -133,10 +138,12 @@ cmd_test() {
   fi
 
   # Resolve the target after the suite check, so a missing checkout is reported
-  # as a missing checkout rather than as a bad path.
-  if [ -n "${TESTS}" ] && [ "${DRY_RUN}" = 0 ]; then
+  # as a missing checkout rather than as a bad path. A dry run resolves it too,
+  # so what it prints is what a real run would use, but without requiring the
+  # checkout to exist.
+  if [ -n "${TESTS}" ]; then
     local normalized
-    if normalized="$(_normalize_target "${TESTS}")"; then
+    if normalized="$(_normalize_target "${TESTS}" "$([ "${DRY_RUN}" = 1 ] && echo 0 || echo 1)")"; then
       TESTS="${normalized}"; info "target: ${TESTS}"
     else
       die "target '${TESTS}' does not exist under ${ROOT} (looked directly and under ${_PFX})"
@@ -190,29 +197,40 @@ PY
     RESULTS_DIR="${RESULTS_DIR:-${ROOT}/local-gate-results}"
     local TMP_BASE="${RESULTS_DIR}/.tmp"
     local marker="${RESULTS_DIR}/.docdb-results"
-    mkdir -p "${RESULTS_DIR}" || die "cannot create ${RESULTS_DIR}"
 
-    # Clearing leg directories means `rm -rf` inside a path the caller chose, so
-    # only ever do it in a directory this command owns. A directory is ours if
-    # it carries the marker, or if it is empty and we are about to adopt it.
-    # Anything else is refused rather than pattern-matched: a caller could
-    # plausibly point --results-dir at a tree that already has a directory named
-    # np or p1, and losing it would be unforgivable for a test runner.
-    if [ ! -e "${marker}" ]; then
-      if [ -n "$(ls -A "${RESULTS_DIR}" 2>/dev/null)" ]; then
-        die "${RESULTS_DIR} is not empty and was not created by docdb (no .docdb-results marker). Point --results-dir at a new or empty directory."
+    # Everything in this block writes to disk, so none of it may run under
+    # --dry-run: a dry run that creates the results tree, or worse clears the
+    # leg directories of a previous run, has destroyed exactly what the caller
+    # asked it not to touch.
+    if [ "${DRY_RUN}" = 0 ]; then
+      mkdir -p "${RESULTS_DIR}" || die "cannot create ${RESULTS_DIR}"
+
+      # Clearing leg directories means `rm -rf` inside a path the caller chose,
+      # so only ever do it in a directory this command owns. A directory is
+      # ours if it carries the marker, or if it is empty and we are about to
+      # adopt it. Anything else is refused rather than pattern-matched: a
+      # caller could plausibly point --results-dir at a tree that already has a
+      # directory named np or p1, and losing it would be unforgivable for a
+      # test runner.
+      if [ ! -e "${marker}" ]; then
+        if [ -n "$(ls -A "${RESULTS_DIR}" 2>/dev/null)" ]; then
+          die "${RESULTS_DIR} is not empty and was not created by docdb (no .docdb-results marker). Point --results-dir at a new or empty directory."
+        fi
+        : > "${marker}" || die "cannot write ${marker}"
       fi
-      : > "${marker}" || die "cannot write ${marker}"
-    fi
 
-    mkdir -p "${TMP_BASE}" || die "cannot create ${TMP_BASE}"
-    # Clear every leg dir, not just this run's: a leftover leg from a wider run
-    # would otherwise be read as part of this run's evidence.
-    local stale
-    for stale in "${RESULTS_DIR}"/*; do
-      [ -d "${stale}" ] || continue
-      case "$(basename "${stale}")" in np|.tmp|p[0-9]|p[0-9][0-9]) rm -rf "${stale}" ;; esac
-    done
+      mkdir -p "${TMP_BASE}" || die "cannot create ${TMP_BASE}"
+      # Clear every leg dir, not just this run's: a leftover leg from a wider
+      # run would otherwise be read as part of this run's evidence.
+      local stale
+      for stale in "${RESULTS_DIR}"/*; do
+        [ -d "${stale}" ] || continue
+        case "$(basename "${stale}")" in np|.tmp|p[0-9]|p[0-9][0-9]) rm -rf "${stale}" ;; esac
+      done
+    elif [ -e "${RESULTS_DIR}" ] && [ ! -e "${marker}" ] && [ -n "$(ls -A "${RESULTS_DIR}" 2>/dev/null)" ]; then
+      # Report the same refusal a real run would hit, without writing anything.
+      die "${RESULTS_DIR} is not empty and was not created by docdb (no .docdb-results marker). Point --results-dir at a new or empty directory."
+    fi
 
     local -a TAGS=() MODES=() IDS=()
     if [ "${MODE}" != noparallel ]; then
@@ -233,7 +251,6 @@ PY
       local tag="${TAGS[$idx]}" m="${MODES[$idx]}" id="${IDS[$idx]}" total="${SPLIT_TOTAL}"
       [ "${m}" = noparallel ] && total=1
       local lres="${RESULTS_DIR}/${tag}" ltmp="${TMP_BASE}/${tag}"
-      mkdir -p "${lres}" "${ltmp}"
       local -a env_pairs=(
         "SPLIT_MODE=${m}" "SPLIT_ID=${id}" "SPLIT_TOTAL=${total}" "SPLIT_TAG=${tag}"
         "RESULTS_DIR=${lres}" "TMPDIR=${ltmp}"
@@ -245,6 +262,7 @@ PY
         info "would run: ${env_pairs[*]/CONN_PASS=*/CONN_PASS=<redacted>} -- bash ${SPLIT_SH}"
         continue
       fi
+      mkdir -p "${lres}" "${ltmp}"
       # env -u: an exported SPLIT_TESTPATH would otherwise reach a full run and
       # silently disable the runner's minimum-universe floor.
       ( cd "${ROOT}" && env -u SPLIT_TESTPATH "${env_pairs[@]}" bash "${SPLIT_SH}" ) 2>&1 | tee "${lres}/leg.log"
@@ -305,24 +323,39 @@ PY
 
   # --- single-engine modes, delegated to the local runner ---
   [ -f "${RUNNER}" ] || die "missing ${RUNNER}"
+
+  # --smoke runs a fixed upstream subset, so a target cannot be honoured.
+  # Silently dropping it would run something quite different from what was asked.
+  [ "${SMOKE}" = 1 ] && [ -n "${TESTS}" ] && die "--smoke runs a fixed upstream subset and cannot be combined with --tests"
+
   local mode
   if [ "${SMOKE}" = 1 ]; then mode=smoke
-  elif [ "${NO_XFAIL}" = 1 ]; then mode=full          # raw results, no gate
-  elif [ -n "${TESTS}" ]; then mode=single
+  elif [ -n "${TESTS}" ]; then mode=single      # a target always implies a targeted run
+  elif [ "${NO_XFAIL}" = 1 ]; then mode=full    # whole suite, raw
   else mode=gate; fi
 
-  if [ "${NO_XFAIL}" = 1 ]; then
-    info "raw run (xfail lists ignored). This is a report, not the gate's verdict."
-    info "to fold it back into the lists: docdb xfail reconcile --report <report.json>"
+  # The runner's targeted and raw modes execute pytest INSIDE the pinned image,
+  # whose working directory holds documentdb_tests/ directly. The host-side form
+  # carries the docdb_functional_tests/ prefix (that is what the split runner
+  # slices on), so strip it before handing the target over. Leaving it on gives
+  # the container a path it does not have.
+  local container_target="${TESTS#"${_PFX%documentdb_tests/}"}"
+
+  # Only `gate` applies the known-failure model; single/smoke/full report raw
+  # pytest results. Say so rather than letting the caller assume a verdict.
+  if [ "${mode}" != gate ]; then
+    info "note: ${mode} reports raw pass/fail, not the xfail-gated verdict."
+    [ "${mode}" = single ] && info "      for the gated verdict on a subset, add --split-total 1 (needs a running engine)."
+    info "      to fold raw results back into the lists: docdb xfail reconcile --report <report.json>"
   fi
   info "delegating to run-functional-tests.sh (${mode})"
   if [ "${DRY_RUN}" = 1 ]; then
-    info "would run: bash ${RUNNER} ${mode} ${engine_args[*]+"${engine_args[*]}"} ${passthru[*]+"${passthru[*]}"}"
+    info "would run: bash ${RUNNER} ${mode}${TESTS:+ --test ${container_target}} ${engine_args[*]+"${engine_args[*]}"} ${passthru[*]+"${passthru[*]}"}"
     info "plan only: nothing was run, so this says nothing about the gate."
     return 0
   fi
   if [ "${mode}" = single ]; then
-    exec bash "${RUNNER}" single --test "${TESTS}" "${engine_args[@]+"${engine_args[@]}"}" "${passthru[@]+"${passthru[@]}"}"
+    exec bash "${RUNNER}" single --test "${container_target}" "${engine_args[@]+"${engine_args[@]}"}" "${passthru[@]+"${passthru[@]}"}"
   fi
   exec bash "${RUNNER}" "${mode}" "${engine_args[@]+"${engine_args[@]}"}" "${passthru[@]+"${passthru[@]}"}"
 }
