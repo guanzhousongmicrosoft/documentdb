@@ -19,6 +19,11 @@ entries so it survives suite pin bumps.
 ## Layout
 
 ```
+scripts/   docdb.sh: the entry point (test / suite / xfail / build / env /
+           selftest); docdb_test_cmd.sh: the test command, sourced by it;
+           run-functional-tests.sh: single-engine runner;
+           run_pytest_split.sh: one CI matrix leg (slice + gate), used by
+           .github/workflows/functional_tests.yml.
 config/    Pinned upstream image + source_sha (image.yml); the OSS gateway's
            failing/flaky pair (oss_ci_failing_tests.txt, oss_ci_flaky_tests.txt),
            the engine-level crash skip list (ci_crash_tests.txt), and pytest
@@ -26,11 +31,22 @@ config/    Pinned upstream image + source_sha (image.yml); the OSS gateway's
 tools/     conftest_known_failures.py (the xfail plugin) and functional_gate.py
            (report-failures / merge-reports / reconcile / split-collection /
            recover-and-gate / verify-split-universes / compare-engines).
-scripts/   run-functional-tests.sh — local runner;
-           run_pytest_split.sh — one CI matrix leg (slice + gate), used by
-           .github/workflows/functional_tests.yml.
-tests/     Unit tests for functional_gate.py + the split runner's guard tests
-           (test_run_pytest_split.sh).
+tests/     Unit tests for functional_gate.py, the split runner's guard tests
+           (test_run_pytest_split.sh), and docdb.sh's parity tests
+           (test_docdb.sh).
+```
+
+`docdb.sh` is the one command to learn. It does not reimplement anything: it
+delegates runs to `run-functional-tests.sh` and `run_pytest_split.sh`, list
+maintenance to `functional_gate.py`, and packaging to `../../packaging/`, so
+what it reports matches CI by construction. Those scripts remain usable on
+their own, which is what CI does.
+
+```bash
+docdb=documentdb-local/functional-tests/scripts/docdb.sh
+
+$docdb help              # all commands
+$docdb test --help       # options for one command
 ```
 
 The suite version is pinned by `source_sha` in `config/image.yml`. Each gateway
@@ -63,20 +79,62 @@ suspiciously small universe (`MIN_MANIFEST`), an empty slice, a missing
 
 ## Run locally
 
-Bring up an engine and run the gate in one command:
+One command, whether or not an engine is already up:
+
+```bash
+docdb=documentdb-local/functional-tests/scripts/docdb.sh
+
+# bring an engine up and run the full gate
+$docdb test --all --build-and-start
+
+# against an already-running engine
+CONNECTION_STRING=... $docdb test --all
+
+# just the area you changed
+$docdb test --tests compatibility/tests/core/cursors
+
+# what actually fails, ignoring the xfail lists
+$docdb test --all --no-xfail
+
+# reproduce the CI matrix shape locally
+CONNECTION_STRING=... $docdb test --all --split-total 6
+```
+
+`--all`, `--tests` or `--smoke` is required: there is no implicit default,
+because running the whole suite by accident is expensive. Add `--dry-run` to
+see what would run without starting anything.
+
+The underlying runner is still available directly, and takes the same engine
+options (`--build-and-start-documentdb`, `--use-existing-documentdb-image`,
+`--workers`, ...):
 
 ```bash
 ./documentdb-local/functional-tests/scripts/run-functional-tests.sh gate --build-and-start-documentdb
 ```
 
-Or against an already-running engine (set `CONNECTION_STRING` or `--connection-string`):
-
-```bash
-./documentdb-local/functional-tests/scripts/run-functional-tests.sh gate
-```
-
 Modes: `gate` (full suite under the xfail model — the CI gate), `single`
 (one node ID), `smoke`, `full` (raw results, no gate). `--help` lists all options.
+
+## Build the image and packages
+
+```bash
+$docdb build --target packages --os deb --pg 16
+$docdb build --target image
+$docdb build --target both --os deb --pg 16
+```
+
+`packages` wraps `packaging/build_packages.sh`; `image` builds the
+documentdb-local container image through the runner.
+
+## Check the harness itself
+
+```bash
+$docdb selftest
+```
+
+Runs `tests/test_docdb.sh` (which asserts that `docdb.sh` still matches
+`.github/workflows/functional_tests.yml` and the real config files) and the
+split runner's guard tests.
 
 ## Triage a gate failure
 
@@ -89,27 +147,38 @@ The gate prints the residual failures (`gate-failures.txt`). Each is either:
 
 ## Update the baseline (source_sha bump or after a fix)
 
-Fold a gate run's merged `report.json` back into the pair mechanically. A CI
-run publishes one report per leg (`functional-test-results-<tag>` artifacts);
-combine them first so the reconcile sees the full suite:
+Move the pin, refresh the checkout, run the suite, then fold the result back
+into the lists:
 
 ```bash
-# Combine the per-leg reports (p0..pN + np) into one full-suite report.
-cp p0/report.json combined.json
-for leg in p1 p2 p3 p4 p5 np; do
-  python3 documentdb-local/functional-tests/tools/functional_gate.py merge-reports \
-    --base combined.json --overlay "$leg/report.json" --out combined.json
-done
+docdb=documentdb-local/functional-tests/scripts/docdb.sh
 
+$docdb suite pin --sha <commit>
+$docdb suite update
+CONNECTION_STRING=... $docdb test --all --results-dir /tmp/rebase
+$docdb xfail reconcile --report /tmp/rebase/report.json --prune-uncollected
+```
+
+A CI run publishes one report per leg (`functional-test-results-<tag>`
+artifacts). Combine them first, because `--prune-uncollected` is only valid on
+a full-suite report; on a single leg's report it would prune every other leg's
+entries:
+
+```bash
+$docdb xfail combine --out combined.json p0/report.json p1/report.json ... np/report.json
+$docdb xfail reconcile --report combined.json --prune-uncollected
+```
+
+Both wrap `tools/functional_gate.py` (`merge-reports` and `reconcile`), which
+remains callable directly:
+
+```bash
 python3 documentdb-local/functional-tests/tools/functional_gate.py reconcile \
   --report combined.json \
   --failing config/oss_ci_failing_tests.txt \
   --flaky   config/oss_ci_flaky_tests.txt \
   --prune-uncollected
 ```
-
-(`--prune-uncollected` is only valid on a full-suite report — never reconcile a
-single leg's report with it, or every other leg's entries would be pruned.)
 
 `reconcile` adds new failures, drops `XPASS(strict)` entries, prunes deleted
 tests, preserves comments/prefix style, and flags anything needing a human
