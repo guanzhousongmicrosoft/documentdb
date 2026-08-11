@@ -364,6 +364,62 @@ else
        "build --target image still fails when the ungated smoke suite reports gaps"
 fi
 
+# ---------------------------------------------------------------------------
+# T21: the endpoint is unpacked field by field. A whitespace-delimited read
+# mangles two real cases: an empty password lets the port slide into the
+# password slot (so the "no password" guard passes and CONN_PORT ends up
+# empty), and a password containing a space splits across password and port.
+# Both would surface as a confusing failure inside the runner.
+# ---------------------------------------------------------------------------
+SPACE_PASS_URI="mongodb://${CS_USER}:pw%20with%20space@${CS_HOST}/?tls=true"
+run_sut test --all --split-total 1 --connection-string "${SPACE_PASS_URI}" \
+  --results-dir "${WORK}/r21"
+if grep -q '^CONN_PASS=pw with space$' "${SUT_RECORD}" && grep -q '^CONN_PORT=10260$' "${SUT_RECORD}"; then
+  pass "T21a a password containing a space survives unpacking"
+else
+  fail "T21a a password containing a space survives unpacking" \
+       "$(grep -E '^CONN_(PASS|PORT)=' "${SUT_RECORD}" | tr '\n' ' ')"
+fi
+
+# An empty password must trip the guard, not be silently replaced by the port.
+run_sut test --all --split-total 1 \
+  --connection-string "mongodb://${CS_USER}@${CS_HOST}/?tls=true" \
+  --results-dir "${WORK}/r21b"
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'no password'; then
+  pass "T21b an empty password is rejected, not filled in from the port"
+else
+  fail "T21b an empty password is rejected" "exit ${SUT_RC}: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T22: clearing leg directories is `rm -rf` inside a caller-chosen path, so it
+# must only happen in a directory this command owns. A non-empty directory with
+# no marker is refused rather than pattern-matched, because a caller could
+# plausibly point --results-dir at a tree that already contains np or p1.
+# ---------------------------------------------------------------------------
+FOREIGN="${WORK}/foreign-results"
+mkdir -p "${FOREIGN}/p1"
+echo "someone else's data" > "${FOREIGN}/p1/precious.txt"
+run_sut test --all --split-total 1 --connection-string "${CS}" --results-dir "${FOREIGN}"
+if [ "${SUT_RC}" -ne 0 ] && [ -f "${FOREIGN}/p1/precious.txt" ]; then
+  pass "T22a a foreign non-empty results dir is refused, and its contents survive"
+else
+  fail "T22a a foreign results dir is refused" \
+       "exit ${SUT_RC}, precious.txt present: $([ -f "${FOREIGN}/p1/precious.txt" ] && echo yes || echo NO)"
+fi
+
+# An empty directory is adopted, and a re-run then clears its own legs.
+ADOPT="${WORK}/adopt-results"
+mkdir -p "${ADOPT}"
+run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${ADOPT}"
+run_sut test --all --split-total 1 --connection-string "${CS}" --results-dir "${ADOPT}"
+if [ -f "${ADOPT}/.docdb-results" ] && [ ! -d "${ADOPT}/p1" ]; then
+  pass "T22b an empty results dir is adopted and its own legs are cleared on re-run"
+else
+  fail "T22b an empty results dir is adopted and cleared" \
+       "marker: $([ -f "${ADOPT}/.docdb-results" ] && echo yes || echo no), stale p1: $([ -d "${ADOPT}/p1" ] && echo yes || echo no)"
+fi
+
 echo
 if [ "${FAILS}" -eq 0 ]; then
   echo "all parity tests passed"

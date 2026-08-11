@@ -167,19 +167,45 @@ cmd_test() {
 
     # run_pytest_split.sh takes the endpoint as user/pass/port, so unpack the
     # connection string rather than asking for it twice.
+    #
+    # One field per line, read one at a time: a single whitespace-delimited
+    # `read -r u p prt` silently mangles two real cases. With an empty password
+    # the port slides into the password slot (so the guard below passes and
+    # CONN_PORT ends up empty), and a password containing a space splits across
+    # the password and port fields. Both produce a confusing failure deep inside
+    # the runner rather than here.
     local u p prt
-    read -r u p prt < <(python3 - "${CONN}" <<'PY'
+    { read -r u; read -r p; read -r prt; } < <(python3 - "${CONN}" <<'PY'
 import sys
 from urllib.parse import unquote, urlsplit
 q = urlsplit(sys.argv[1])
-print(unquote(q.username or 'documentdb'), unquote(q.password or ''), q.port or 10260)
+print(unquote(q.username or 'documentdb'))
+print(unquote(q.password or ''))
+print(q.port or 10260)
 PY
 )
     [ -n "${p}" ] || die "connection string has no password; run_pytest_split.sh needs user, password and port"
+    [ -n "${prt}" ] || die "connection string has no port"
 
     RESULTS_DIR="${RESULTS_DIR:-${ROOT}/local-gate-results}"
     local TMP_BASE="${RESULTS_DIR}/.tmp"
-    mkdir -p "${RESULTS_DIR}" "${TMP_BASE}" || die "cannot create ${RESULTS_DIR}"
+    local marker="${RESULTS_DIR}/.docdb-results"
+    mkdir -p "${RESULTS_DIR}" || die "cannot create ${RESULTS_DIR}"
+
+    # Clearing leg directories means `rm -rf` inside a path the caller chose, so
+    # only ever do it in a directory this command owns. A directory is ours if
+    # it carries the marker, or if it is empty and we are about to adopt it.
+    # Anything else is refused rather than pattern-matched: a caller could
+    # plausibly point --results-dir at a tree that already has a directory named
+    # np or p1, and losing it would be unforgivable for a test runner.
+    if [ ! -e "${marker}" ]; then
+      if [ -n "$(ls -A "${RESULTS_DIR}" 2>/dev/null)" ]; then
+        die "${RESULTS_DIR} is not empty and was not created by docdb (no .docdb-results marker). Point --results-dir at a new or empty directory."
+      fi
+      : > "${marker}" || die "cannot write ${marker}"
+    fi
+
+    mkdir -p "${TMP_BASE}" || die "cannot create ${TMP_BASE}"
     # Clear every leg dir, not just this run's: a leftover leg from a wider run
     # would otherwise be read as part of this run's evidence.
     local stale
