@@ -405,7 +405,21 @@ if [ -z "$RESULTS_DIR" ]; then
     RESULTS_DIR="$REPO_ROOT/.test-results/functional-tests/$MODE"
 fi
 
-IMAGE=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["image"])' "$IMAGE_YML")
+# The suite image is DERIVED from the pinned commit rather than recorded
+# separately: config/image.yml names one commit, upstream publishes one image
+# per commit as sha-<short7>, and deriving the reference is what guarantees the
+# image executed here holds the same suite that setup_functional_tests.sh
+# checks out and that CI runs. A second recorded reference could name a
+# different version while every status line still looked consistent.
+#
+# docdb.sh reproduces this formula for `suite status`; tests/test_docdb.sh
+# asserts the two stay identical.
+SUITE_SHA=$(awk '/^source_sha:/ {print $2; exit}' "$IMAGE_YML")
+if [ -z "$SUITE_SHA" ]; then
+    echo "No source_sha found in $IMAGE_YML"
+    exit 1
+fi
+IMAGE="${FUNCTIONAL_TESTS_IMAGE_REPO:-ghcr.io/documentdb/functional-tests}:sha-${SUITE_SHA:0:7}"
 mkdir -p "$RESULTS_DIR"
 chmod 777 "$RESULTS_DIR"
 trap cleanup_managed_documentdb EXIT

@@ -311,12 +311,12 @@ run_sut suite pin --sha 1111111
 changed=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep -c '^[<>]')
 # schema_version and source_ref describe the pin's shape and origin, not which
 # revision is pinned, so a version bump must leave them alone.
-only_expected=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep '^[<>]' | grep -cvE 'source_sha|updated_by|^[<>] image:')
+only_expected=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep '^[<>]' | grep -cvE 'source_sha|updated_by')
 cp "${WORK}/image.yml.bak" "${CONFIG}/image.yml"
 if [ "${changed}" -gt 0 ] && [ "${only_expected}" -eq 0 ]; then
-  pass "T15b suite pin rewrites only source_sha, image and updated_by"
+  pass "T15b suite pin rewrites only source_sha and updated_by"
 else
-  fail "T15b suite pin rewrites only source_sha, image and updated_by" "${only_expected} unexpected line(s) changed"
+  fail "T15b suite pin rewrites only source_sha and updated_by" "${only_expected} unexpected line(s) changed"
 fi
 
 # ---------------------------------------------------------------------------
@@ -624,56 +624,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T34: image.yml pins the suite twice and the two pins drive different runs:
-# the image is what gate/full/single/smoke execute, source_sha is what the
-# split legs and CI execute. `pin` must move BOTH, or a local gate silently
-# answers a different question than CI while status still reads "in sync".
+# T34: config/image.yml must pin exactly one thing. A second recorded reference
+# to the same suite is what allowed the image and the checkout to name
+# different versions while every status line still read "in sync".
 # ---------------------------------------------------------------------------
-REG_STUB="${WORK}/reg_stub.sh"
+if grep -qE '^image:' "${CONFIG}/image.yml"; then
+  fail "T34 config/image.yml records only the commit" \
+       "an image: field is back; the image must be derived from source_sha so the two cannot disagree"
+elif grep -qE '^source_sha:' "${CONFIG}/image.yml"; then
+  pass "T34 config/image.yml records only the commit"
+else
+  fail "T34 config/image.yml records only the commit" "no source_sha line found"
+fi
+
+# ---------------------------------------------------------------------------
+# T35: docdb.sh and run-functional-tests.sh both derive the image reference and
+# the runner cannot source docdb.sh, so the formula is written twice. If the two
+# drift, `suite status` reports on an image the runner never executes, which is
+# the same failure the single pin was introduced to remove.
+# ---------------------------------------------------------------------------
+RUNNER_FORMULA=$(grep -oE 'IMAGE="\$\{FUNCTIONAL_TESTS_IMAGE_REPO:-[^}]+\}:sha-\$\{SUITE_SHA:0:7\}"' "${RUNNER}" | head -1)
+RUNNER_REPO=$(printf '%s' "${RUNNER_FORMULA}" | sed -E 's/.*:-([^}]+)\}.*/\1/')
+DOCDB_REPO=$(cd "${ROOT}" && bash -c '
+  IMAGE_YML='"${CONFIG}"'/image.yml
+  eval "$(sed -n "/^SUITE_REGISTRY=/p;/^SUITE_IMAGE_REPO=/p" '"${SUT}"')"
+  printf "%s/%s" "${SUITE_REGISTRY}" "${SUITE_IMAGE_REPO}"')
+if [ -z "${RUNNER_FORMULA}" ]; then
+  fail "T35 both scripts derive the same image reference" \
+       "run-functional-tests.sh no longer derives IMAGE from source_sha (formula not found)"
+elif [ "${RUNNER_REPO}" = "${DOCDB_REPO}" ]; then
+  pass "T35 both scripts derive the same image reference (${DOCDB_REPO}:sha-<short7>)"
+else
+  fail "T35 both scripts derive the same image reference" \
+       "runner uses '${RUNNER_REPO}', docdb uses '${DOCDB_REPO}'"
+fi
+
+# The derived reference must also be exactly what `suite status` reports, so a
+# developer reading status sees the image the runner will actually pull.
+PIN_NOW="$(awk '/^source_sha:/ {print $2; exit}' "${CONFIG}/image.yml")"
+WANT_REF="${DOCDB_REPO}:sha-${PIN_NOW:0:7}"
+ST=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
+if printf '%s' "${ST}" | grep -qF "${WANT_REF}"; then
+  pass "T35b suite status reports the derived reference (${WANT_REF})"
+else
+  fail "T35b suite status reports the derived reference" \
+       "expected ${WANT_REF} in: ${ST}"
+fi
+
+# ---------------------------------------------------------------------------
+# T36: a commit upstream never published has no image, so gate/full/single and
+# smoke could not run. pin must refuse it, and must not half-write the file.
+# ---------------------------------------------------------------------------
 IMAGE_YML_BACKUP="${WORK}/image.yml.bak"
-cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
-PIN_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" \
-  bash "${SUT}" suite pin --sha 1111111 2>&1)
-NEW_SHA=$(grep -E '^source_sha:' "${CONFIG}/image.yml" | awk '{print $2}')
-NEW_IMG=$(grep -E '^image:' "${CONFIG}/image.yml" | awk '{print $2}')
-cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
-if [ "${NEW_SHA}" = "1111111111111111111111111111111111111111" ] && \
-   [[ "${NEW_IMG}" == *"@sha256:deadbeef"* ]]; then
-  pass "T34 suite pin moves both source_sha and the image digest together"
-else
-  fail "T34 suite pin moves both source_sha and the image digest together" \
-       "after pin: source_sha=${NEW_SHA} image=${NEW_IMG}"
-fi
-
-# ---------------------------------------------------------------------------
-# T35: the two pins can be checked against each other, because the published
-# image records its own commit in org.opencontainers.image.revision. status
-# must fail when they disagree; otherwise the drift T34 prevents is invisible
-# when image.yml is edited by hand.
-# ---------------------------------------------------------------------------
-cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
-python3 - "${CONFIG}/image.yml" <<'PY'
-import re, sys
-p = sys.argv[1]
-t = open(p, encoding='utf-8').read()
-t = re.sub(r'(?m)^source_sha:.*$', 'source_sha: 2222222222222222222222222222222222222222', t)
-open(p, 'w', encoding='utf-8', newline='\n').write(t)
-PY
-ST_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
-ST_RC=$?
-cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
-if [ "${ST_RC}" -ne 0 ] && printf '%s' "${ST_OUT}" | grep -q 'image state: MISMATCH'; then
-  pass "T35 suite status fails when the image was not built from source_sha"
-else
-  fail "T35 suite status fails when the image was not built from source_sha" \
-       "rc=${ST_RC}, output did not report a mismatch: ${ST_OUT}"
-fi
-
-# ---------------------------------------------------------------------------
-# T36: a registry failure must not leave image.yml half-written, and must say
-# why. An empty reason (the lookup writes to stderr, command substitution
-# captures stdout) is what this guards.
-# ---------------------------------------------------------------------------
 cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
 FAIL_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" \
   bash "${SUT}" suite pin --ref missing 2>&1)
@@ -681,15 +683,15 @@ UNCHANGED=0
 diff -q "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml" >/dev/null 2>&1 && UNCHANGED=1
 cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
 if [ "${UNCHANGED}" = 1 ] && printf '%s' "${FAIL_OUT}" | grep -qE 'ERROR: .*404'; then
-  pass "T36 a failed lookup reports the reason and leaves image.yml untouched"
+  pass "T36 pin refuses a commit with no published image, leaving image.yml untouched"
 else
-  fail "T36 a failed lookup reports the reason and leaves image.yml untouched" \
+  fail "T36 pin refuses a commit with no published image, leaving image.yml untouched" \
        "unchanged=${UNCHANGED}, output: ${FAIL_OUT}"
 fi
 
 # ---------------------------------------------------------------------------
-# T37: exactly one of --sha / --ref / --image. Accepting two would leave which
-# one wins up to argument order.
+# T37: exactly one of --sha / --ref. Accepting both would leave which one wins
+# up to argument order.
 # ---------------------------------------------------------------------------
 T37_OK=1
 for args in "" "--sha 1111111 --ref main"; do
@@ -698,9 +700,9 @@ for args in "" "--sha 1111111 --ref main"; do
   printf '%s' "${OUT}" | grep -q 'exactly one of' || T37_OK=0
 done
 if [ "${T37_OK}" = 1 ]; then
-  pass "T37 suite pin requires exactly one of --sha / --ref / --image"
+  pass "T37 suite pin requires exactly one of --sha / --ref"
 else
-  fail "T37 suite pin requires exactly one of --sha / --ref / --image" \
+  fail "T37 suite pin requires exactly one of --sha / --ref" \
        "zero or two selectors were accepted"
 fi
 IMAGE_YML_BACKUP=""

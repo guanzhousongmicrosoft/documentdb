@@ -101,24 +101,33 @@ EOF
 # suite: the functional-tests checkout and its pin
 # =============================================================================
 pinned_sha()   { awk '/^source_sha:/ {print $2; exit}' "${IMAGE_YML}" 2>/dev/null; }
-pinned_image() { awk '/^image:/ {print $2; exit}' "${IMAGE_YML}" 2>/dev/null; }
 local_sha()    { git -C "${SUITE_DIR}" rev-parse HEAD 2>/dev/null; }
 
 SUITE_REGISTRY="${DOCDB_SUITE_REGISTRY:-ghcr.io}"
 SUITE_IMAGE_REPO="${DOCDB_SUITE_IMAGE_REPO:-documentdb/functional-tests}"
 
-# image.yml carries TWO pins of the same suite and they drive different runs:
+# config/image.yml names ONE thing: the suite commit. Both ways of running the
+# suite are derived from it.
 #
-#   image:      the published suite image. run-functional-tests.sh executes
-#               pytest inside it, so it decides what gate/full/single/smoke run.
-#   source_sha: the suite commit. setup_functional_tests.sh checks it out
-#               host-side, so it decides what the split legs run, which is what
-#               CI runs.
+#   host checkout   setup_functional_tests.sh clones that commit. The split legs
+#                   run from it, and so does CI.
+#   suite image     run-functional-tests.sh resolves the image upstream
+#                   publishes for that commit, tagged sha-<short7>. gate, full,
+#                   single and smoke run inside it.
 #
-# Moving one without the other makes a local gate answer a different question
-# than CI while every status line still reads "in sync". The published image
-# records its own commit in org.opencontainers.image.revision, so the two are
-# checkable against each other; that label is the tie-breaker everywhere below.
+# Deriving both is the point. When the image was recorded as a second field it
+# could name a different suite version than source_sha, so a local gate answered
+# a different question than CI while every status line still read "in sync".
+# There is now nothing to disagree with.
+#
+# This formula is duplicated in run-functional-tests.sh, which cannot source
+# this file; tests/test_docdb.sh asserts the two stay identical.
+derived_image() {
+  local sha="${1:-$(pinned_sha)}"
+  [ -n "${sha}" ] || return 1
+  printf '%s/%s:sha-%s' "${SUITE_REGISTRY}" "${SUITE_IMAGE_REPO}" "${sha:0:7}"
+}
+
 _registry_lookup() {  # $1 = tag or digest -> prints digest then revision
   # Overridable so the parity tests can exercise the pin and drift logic without
   # a network round trip, the same way DOCDB_SPLIT_SH stubs the run.
@@ -170,18 +179,15 @@ print(labels.get("org.opencontainers.image.revision", ""))
 PY
 }
 
-# Split "registry/repo@sha256:..." into just the digest.
-_image_digest() { local ref="${1:-}"; case "${ref}" in *@*) printf '%s' "${ref##*@}" ;; *) printf '' ;; esac; }
-
 cmd_suite() {
   local sub="${1:-status}"; shift || true
   case "${sub}" in
     status)
-      local pin loc img dig
-      pin="$(pinned_sha)"; loc="$(local_sha)"; img="$(pinned_image)"; dig="$(_image_digest "${img}")"
+      local pin loc img
+      pin="$(pinned_sha)"; loc="$(local_sha)"; img="$(derived_image)"
       echo "pinned   (config/image.yml source_sha): ${pin:-<none>}"
       echo "checkout (${SUITE_DIR}): ${loc:-<not a checkout>}"
-      echo "image    (config/image.yml image):      ${dig:-<none>}"
+      echo "image    (derived from source_sha):     ${img:-<none>}"
 
       local rc=0
       if [ -z "${loc}" ]; then
@@ -192,29 +198,32 @@ cmd_suite() {
         echo "checkout state: in sync"
       fi
 
-      # The checkout comparison above only proves the split legs are current.
-      # The image is what gate/full/single/smoke actually execute, so verify it
-      # was built from the same commit. Offline is not a failure: report that it
-      # could not be checked rather than inventing a verdict.
-      if [ -z "${dig}" ]; then
-        warn "config/image.yml has no image digest to verify"
+      # The image reference cannot name a different commit than source_sha, so
+      # the only remaining question is whether upstream actually published one
+      # for this commit. A commit with no image leaves gate/full/single/smoke
+      # unable to run at all, which is worth knowing before a run rather than
+      # from a docker pull failure mid-suite. Offline is not a failure: report
+      # that it could not be checked rather than inventing a verdict.
+      if [ -z "${pin}" ]; then
+        warn "config/image.yml has no source_sha"
+        rc=1
       else
         local out revision
-        if out="$(_registry_lookup "${dig}" 2>&1)"; then
+        if out="$(_registry_lookup "sha-${pin:0:7}" 2>&1)"; then
           revision="$(printf '%s\n' "${out}" | sed -n 2p)"
           if [ -z "${revision}" ]; then
-            warn "the pinned image carries no org.opencontainers.image.revision label; cannot verify it matches source_sha"
+            echo "image state: published (carries no revision label to cross-check)"
           elif [ "${revision}" = "${pin}" ]; then
-            echo "image state: in sync (built from ${revision:0:12})"
+            echo "image state: published, built from ${revision:0:12}"
           else
+            # Only reachable if upstream moved a per-commit tag onto other
+            # content, which would be an upstream integrity problem.
             echo "image state: MISMATCH"
-            err "the pinned image was built from ${revision:0:12} but source_sha says ${pin:0:12}."
-            err "gate/full/single/smoke run the image, split legs and CI run source_sha, so they would test different suites."
-            err "fix with: docdb suite pin --sha ${pin}"
+            err "tag sha-${pin:0:7} resolves to an image built from ${revision:0:12}, not ${pin:0:12}."
             rc=1
           fi
         else
-          warn "could not verify the image against the registry: ${out}"
+          warn "could not check the image against the registry: ${out}"
         fi
       fi
       return "${rc}"
@@ -226,69 +235,57 @@ cmd_suite() {
       cmd_suite status
       ;;
     pin)
-      local sha="" ref="" digest=""
+      local sha="" ref=""
       while [ $# -gt 0 ]; do
         case "$1" in
-          --sha)   need_arg "$1" $#; sha="$2"; shift 2 ;;
-          --ref)   need_arg "$1" $#; ref="$2"; shift 2 ;;
-          --image) need_arg "$1" $#; digest="$2"; shift 2 ;;
+          --sha) need_arg "$1" $#; sha="$2"; shift 2 ;;
+          --ref) need_arg "$1" $#; ref="$2"; shift 2 ;;
           *) die "unknown option for 'suite pin': $1" ;;
         esac
       done
-      local given=0
-      [ -n "${sha}" ] && given=$((given+1))
-      [ -n "${ref}" ] && given=$((given+1))
-      [ -n "${digest}" ] && given=$((given+1))
-      [ "${given}" -eq 1 ] || die "give exactly one of --sha <commit>, --ref <tag> or --image <digest>"
+      if { [ -n "${sha}" ] && [ -n "${ref}" ]; } || { [ -z "${sha}" ] && [ -z "${ref}" ]; }; then
+        die "give exactly one of --sha <commit> or --ref <tag>"
+      fi
 
-      # All three forms converge on one (digest, revision) pair read from the
-      # registry, so the two fields written below can never disagree.
       local lookup
       if [ -n "${sha}" ]; then
         [[ "${sha}" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "--sha must be a hex commit id (got '${sha}')"
         lookup="sha-${sha:0:7}"
-      elif [ -n "${ref}" ]; then
-        lookup="${ref}"
       else
-        case "${digest}" in sha256:*) ;; *) die "--image must be a digest like sha256:... (got '${digest}')" ;; esac
-        lookup="${digest}"
+        lookup="${ref}"
       fi
 
+      # Resolving before writing is what makes the single pin safe: a commit
+      # upstream never published has no image, and gate/full/single/smoke could
+      # not run. Fail here rather than at test time.
       info "resolving ${lookup} in ${SUITE_REGISTRY}/${SUITE_IMAGE_REPO}"
-      local out new_digest new_sha
+      local out new_sha
       # 2>&1: the lookup reports why it failed on stderr, and without folding it
       # in, `die "${out}"` prints an empty reason for every registry error.
       out="$(_registry_lookup "${lookup}" 2>&1)" || die "${out}"
-      new_digest="$(printf '%s\n' "${out}" | sed -n 1p)"
       new_sha="$(printf '%s\n' "${out}" | sed -n 2p)"
-      [ -n "${new_digest}" ] || die "the registry returned no digest for ${lookup}"
-      [ -n "${new_sha}" ] || die "the image for ${lookup} carries no org.opencontainers.image.revision label, so source_sha cannot be derived. Publish a labelled image, or edit config/image.yml by hand."
+      [ -n "${new_sha}" ] || die "the image for ${lookup} carries no org.opencontainers.image.revision label, so the commit cannot be confirmed. Pin with --sha <commit> if you are sure."
 
       # Trust the label over the tag. A tag can be moved; the label is baked in
       # at build time and is the only statement of what the image contains.
       if [ -n "${sha}" ] && [ "${new_sha}" != "${sha}" ] && [ "${new_sha:0:${#sha}}" != "${sha}" ]; then
-        die "tag ${lookup} resolves to an image built from ${new_sha}, not ${sha}. Pin by --image <digest> if that is deliberate."
+        die "tag ${lookup} resolves to an image built from ${new_sha}, not ${sha}."
       fi
 
-      local old_sha old_img
-      old_sha="$(pinned_sha)"; old_img="$(_image_digest "$(pinned_image)")"
-      if [ "${new_sha}" = "${old_sha}" ] && [ "${new_digest}" = "${old_img}" ]; then
+      local old_sha; old_sha="$(pinned_sha)"
+      if [ "${new_sha}" = "${old_sha}" ]; then
         info "already pinned there; nothing to do"
         return 0
       fi
 
-      python3 - "${IMAGE_YML}" "${new_sha}" "${new_digest}" "${SUITE_REGISTRY}/${SUITE_IMAGE_REPO}" \
-               "$(git config user.email 2>/dev/null || true)" <<'PY'
+      python3 - "${IMAGE_YML}" "${new_sha}" "$(git config user.email 2>/dev/null || true)" <<'PY'
 import re, sys
-path, sha, digest, repo = sys.argv[1:5]
-who = (sys.argv[5] if len(sys.argv) > 5 else '').split('@')[0].strip()
+path, sha = sys.argv[1], sys.argv[2]
+who = (sys.argv[3] if len(sys.argv) > 3 else '').split('@')[0].strip()
 text = open(path, encoding='utf-8').read()
 text, n = re.subn(r'(?m)^source_sha:.*$', f'source_sha: {sha}', text)
 if n != 1:
     sys.exit(f"expected exactly one source_sha line in {path}, found {n}")
-text, n = re.subn(r'(?m)^image:.*$', f'image: {repo}@{digest}', text)
-if n != 1:
-    sys.exit(f"expected exactly one image line in {path}, found {n}")
 # Only claim authorship when git actually knows who this is; overwriting a real
 # name with a placeholder loses information the file is meant to carry.
 if who:
@@ -297,7 +294,7 @@ open(path, 'w', encoding='utf-8', newline='\n').write(text)
 PY
       [ $? -eq 0 ] || die "failed to update ${IMAGE_YML}"
       info "source_sha: ${old_sha:0:12} -> ${new_sha:0:12}"
-      info "image:      ${old_img:0:19} -> ${new_digest:0:19}"
+      info "image:      $(derived_image "${new_sha}")"
       info "next: docdb suite update"
       info "      docdb test --all --results-dir /tmp/rebase"
       info "      docdb xfail reconcile --report /tmp/rebase/report.json --prune-uncollected"
@@ -307,18 +304,17 @@ PY
 docdb suite <status|update|pin>
 
   status              Compare the pinned commit against the local checkout, and
-                      verify the pinned image was built from that same commit.
+                      confirm an image was published for that commit.
   update              Fetch the checkout at the pinned commit. Removes the
                       existing directory first.
   pin --sha <commit>  Move the pin to a suite commit.
       --ref <tag>     Move it to whatever a tag publishes now (e.g. main).
-      --image <sha256:...>
-                      Move it to an exact image digest.
 
-image.yml pins the suite twice, and both must move together: the image is what
-gate/full/single/smoke execute, while source_sha is what the split legs and CI
-execute. `pin` resolves one against the registry and writes both, so they cannot
-drift apart. The commit is taken from the image's own
+config/image.yml pins ONE thing: the suite commit. The host checkout and the
+suite image are both derived from it, so they cannot name different versions.
+pin resolves the commit against the registry before writing, because a commit
+with no published image would leave gate/full/single/smoke unable to run. With
+--ref, the commit is taken from the image's own
 org.opencontainers.image.revision label rather than from the tag, because a tag
 can be moved and the label cannot.
 EOF

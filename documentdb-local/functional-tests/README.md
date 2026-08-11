@@ -24,7 +24,7 @@ scripts/   docdb.sh: the entry point (test / suite / xfail / build / env /
            run-functional-tests.sh: single-engine runner;
            run_pytest_split.sh: one CI matrix leg (slice + gate), used by
            .github/workflows/functional_tests.yml.
-config/    Pinned upstream image + source_sha (image.yml); the OSS gateway's
+config/    Suite commit pin (image.yml); the OSS gateway's
            failing/flaky pair (oss_ci_failing_tests.txt, oss_ci_flaky_tests.txt),
            the engine-level crash skip list (ci_crash_tests.txt), and pytest
            args (oss_pytest.args).
@@ -49,11 +49,11 @@ $docdb help              # all commands
 $docdb test --help       # options for one command
 ```
 
-The suite version is pinned by `image:` and `source_sha:` in `config/image.yml`;
-see [Update the baseline](#update-the-baseline-suite-version-bump-or-after-a-fix)
-for why both exist and how to move them. Each gateway maintains its own
-failing/flaky pair; the OSS pair here is calibrated for the documentdb-local
-(OSS gateway) environment.
+The suite version is pinned by `source_sha` in `config/image.yml`, and both the
+host checkout and the suite image are derived from it; see
+[Update the baseline](#update-the-baseline-suite-version-bump-or-after-a-fix)
+for how to move it. Each gateway maintains its own failing/flaky pair; the OSS
+pair here is calibrated for the documentdb-local (OSS gateway) environment.
 
 ## The CI gate: full suite, split across matrix legs
 
@@ -149,30 +149,28 @@ The gate prints the residual failures (`gate-failures.txt`). Each is either:
 
 ## Update the baseline (suite version bump or after a fix)
 
-`config/image.yml` pins the suite **twice**, and the two pins drive different
-runs:
+`config/image.yml` pins **one** thing: the suite commit. Both ways of running
+the suite are derived from it, so they cannot name different versions.
 
-| Field | Consumed by | Decides what runs for |
+| Derived | How | Used by |
 |---|---|---|
-| `image:` | `run-functional-tests.sh` (`docker run <image>`) | `gate`, `full`, `single`, `smoke` |
-| `source_sha:` | `setup_functional_tests.sh` (host checkout) | the split legs, and CI |
+| host checkout | `setup_functional_tests.sh` clones that commit | the split legs, and CI |
+| suite image | `ghcr.io/documentdb/functional-tests:sha-<short7>` | `gate`, `full`, `single`, `smoke` |
 
-Moving one without the other makes a local gate answer a different question than
-CI. `docdb suite pin` therefore resolves one against the registry and writes
-both, taking the commit from the image's own
+`docdb suite pin` resolves the commit against the registry before writing,
+because a commit upstream never published has no image and the single-engine
+modes could not run. With `--ref` the commit is taken from the image's own
 `org.opencontainers.image.revision` label rather than from the tag, because a
-tag can be moved and the label cannot. `docdb suite status` re-checks that
-agreement, so a hand-edited `image.yml` is caught too.
+tag can be moved and the label cannot.
 
 ```bash
 docdb=documentdb-local/functional-tests/scripts/docdb.sh
 
 $docdb suite pin --ref main        # whatever upstream main publishes now
 $docdb suite pin --sha <commit>    # a specific suite commit
-$docdb suite pin --image sha256:.. # an exact image digest
 
 $docdb suite update                # refresh the host checkout to match
-$docdb suite status                # both pins agree, and the checkout matches
+$docdb suite status                # checkout matches, and an image exists
 ```
 
 Then re-run the suite and fold the result back into the lists:

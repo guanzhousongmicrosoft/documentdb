@@ -552,10 +552,16 @@ def compare_engines(report_a_path: str, report_b_path: str,
                     engine_a: str, engine_b: str,
                     image_path: str = "") -> dict:
     """Compare pytest JSON reports from two engines and classify differences."""
+    # image.yml pins the suite commit and nothing else; the image reference is
+    # derived from it the same way run-functional-tests.sh derives it, so this
+    # provenance line cannot name a different version than the run used.
     image = ""
     if image_path and os.path.exists(image_path):
-        image_data = load_yaml(image_path)
-        image = image_data.get("image", "")
+        sha = str(load_yaml(image_path).get("source_sha", "") or "")
+        if sha:
+            repo = os.environ.get("FUNCTIONAL_TESTS_IMAGE_REPO",
+                                  "ghcr.io/documentdb/functional-tests")
+            image = f"{repo}:sha-{sha[:7]}"
 
     with open(report_a_path) as f:
         report_a = json.load(f)
