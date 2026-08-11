@@ -49,9 +49,11 @@ $docdb help              # all commands
 $docdb test --help       # options for one command
 ```
 
-The suite version is pinned by `source_sha` in `config/image.yml`. Each gateway
-maintains its own failing/flaky pair; the OSS pair here is calibrated for the
-documentdb-local (OSS gateway) environment.
+The suite version is pinned by `image:` and `source_sha:` in `config/image.yml`;
+see [Update the baseline](#update-the-baseline-suite-version-bump-or-after-a-fix)
+for why both exist and how to move them. Each gateway maintains its own
+failing/flaky pair; the OSS pair here is calibrated for the documentdb-local
+(OSS gateway) environment.
 
 ## The CI gate: full suite, split across matrix legs
 
@@ -145,16 +147,37 @@ The gate prints the residual failures (`gate-failures.txt`). Each is either:
 - **XPASS(strict)** — a listed expected-failure now passes: remove it from the
   failing list (the baseline improved).
 
-## Update the baseline (source_sha bump or after a fix)
+## Update the baseline (suite version bump or after a fix)
 
-Move the pin, refresh the checkout, run the suite, then fold the result back
-into the lists:
+`config/image.yml` pins the suite **twice**, and the two pins drive different
+runs:
+
+| Field | Consumed by | Decides what runs for |
+|---|---|---|
+| `image:` | `run-functional-tests.sh` (`docker run <image>`) | `gate`, `full`, `single`, `smoke` |
+| `source_sha:` | `setup_functional_tests.sh` (host checkout) | the split legs, and CI |
+
+Moving one without the other makes a local gate answer a different question than
+CI. `docdb suite pin` therefore resolves one against the registry and writes
+both, taking the commit from the image's own
+`org.opencontainers.image.revision` label rather than from the tag, because a
+tag can be moved and the label cannot. `docdb suite status` re-checks that
+agreement, so a hand-edited `image.yml` is caught too.
 
 ```bash
 docdb=documentdb-local/functional-tests/scripts/docdb.sh
 
-$docdb suite pin --sha <commit>
-$docdb suite update
+$docdb suite pin --ref main        # whatever upstream main publishes now
+$docdb suite pin --sha <commit>    # a specific suite commit
+$docdb suite pin --image sha256:.. # an exact image digest
+
+$docdb suite update                # refresh the host checkout to match
+$docdb suite status                # both pins agree, and the checkout matches
+```
+
+Then re-run the suite and fold the result back into the lists:
+
+```bash
 CONNECTION_STRING=... $docdb test --all --results-dir /tmp/rebase
 $docdb xfail reconcile --report /tmp/rebase/report.json --prune-uncollected
 ```

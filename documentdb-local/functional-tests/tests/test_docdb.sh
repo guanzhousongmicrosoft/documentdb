@@ -65,12 +65,24 @@ exit "${STUB_RC:-0}"
 STUBEOF
 chmod +x "${STUB}"
 
+# --- stub for the registry lookup: resolves any ref to one fixed pair --------
+# Keeps the pin and drift cases hermetic; a ref named 'missing' fails like a 404.
+REG_STUB="${WORK}/reg_stub.sh"
+cat > "${REG_STUB}" <<'REGEOF'
+#!/bin/bash
+[ "$1" = missing ] && { echo "'missing' not found (HTTP 404)" >&2; exit 1; }
+echo "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+echo "1111111111111111111111111111111111111111"
+REGEOF
+chmod +x "${REG_STUB}"
+
 run_sut() {  # rest = args ; publishes SUT_OUT, SUT_RC, SUT_RECORD
   SUT_RECORD="${WORK}/record.$$.${RANDOM}"
   : > "${SUT_RECORD}"
   SUT_OUT=$(cd "${ROOT}" && \
     DOCDB_SPLIT_SH="${STUB}" STUB_RECORD="${SUT_RECORD}" \
     STUB_RC="${STUB_RC:-0}" STUB_MESSAGE="${STUB_MESSAGE:-}" \
+    DOCDB_REGISTRY_LOOKUP="${REG_STUB}" \
     DOCDB_SUITE_DIR="${FAKE_SUITE}" CONNECTION_STRING="" \
     bash "${SUT}" "$@" 2>&1)
   SUT_RC=$?
@@ -284,7 +296,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T15: suite pin validates its argument and rewrites only source_sha.
+# T15: suite pin validates its argument and rewrites only the pin fields.
 # ---------------------------------------------------------------------------
 run_sut suite pin --sha "not-a-sha"
 if [ "${SUT_RC}" -ne 0 ]; then
@@ -295,14 +307,16 @@ fi
 
 cp "${CONFIG}/image.yml" "${WORK}/image.yml.bak"
 IMAGE_YML_BACKUP="${WORK}/image.yml.bak"   # restored from the trap on any exit
-run_sut suite pin --sha 1234567890abcdef1234567890abcdef12345678
+run_sut suite pin --sha 1111111
 changed=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep -c '^[<>]')
-only_expected=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep '^[<>]' | grep -cvE 'source_sha|updated_by')
+# schema_version and source_ref describe the pin's shape and origin, not which
+# revision is pinned, so a version bump must leave them alone.
+only_expected=$(diff "${WORK}/image.yml.bak" "${CONFIG}/image.yml" | grep '^[<>]' | grep -cvE 'source_sha|updated_by|^[<>] image:')
 cp "${WORK}/image.yml.bak" "${CONFIG}/image.yml"
 if [ "${changed}" -gt 0 ] && [ "${only_expected}" -eq 0 ]; then
-  pass "T15b suite pin rewrites only source_sha and updated_by"
+  pass "T15b suite pin rewrites only source_sha, image and updated_by"
 else
-  fail "T15b suite pin rewrites only source_sha and updated_by" "${only_expected} unexpected line(s) changed"
+  fail "T15b suite pin rewrites only source_sha, image and updated_by" "${only_expected} unexpected line(s) changed"
 fi
 
 # ---------------------------------------------------------------------------
@@ -608,6 +622,88 @@ else
   fail "T33 collect-only honours the split runner's ignore set" \
        "config/oss_pytest.args has ${IGN_N} --ignore= entries; collect-only does not read them, so it lists ids the gate never runs"
 fi
+
+# ---------------------------------------------------------------------------
+# T34: image.yml pins the suite twice and the two pins drive different runs:
+# the image is what gate/full/single/smoke execute, source_sha is what the
+# split legs and CI execute. `pin` must move BOTH, or a local gate silently
+# answers a different question than CI while status still reads "in sync".
+# ---------------------------------------------------------------------------
+REG_STUB="${WORK}/reg_stub.sh"
+IMAGE_YML_BACKUP="${WORK}/image.yml.bak"
+cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
+PIN_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" \
+  bash "${SUT}" suite pin --sha 1111111 2>&1)
+NEW_SHA=$(grep -E '^source_sha:' "${CONFIG}/image.yml" | awk '{print $2}')
+NEW_IMG=$(grep -E '^image:' "${CONFIG}/image.yml" | awk '{print $2}')
+cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
+if [ "${NEW_SHA}" = "1111111111111111111111111111111111111111" ] && \
+   [[ "${NEW_IMG}" == *"@sha256:deadbeef"* ]]; then
+  pass "T34 suite pin moves both source_sha and the image digest together"
+else
+  fail "T34 suite pin moves both source_sha and the image digest together" \
+       "after pin: source_sha=${NEW_SHA} image=${NEW_IMG}"
+fi
+
+# ---------------------------------------------------------------------------
+# T35: the two pins can be checked against each other, because the published
+# image records its own commit in org.opencontainers.image.revision. status
+# must fail when they disagree; otherwise the drift T34 prevents is invisible
+# when image.yml is edited by hand.
+# ---------------------------------------------------------------------------
+cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
+python3 - "${CONFIG}/image.yml" <<'PY'
+import re, sys
+p = sys.argv[1]
+t = open(p, encoding='utf-8').read()
+t = re.sub(r'(?m)^source_sha:.*$', 'source_sha: 2222222222222222222222222222222222222222', t)
+open(p, 'w', encoding='utf-8', newline='\n').write(t)
+PY
+ST_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
+ST_RC=$?
+cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
+if [ "${ST_RC}" -ne 0 ] && printf '%s' "${ST_OUT}" | grep -q 'image state: MISMATCH'; then
+  pass "T35 suite status fails when the image was not built from source_sha"
+else
+  fail "T35 suite status fails when the image was not built from source_sha" \
+       "rc=${ST_RC}, output did not report a mismatch: ${ST_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T36: a registry failure must not leave image.yml half-written, and must say
+# why. An empty reason (the lookup writes to stderr, command substitution
+# captures stdout) is what this guards.
+# ---------------------------------------------------------------------------
+cp "${CONFIG}/image.yml" "${IMAGE_YML_BACKUP}"
+FAIL_OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" \
+  bash "${SUT}" suite pin --ref missing 2>&1)
+UNCHANGED=0
+diff -q "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml" >/dev/null 2>&1 && UNCHANGED=1
+cp "${IMAGE_YML_BACKUP}" "${CONFIG}/image.yml"
+if [ "${UNCHANGED}" = 1 ] && printf '%s' "${FAIL_OUT}" | grep -qE 'ERROR: .*404'; then
+  pass "T36 a failed lookup reports the reason and leaves image.yml untouched"
+else
+  fail "T36 a failed lookup reports the reason and leaves image.yml untouched" \
+       "unchanged=${UNCHANGED}, output: ${FAIL_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T37: exactly one of --sha / --ref / --image. Accepting two would leave which
+# one wins up to argument order.
+# ---------------------------------------------------------------------------
+T37_OK=1
+for args in "" "--sha 1111111 --ref main"; do
+  # shellcheck disable=SC2086
+  OUT=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite pin $args 2>&1)
+  printf '%s' "${OUT}" | grep -q 'exactly one of' || T37_OK=0
+done
+if [ "${T37_OK}" = 1 ]; then
+  pass "T37 suite pin requires exactly one of --sha / --ref / --image"
+else
+  fail "T37 suite pin requires exactly one of --sha / --ref / --image" \
+       "zero or two selectors were accepted"
+fi
+IMAGE_YML_BACKUP=""
 
 echo
 if [ "${FAILS}" -eq 0 ]; then
