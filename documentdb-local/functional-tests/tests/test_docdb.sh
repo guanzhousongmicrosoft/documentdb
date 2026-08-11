@@ -530,6 +530,67 @@ else
        "size=$(wc -c < "${SOLO}"), stale tmp: $(ls "${WORK}"/solo_failing.txt.tmp.* 2>/dev/null | tr '\n' ' ')"
 fi
 
+# ---------------------------------------------------------------------------
+# T29: options that only apply to one execution shape must be refused, not
+# silently ignored. Engine bring-up flags do nothing for split legs, and
+# --no-xfail cannot be honoured there because the split runner always applies
+# the known-failure model.
+# ---------------------------------------------------------------------------
+run_sut test --all --split-total 2 --build-and-start --connection-string "${CS}" --dry-run
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'only apply to single-engine runs'; then
+  pass "T29a engine bring-up options are refused for split legs"
+else
+  fail "T29a engine bring-up options are refused for split legs" "exit ${SUT_RC}: ${SUT_OUT}"
+fi
+
+run_sut test --all --split-total 2 --no-xfail --connection-string "${CS}" --dry-run
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'does not apply to split legs'; then
+  pass "T29b --no-xfail is refused for split legs rather than silently gated"
+else
+  fail "T29b --no-xfail is refused for split legs" "exit ${SUT_RC}: ${SUT_OUT}"
+fi
+
+# T30: the split runner builds its own URI against localhost, so a remote host
+# in the connection string would silently test a different engine.
+run_sut test --all --split-total 1 \
+  --connection-string "mongodb://${CS_USER}:${CS_PASS}@remote.example.com:10260/?tls=true" --dry-run
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q "remote.example.com"; then
+  pass "T30 a remote host is refused for split legs"
+else
+  fail "T30 a remote host is refused for split legs" "exit ${SUT_RC}: ${SUT_OUT}"
+fi
+
+# T31: the single-engine modes run pytest inside the pinned image, so requiring
+# a host-side suite checkout for them would break the documented one-command
+# local run on a fresh clone. Split legs still require it.
+ABSENT="${WORK}/no-suite-here"
+SUT_OUT=$(cd "${ROOT}" && DOCDB_SUITE_DIR="${ABSENT}" DOCDB_SPLIT_SH="${STUB}" \
+  STUB_RECORD="${WORK}/t31" bash "${SUT}" test --all --build-and-start --dry-run 2>&1)
+if [ $? -eq 0 ] && ! printf '%s' "${SUT_OUT}" | grep -q 'no functional-tests checkout'; then
+  pass "T31a a single-engine run does not require a host-side suite checkout"
+else
+  fail "T31a a single-engine run does not require a suite checkout" "${SUT_OUT}"
+fi
+
+SUT_OUT=$(cd "${ROOT}" && DOCDB_SUITE_DIR="${ABSENT}" DOCDB_SPLIT_SH="${STUB}" \
+  STUB_RECORD="${WORK}/t31b" bash "${SUT}" test --all --split-total 1 \
+  --connection-string "${CS}" --results-dir "${WORK}/r31" 2>&1)
+if [ $? -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'no functional-tests checkout'; then
+  pass "T31b split legs still require the suite checkout"
+else
+  fail "T31b split legs still require the suite checkout" "${SUT_OUT}"
+fi
+
+# T32: env must use the container name the runner actually creates, or status
+# and stop can never find the engine a --build-and-start --keep run left behind.
+RUNNER_NAME=$(grep -oE 'DOCUMENTDB_CONTAINER="[^"]+"' "${RUNNER}" | head -1 | sed 's/.*="//; s/"//')
+if [ -n "${RUNNER_NAME}" ] && grep -q "DOCUMENTDB_CONTAINER:-${RUNNER_NAME}" "${SUT}"; then
+  pass "T32 env defaults to the runner's container name (${RUNNER_NAME})"
+else
+  fail "T32 env defaults to the runner's container name" \
+       "runner uses '${RUNNER_NAME}', docdb defaults to something else"
+fi
+
 echo
 if [ "${FAILS}" -eq 0 ]; then
   echo "all parity tests passed"

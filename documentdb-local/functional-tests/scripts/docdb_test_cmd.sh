@@ -124,12 +124,29 @@ cmd_test() {
   }
   [ -z "${TESTS}" ] || [ "${ALL}" = 0 ] || die "--tests and --all are mutually exclusive"
 
+  # Split legs run host-side against an already-running engine, so the options
+  # that bring an engine up have no effect there. Silently ignoring them lets a
+  # caller believe an engine was started for them.
+  local splitting=0
+  { [ -n "${SPLIT_TOTAL}" ] || [ -n "${SPLIT_ID}" ]; } && splitting=1
+  if [ "${splitting}" = 1 ]; then
+    [ "${#engine_args[@]}" -eq 0 ] || die "--build-and-start / --start / --image / --keep only apply to single-engine runs; split legs need an engine that is already up (--connection-string)"
+    [ "${NO_XFAIL}" = 0 ] || die "--no-xfail does not apply to split legs: the split runner always applies the known-failure model. Drop --split-total for a raw run."
+    [ "${SMOKE}" = 0 ] || die "--smoke is a single-engine mode and cannot be combined with --split-total"
+  fi
+
   [ -n "${CONN}" ] && engine_args+=(--connection-string "${CONN}")
   [ -n "${WORKERS}" ] && engine_args+=(--workers "${WORKERS}")
   [ -n "${RESULTS_DIR}" ] && engine_args+=(--results-dir "${RESULTS_DIR}")
 
-  # --- suite must be present for anything that runs or collects tests ---
-  if [ "${DRY_RUN}" = 0 ] && [ ! -d "${SUITE_DIR}" ]; then
+  # The suite checkout is only read host-side: by the split legs, by
+  # --collect-only, and by target normalization. The single-engine modes run
+  # pytest inside the pinned image, which carries its own copy, so requiring a
+  # checkout for them would fail the documented one-command local run on a
+  # fresh clone.
+  local needs_suite=0
+  { [ "${splitting}" = 1 ] || [ "${COLLECT_ONLY}" = 1 ] || [ -n "${TESTS}" ]; } && needs_suite=1
+  if [ "${DRY_RUN}" = 0 ] && [ "${needs_suite}" = 1 ] && [ ! -d "${SUITE_DIR}" ]; then
     die "no functional-tests checkout at ${SUITE_DIR}. Run: docdb suite update"
   fi
   local pin loc; pin="$(pinned_sha)"; loc="$(local_sha)"
@@ -181,18 +198,26 @@ cmd_test() {
     # CONN_PORT ends up empty), and a password containing a space splits across
     # the password and port fields. Both produce a confusing failure deep inside
     # the runner rather than here.
-    local u p prt
-    { read -r u; read -r p; read -r prt; } < <(python3 - "${CONN}" <<'PY'
+    local u p prt chost
+    { read -r u; read -r p; read -r prt; read -r chost; } < <(python3 - "${CONN}" <<'PY'
 import sys
 from urllib.parse import unquote, urlsplit
 q = urlsplit(sys.argv[1])
 print(unquote(q.username or 'documentdb'))
 print(unquote(q.password or ''))
 print(q.port or 10260)
+print(q.hostname or 'localhost')
 PY
 )
     [ -n "${p}" ] || die "connection string has no password; run_pytest_split.sh needs user, password and port"
     [ -n "${prt}" ] || die "connection string has no port"
+    # run_pytest_split.sh builds its own URI against localhost, so a remote host
+    # in the connection string is not honoured. Refuse rather than run against a
+    # different engine than the caller named.
+    case "${chost}" in
+      localhost|127.0.0.1|::1|"") ;;
+      *) die "split legs always connect to localhost (run_pytest_split.sh builds its own URI), but the connection string names '${chost}'. Use a single-engine run, or point the split legs at a local engine." ;;
+    esac
 
     RESULTS_DIR="${RESULTS_DIR:-${ROOT}/local-gate-results}"
     local TMP_BASE="${RESULTS_DIR}/.tmp"

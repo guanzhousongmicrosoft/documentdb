@@ -287,8 +287,8 @@ docdb build [--target image|packages|both] [--os <os>] [--pg <version>] [-- <ext
   image     Build the documentdb-local container image, then run the smoke
             suite against it. The verdict is whether the image was produced:
             smoke is ungated by design and reports real engine gaps, so its
-            failures do not fail the build. Requires the packages to exist
-            first (the image installs the .deb).
+            failures do not fail the build. The runner rebuilds the packages as
+            part of this, so --os and --pg are forwarded to it.
   both      Packages first, then the image (default).
 
 Extra arguments after -- are passed through to the underlying script.
@@ -321,7 +321,16 @@ EOF
       # The runner owns the docker build (Dockerfile path, base image, package
       # argument), so reuse it rather than duplicating that invocation. It has
       # no build-only mode, so the smallest test mode comes along for the ride.
-      ( cd "${ROOT}" && bash "${RUNNER}" smoke --build-documentdb --keep-documentdb "${passthru[@]+"${passthru[@]}"}" )
+      #
+      # It also rebuilds the packages itself from its own defaults, so forward
+      # --os/--pg. Without this, `--target both --os X --pg Y` builds packages
+      # twice and ships an image containing packages for a different OS and
+      # PostgreSQL version than the flags asked for.
+      local -a img_args=()
+      [ -n "${os}" ] && img_args+=(--package-os "${os}")
+      [ -n "${pg}" ] && img_args+=(--pg-version "${pg}")
+      ( cd "${ROOT}" && bash "${RUNNER}" smoke --build-documentdb --keep-documentdb \
+          "${img_args[@]+"${img_args[@]}"}" "${passthru[@]+"${passthru[@]}"}" )
       local runner_rc=$?
       # The verdict is whether the IMAGE exists, not whether smoke passed.
       # `smoke` is ungated on purpose (see the README), so it reports real
@@ -347,7 +356,9 @@ EOF
 # =============================================================================
 cmd_env() {
   local sub="${1:-status}"; shift || true
-  local container="${DOCUMENTDB_CONTAINER:-documentdb-local-test}"
+  # Default to the name run-functional-tests.sh actually uses, so status and
+  # stop find the engine a `--build-and-start --keep` run left behind.
+  local container="${DOCUMENTDB_CONTAINER:-documentdb-functional-tests}"
   local port="${DOCUMENTDB_PORT:-10260}"
   case "${sub}" in
     status)
@@ -371,7 +382,13 @@ cmd_env() {
       ;;
     stop)
       if command -v docker >/dev/null 2>&1; then
-        docker rm -f "${container}" >/dev/null 2>&1 && info "removed ${container}" || info "no ${container} container to stop"
+        # `docker rm -f` on a missing container exits 0, so its status cannot
+        # tell us whether anything was removed. Check first.
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
+          docker rm -f "${container}" >/dev/null 2>&1 && info "removed ${container}" || err "failed to remove ${container}"
+        else
+          info "no ${container} container to stop"
+        fi
       else
         info "docker not available; nothing to stop"
       fi
