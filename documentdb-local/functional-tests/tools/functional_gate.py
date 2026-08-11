@@ -21,6 +21,7 @@ the gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -334,9 +335,35 @@ def _normalize_node_id(node_id: str, rootdir_name: str = _ROOTDIR_NAME) -> str:
     return node_id
 
 
+def report_identity(report: dict) -> str:
+    """A stable short id for one pytest report.
+
+    Reconcile is NOT idempotent, and it cannot be: under strict xfail a LISTED
+    test that passes is reported as ``failed``, so "failed and on the list" ->
+    remove and "failed and not on the list" -> add. After one pass the list
+    membership of every failed test flips, so applying the SAME report again
+    swaps the two buckets and silently corrupts the baseline (the second run
+    adds back exactly what the first removed). Recording which report produced
+    a list is what makes that detectable.
+    """
+    summary = report.get("summary", {}) or {}
+    parts = [str(summary.get(k, "")) for k in
+             ("collected", "total", "passed", "failed", "error", "xfailed", "xpassed", "skipped")]
+    tests = report.get("tests", []) or []
+    if tests:
+        parts.append(str(tests[0].get("nodeid", "")))
+        parts.append(str(tests[-1].get("nodeid", "")))
+        parts.append(str(len(tests)))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+RECONCILED_MARKER = "# reconciled-from-report: "
+
+
 def reconcile_failing_list(report_path: str, failing_path: str,
                            flaky_path: str = "",
-                           prune_uncollected: bool = False) -> dict:
+                           prune_uncollected: bool = False,
+                           force: bool = False) -> dict:
     """Reconcile a known-failures list against a (merged) pytest JSON report.
 
     The classification mirrors the gate's strict-xfail semantics under
@@ -375,6 +402,22 @@ def reconcile_failing_list(report_path: str, failing_path: str,
     with open(failing_path) as f:
         for line in f:
             raw_lines.append(line.rstrip("\n"))
+
+    # Refuse to apply the same report twice. See report_identity() for why this
+    # is not a style preference: the second pass adds back exactly what the
+    # first removed, and nothing in the output would say so.
+    rid = report_identity(report)
+    already = [l for l in raw_lines if l.strip().startswith(RECONCILED_MARKER)]
+    if already and not force:
+        prev = already[-1].strip()[len(RECONCILED_MARKER):].strip()
+        if prev == rid:
+            raise SystemExit(
+                f"{failing_path} was already reconciled from this exact report ({rid}).\n"
+                "Applying it twice swaps the added and removed sets and corrupts the baseline:\n"
+                "under strict xfail a listed test that passes is reported as 'failed', so the\n"
+                "second pass re-adds everything the first pass removed.\n"
+                "Re-run the suite to get a fresh report, or pass --force if you are certain.")
+
     entries = [l.strip() for l in raw_lines if l.strip() and not l.strip().startswith("#")]
     entry_by_norm = {_normalize_node_id(e): e for e in entries}
 
@@ -409,7 +452,9 @@ def reconcile_failing_list(report_path: str, failing_path: str,
 
     drop = {entry_by_norm[n] for n in removed}
     drop.update(entry_by_norm[n] for n in pruned)
-    new_lines = [l for l in raw_lines if l.strip() not in drop]
+    new_lines = [l for l in raw_lines
+                 if l.strip() not in drop
+                 and not l.strip().startswith(RECONCILED_MARKER)]
 
     if added:
         # Preserve the file's dominant entry style: prefixed (backend-gate
@@ -425,8 +470,14 @@ def reconcile_failing_list(report_path: str, failing_path: str,
         new_lines.append("# --- added by functional_gate.py reconcile ---")
         new_lines.extend(style_prefix + n for n in added)
 
+    # Provenance, so applying this same report again is refused rather than
+    # silently swapping the added and removed sets.
+    new_lines.append("")
+    new_lines.append(f"{RECONCILED_MARKER}{rid}")
+
     return {
         "lines": new_lines,
+        "report_id": rid,
         "added": added,
         "removed": removed,
         "uncollected": uncollected,
@@ -440,12 +491,14 @@ def reconcile_failing_list(report_path: str, failing_path: str,
 
 def cmd_reconcile(args):
     result = reconcile_failing_list(args.report, args.failing, args.flaky,
-                                    prune_uncollected=args.prune_uncollected)
+                                    prune_uncollected=args.prune_uncollected,
+                                    force=getattr(args, "force", False))
     out_path = args.out or args.failing
     with open(out_path, "w", newline="\n") as f:
         f.write("\n".join(result["lines"]) + "\n")
 
     print(f"Reconciled {args.failing} from {args.report} -> {out_path}")
+    print(f"  report id:                     {result['report_id']}")
     print(f"  added (new failures):          {len(result['added'])}")
     print(f"  removed (XPASS strict):        {len(result['removed'])}")
     print(f"  uncollected list entries:      {len(result['uncollected'])}"
@@ -1123,6 +1176,11 @@ def main():
                                   help="Also write a machine-readable classification (added/removed/"
                                        "kept_errored/skipped_flaky/changed/clean) here for the "
                                        "auto-reconcile bot")
+    reconcile_parser.add_argument("--force", action="store_true",
+                                  help="Reconcile even if this list was already reconciled from "
+                                       "this exact report. Applying one report twice swaps the "
+                                       "added and removed sets and corrupts the baseline, so this "
+                                       "is refused by default")
 
     # recover-and-gate: sequential re-run recovery of transient crash victims,
     # then gate on the merged report. Shared by the single-job lane and the

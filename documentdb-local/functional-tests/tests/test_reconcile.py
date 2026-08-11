@@ -163,3 +163,80 @@ class TestReconcile:
         ])
         result = reconcile_failing_list(report, failing, flaky)
         assert result["flaky_passes"] == ["compatibility/tests/f.py::t_flaky"]
+
+
+class TestDoubleApplyGuard:
+    """Reconcile is not idempotent and cannot be.
+
+    Under strict xfail a LISTED test that passes is reported as ``failed``, so
+    the classification is "failed and on the list -> remove" vs "failed and not
+    on the list -> add". One pass flips the list membership of every failed
+    test, so applying the same report again swaps the two sets: the second run
+    re-adds exactly what the first removed, and nothing in its output says so.
+    A recorded report id is what makes that detectable.
+    """
+
+    def _report_and_list(self, tmp_path):
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/a.py::t_listed_now_passes", "failed", "XPASS(strict)"),
+            ("compatibility/tests/b.py::t_new_failure", "failed", "AssertionError"),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/a.py::t_listed_now_passes",
+        ])
+        return report, failing
+
+    def test_first_pass_records_the_report_id(self, tmp_path):
+        report, failing = self._report_and_list(tmp_path)
+        result = reconcile_failing_list(report, failing)
+        assert result["added"] == ["compatibility/tests/b.py::t_new_failure"]
+        assert result["removed"] == ["compatibility/tests/a.py::t_listed_now_passes"]
+        marker = [l for l in result["lines"] if l.startswith("# reconciled-from-report: ")]
+        assert len(marker) == 1
+        assert marker[0].split(": ", 1)[1] == result["report_id"]
+
+    def test_same_report_twice_is_refused(self, tmp_path):
+        import pytest
+        report, failing = self._report_and_list(tmp_path)
+        first = reconcile_failing_list(report, failing)
+        with open(failing, "w", newline="\n") as f:
+            f.write("\n".join(first["lines"]) + "\n")
+        before = open(failing).read()
+        with pytest.raises(SystemExit) as exc:
+            reconcile_failing_list(report, failing)
+        assert "already reconciled" in str(exc.value)
+        assert open(failing).read() == before, "the refused call must not rewrite the list"
+
+    def test_force_overrides_the_refusal(self, tmp_path):
+        report, failing = self._report_and_list(tmp_path)
+        first = reconcile_failing_list(report, failing)
+        with open(failing, "w", newline="\n") as f:
+            f.write("\n".join(first["lines"]) + "\n")
+        second = reconcile_failing_list(report, failing, force=True)
+        # Proves the corruption the guard prevents: the sets swap.
+        assert second["added"] == first["removed"]
+        assert second["removed"] == first["added"]
+
+    def test_a_different_report_is_allowed(self, tmp_path):
+        report, failing = self._report_and_list(tmp_path)
+        first = reconcile_failing_list(report, failing)
+        with open(failing, "w", newline="\n") as f:
+            f.write("\n".join(first["lines"]) + "\n")
+        fresh = _write_report(tmp_path, [
+            ("compatibility/tests/b.py::t_new_failure", "failed", "AssertionError"),
+            ("compatibility/tests/c.py::t_another", "failed", "AssertionError"),
+        ])
+        result = reconcile_failing_list(fresh, failing)
+        assert "compatibility/tests/c.py::t_another" in result["added"]
+
+    def test_only_one_marker_survives_repeated_reconciles(self, tmp_path):
+        report, failing = self._report_and_list(tmp_path)
+        first = reconcile_failing_list(report, failing)
+        with open(failing, "w", newline="\n") as f:
+            f.write("\n".join(first["lines"]) + "\n")
+        fresh = _write_report(tmp_path, [
+            ("compatibility/tests/c.py::t_another", "failed", "AssertionError"),
+        ])
+        second = reconcile_failing_list(fresh, failing)
+        markers = [l for l in second["lines"] if l.startswith("# reconciled-from-report: ")]
+        assert len(markers) == 1
