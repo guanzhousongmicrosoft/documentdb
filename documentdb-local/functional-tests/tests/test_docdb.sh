@@ -591,6 +591,24 @@ else
        "runner uses '${RUNNER_NAME}', docdb defaults to something else"
 fi
 
+# ---------------------------------------------------------------------------
+# T33: --collect-only exists so a developer can find the node id to paste into
+# `docdb xfail add`. The split runner treats the --ignore= set in
+# config/oss_pytest.args as the single source of truth for what is collectable,
+# so collect-only must apply it too. Listing an id from an ignored file hands
+# the developer an entry that can never run, and it silently reconciles away on
+# the next rebase.
+# ---------------------------------------------------------------------------
+IGN_N=$(grep -c -- '--ignore=' "${CONFIG}/oss_pytest.args" 2>/dev/null || true)
+if [ "${IGN_N:-0}" -eq 0 ]; then
+  pass "T33 collect-only honours the ignore set (nothing ignored; vacuous)"
+elif grep -q "grep -- '--ignore=' \"\${CONFIG}/oss_pytest.args\"" "${FT}/scripts/docdb_test_cmd.sh"; then
+  pass "T33 collect-only honours the ${IGN_N} --ignore= entries the split runner applies"
+else
+  fail "T33 collect-only honours the split runner's ignore set" \
+       "config/oss_pytest.args has ${IGN_N} --ignore= entries; collect-only does not read them, so it lists ids the gate never runs"
+fi
+
 echo
 if [ "${FAILS}" -eq 0 ]; then
   echo "all parity tests passed"

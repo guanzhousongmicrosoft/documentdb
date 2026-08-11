@@ -173,8 +173,20 @@ cmd_test() {
     # the prefix means the same thing in both. Running from SUITE_DIR instead
     # would need a different, silently incompatible form of the same target.
     local ctarget="${TESTS:-${_PFX}compatibility/tests}"
+    # Honour the same --ignore set the split runner treats as source of truth.
+    # Without it this lists node ids from ignored files, which can never run in
+    # the gate; pasting one into `docdb xfail add` would add a dead entry that
+    # then reconciles away on the next rebase.
+    local -a ign=()
+    if [ -f "${CONFIG}/oss_pytest.args" ]; then
+      local line
+      while IFS= read -r line; do
+        [ -n "${line}" ] && ign+=("${line}")
+      done < <(grep -- '--ignore=' "${CONFIG}/oss_pytest.args" 2>/dev/null)
+    fi
     ( cd "${ROOT}" && python3 -m pytest --collect-only -q -o addopts="" \
         --rootdir="docdb_functional_tests/documentdb_tests" \
+        "${ign[@]+"${ign[@]}"}" \
         --engine-name=documentdb "${ctarget}" )
     return $?
   fi
