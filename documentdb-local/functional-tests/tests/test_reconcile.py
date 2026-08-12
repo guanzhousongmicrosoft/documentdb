@@ -12,8 +12,8 @@ from functional_gate import _normalize_node_id, reconcile_failing_list  # noqa: 
 PREFIX = "docdb_functional_tests/documentdb_tests/"
 
 
-def _write_report(tmp_path, tests):
-    path = tmp_path / "report.json"
+def _write_report(tmp_path, tests, filename="report.json"):
+    path = tmp_path / filename
     payload = {"tests": [
         {"nodeid": nid, "outcome": outcome,
          "call": {"longrepr": detail}}
@@ -302,3 +302,122 @@ class TestCrashListPrecedence:
         assert result["added"] == ["compatibility/tests/n.py::t_normal"]
         assert result["skipped_crash"] == []
         assert result["crash_collisions"] == []
+
+class TestTwoRunClassification:
+    """A strict entry asserts a test ALWAYS fails, which one run cannot show.
+
+    This is the failure this mode exists to prevent. A baseline taken from a
+    single run marks every one-time failure strict; the next run under a
+    different shape passes some of them, and each of those becomes an
+    XPASS(strict) that reds the gate. Comparing runs makes "always" observable:
+    consistent failures earn strict, disagreements go to flaky, which accepts
+    either outcome.
+    """
+
+    def _two_runs(self, tmp_path, first, second):
+        return (_write_report(tmp_path, first, filename="r1.json"),
+                _write_report(tmp_path, second, filename="r2.json"))
+
+    def test_failing_in_both_runs_becomes_strict(self, tmp_path):
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "failed", "AssertionError")],
+            [("compatibility/tests/a.py::t", "failed", "AssertionError")])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["added"] == ["compatibility/tests/a.py::t"]
+        assert res["demoted_flaky"] == []
+
+    def test_failing_in_only_one_run_becomes_flaky(self, tmp_path):
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "failed", "AssertionError")],
+            [("compatibility/tests/a.py::t", "passed", "")])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["added"] == [], "a test that passed once must not be asserted as always failing"
+        assert res["demoted_flaky"] == ["compatibility/tests/a.py::t"]
+
+    def test_listed_test_that_disagrees_loses_its_strict_entry(self, tmp_path):
+        # Listed, so 'xfailed' means it failed and 'failed' means XPASS. This is
+        # the exact shape that produced the CI reds: strict, but not always.
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "xfailed", "")],
+            [("compatibility/tests/a.py::t", "failed", "XPASS(strict)")])
+        failing = _write_list(tmp_path, "failing.txt", ["compatibility/tests/a.py::t"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["demoted_flaky"] == ["compatibility/tests/a.py::t"]
+        assert "compatibility/tests/a.py::t" not in res["lines"]
+
+    def test_listed_test_failing_in_both_runs_is_left_alone(self, tmp_path):
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "xfailed", "")],
+            [("compatibility/tests/a.py::t", "xfailed", "")])
+        failing = _write_list(tmp_path, "failing.txt", ["compatibility/tests/a.py::t"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["added"] == [] and res["removed"] == [] and res["demoted_flaky"] == []
+        assert "compatibility/tests/a.py::t" in res["lines"]
+
+    def test_listed_test_passing_in_both_runs_is_removed(self, tmp_path):
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "failed", "XPASS(strict)")],
+            [("compatibility/tests/a.py::t", "failed", "XPASS(strict)")])
+        failing = _write_list(tmp_path, "failing.txt", ["compatibility/tests/a.py::t"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["removed"] == ["compatibility/tests/a.py::t"]
+        assert "compatibility/tests/a.py::t" not in res["lines"]
+
+    def test_a_test_absent_from_one_run_is_judged_on_the_runs_that_saw_it(self, tmp_path):
+        # Split legs each cover a slice, so a test legitimately appears in only
+        # one report. Treating "absent" as "passed" would demote every entry
+        # that only one leg ran.
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/a.py::t", "failed", "AssertionError")],
+            [("compatibility/tests/b.py::other", "passed", "")])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["added"] == ["compatibility/tests/a.py::t"]
+        assert res["demoted_flaky"] == []
+
+    def test_three_runs_require_all_three(self, tmp_path):
+        r1 = _write_report(tmp_path, [("compatibility/tests/a.py::t", "failed", "e")], filename="r1.json")
+        r2 = _write_report(tmp_path, [("compatibility/tests/a.py::t", "failed", "e")], filename="r2.json")
+        r3 = _write_report(tmp_path, [("compatibility/tests/a.py::t", "passed", "")], filename="r3.json")
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2, r3])
+        assert res["runs"] == 3
+        assert res["demoted_flaky"] == ["compatibility/tests/a.py::t"]
+
+    def test_crash_listed_test_is_never_demoted_or_added(self, tmp_path):
+        r1, r2 = self._two_runs(tmp_path,
+            [("compatibility/tests/c.py::t", "failed", "boom")],
+            [("compatibility/tests/c.py::t", "passed", "")])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        crash = _write_list(tmp_path, "crash.txt", ["compatibility/tests/c.py::t"])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2], crash_path=crash)
+        assert res["added"] == [] and res["demoted_flaky"] == []
+
+    def test_single_report_keeps_the_original_behaviour(self, tmp_path):
+        # The bot and CI call this with one report; that path must not change.
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/a.py::t", "failed", "AssertionError"),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        res = reconcile_failing_list(report, failing)
+        assert res["added"] == ["compatibility/tests/a.py::t"]
+        assert res["demoted_flaky"] == [] and res["runs"] == 1
+    def test_adding_a_second_run_is_not_mistaken_for_a_repeat(self, tmp_path):
+        # Reconciling from run A, then from runs A and B, are different
+        # operations. If the recorded id covered only the first report the
+        # second would be refused as a repeat, which is exactly backwards:
+        # adding a run is how a baseline is corrected.
+        from functional_gate import reconcile_identity
+        r1 = _write_report(tmp_path, [("compatibility/tests/a.py::t", "failed", "e")], filename="r1.json")
+        r2 = _write_report(tmp_path, [("compatibility/tests/a.py::t", "passed", "")], filename="r2.json")
+        assert reconcile_identity([r1]) != reconcile_identity([r1, r2])
+
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        first = reconcile_failing_list(r1, failing)
+        with open(failing, "w", newline="\n") as f:
+            f.write("\n".join(first["lines"]) + "\n")
+        # Must not raise: this is a different operation, not a repeat.
+        second = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert second["runs"] == 2

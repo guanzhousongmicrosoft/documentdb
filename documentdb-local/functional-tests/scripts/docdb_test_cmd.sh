@@ -19,6 +19,19 @@
 # short forms people actually type, and verify the path exists: handing an
 # unresolvable target to pytest surfaces as "unrecognized arguments" (the
 # suite's conftest never loads), which points nowhere near the real mistake.
+# The workflow declares its split width once, as PARALLEL_SPLITS, and every
+# parallel matrix entry repeats it as `total:`. The width is not cosmetic: it
+# decides how much of the suite shares one engine, so it changes which
+# order- and state-dependent tests fail. A baseline taken at a different width
+# than the gate runs at is calibrated for a run shape that never happens.
+ci_split_total() {
+  local wf="${ROOT}/.github/workflows/functional_tests.yml"
+  [ -f "${wf}" ] || return 1
+  awk '/^[[:space:]]*PARALLEL_SPLITS:[[:space:]]*[0-9]+/ {
+         for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit }
+       }' "${wf}"
+}
+
 _PFX="docdb_functional_tests/documentdb_tests/"
 _normalize_target() {
   local raw="$1" require_exists="${2:-1}" candidate path
@@ -69,7 +82,11 @@ ENGINE
   --keep              Leave the engine running afterwards.
 
 DISTRIBUTION (matches the CI matrix)
-  --split-total N     Divide the parallel universe into N legs.
+  --split-total N|ci  Divide the parallel universe into N legs. `ci` uses the
+                      width the workflow declares, which is what a baseline run
+                      should use: the width decides how much of the suite shares
+                      one engine, so a different width fails different
+                      state-dependent tests.
   --split-id M        Run only leg M.
   --mode all|parallel|noparallel
                       Which halves to run when splitting. Default all.
@@ -194,9 +211,29 @@ cmd_test() {
   # --- split legs: the CI matrix shape ---
   if [ -n "${SPLIT_TOTAL}" ] || [ -n "${SPLIT_ID}" ]; then
     [ -n "${SPLIT_TOTAL}" ] || die "--split-id needs --split-total"
-    [[ "${SPLIT_TOTAL}" =~ ^[0-9]+$ ]] && [ "${SPLIT_TOTAL}" -ge 1 ] || die "--split-total must be a positive integer"
+    # `ci` resolves to whatever the workflow declares, so a baseline run cannot
+    # drift from the gate just because the number was typed from memory.
+    if [ "${SPLIT_TOTAL}" = ci ]; then
+      SPLIT_TOTAL="$(ci_split_total)" || true
+      [ -n "${SPLIT_TOTAL}" ] || die "--split-total ci needs .github/workflows/functional_tests.yml to declare PARALLEL_SPLITS"
+      info "--split-total ci resolved to ${SPLIT_TOTAL}"
+    fi
+    [[ "${SPLIT_TOTAL}" =~ ^[0-9]+$ ]] && [ "${SPLIT_TOTAL}" -ge 1 ] || die "--split-total must be a positive integer, or 'ci'"
     if [ -n "${SPLIT_ID}" ]; then
       [[ "${SPLIT_ID}" =~ ^[0-9]+$ ]] && [ "${SPLIT_ID}" -lt "${SPLIT_TOTAL}" ] || die "--split-id must be in [0, ${SPLIT_TOTAL})"
+    fi
+
+    # Warn when a whole-suite run uses a width the gate never uses. The results
+    # are still real, they are just calibrated for a shape that does not occur:
+    # the width sets how many tests share one engine, and the tests that read
+    # shared state (the set of databases, live connections, index counters)
+    # answer differently when their neighbours change.
+    local ci_total; ci_total="$(ci_split_total)" || true
+    if [ -n "${ci_total}" ] && [ -z "${TESTS}" ] && [ "${SPLIT_TOTAL}" != "${ci_total}" ]; then
+      warn "--split-total ${SPLIT_TOTAL} does not match the gate's ${ci_total}."
+      warn "  Width decides how much of the suite shares one engine, so state-dependent"
+      warn "  tests fail differently. Do not build a baseline from this run; use"
+      warn "  --split-total ci (or ${ci_total})."
     fi
     [ -f "${SPLIT_SH}" ] || die "missing ${SPLIT_SH}"
     [ -n "${CONN}" ] || die "split legs need an already-running engine; pass --connection-string or set CONNECTION_STRING"

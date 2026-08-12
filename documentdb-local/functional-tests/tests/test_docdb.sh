@@ -709,6 +709,77 @@ IMAGE_YML_BACKUP=""
 
 echo
 if [ "${FAILS}" -eq 0 ]; then
+
+# ---------------------------------------------------------------------------
+# T38: the split width is not cosmetic. It decides how much of the suite shares
+# one engine, so the tests that read shared state (the set of databases, live
+# connections, index counters) answer differently at a different width. A
+# baseline built at the wrong width is calibrated for a run shape that never
+# happens, which is how a list full of one-time failures reaches CI. `ci` must
+# therefore resolve to the width the workflow actually declares.
+# ---------------------------------------------------------------------------
+WF_SPLITS=$(awk '/^[[:space:]]*PARALLEL_SPLITS:[[:space:]]*[0-9]+/ {
+                   for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' "${WORKFLOW}")
+SUT_RECORD="${WORK}/r38"; : > "${SUT_RECORD}"
+CI_OUT=$(cd "${ROOT}" && DOCDB_SPLIT_SH="${STUB}" STUB_RECORD="${SUT_RECORD}" \
+  DOCDB_SUITE_DIR="${FAKE_SUITE}" bash "${SUT}" test --all --split-total ci \
+    --connection-string "${CS}" --results-dir "${WORK}/r38out" --dry-run 2>&1)
+if [ -z "${WF_SPLITS}" ]; then
+  fail "T38 --split-total ci matches the workflow" "no PARALLEL_SPLITS found in ${WORKFLOW}"
+elif printf '%s' "${CI_OUT}" | grep -q "resolved to ${WF_SPLITS}"; then
+  pass "T38 --split-total ci resolves to the workflow's width (${WF_SPLITS})"
+else
+  fail "T38 --split-total ci resolves to the workflow's width" \
+       "workflow declares ${WF_SPLITS}; docdb resolved differently: $(printf '%s' "${CI_OUT}" | grep -i 'resolved to')"
+fi
+
+# The number of legs planned must equal that width, not just be printed.
+LEGS=$(printf '%s' "${CI_OUT}" | grep -oE '^\[docdb\] legs: .*' | head -1)
+WANT_LAST="p$((WF_SPLITS - 1))"
+if printf '%s' "${LEGS}" | grep -q "${WANT_LAST}"; then
+  pass "T38b a ci-width run plans ${WF_SPLITS} parallel legs (through ${WANT_LAST})"
+else
+  fail "T38b a ci-width run plans ${WF_SPLITS} parallel legs" "got: ${LEGS}"
+fi
+
+# ---------------------------------------------------------------------------
+# T39: a full-suite run at a width the gate never uses must say so. Silence here
+# is what let a baseline be built from a single leg while the gate ran six.
+# ---------------------------------------------------------------------------
+ODD=$(cd "${ROOT}" && DOCDB_SPLIT_SH="${STUB}" STUB_RECORD="${WORK}/r39" \
+  DOCDB_SUITE_DIR="${FAKE_SUITE}" bash "${SUT}" test --all --split-total 1 \
+    --connection-string "${CS}" --results-dir "${WORK}/r39out" --dry-run 2>&1)
+if printf '%s' "${ODD}" | grep -q "does not match the gate's ${WF_SPLITS}"; then
+  pass "T39 a full-suite run at a non-gate width warns"
+else
+  fail "T39 a full-suite run at a non-gate width warns" "no warning in: ${ODD}"
+fi
+
+# A targeted run is not a baseline, so the width is irrelevant and the warning
+# would just be noise.
+TGT=$(cd "${ROOT}" && DOCDB_SPLIT_SH="${STUB}" STUB_RECORD="${WORK}/r39b" \
+  DOCDB_SUITE_DIR="${FAKE_SUITE}" bash "${SUT}" test --tests compatibility/tests \
+    --split-total 1 --connection-string "${CS}" --results-dir "${WORK}/r39bout" --dry-run 2>&1)
+if printf '%s' "${TGT}" | grep -q "does not match the gate"; then
+  fail "T39b a targeted run does not warn about width" "warned unnecessarily"
+else
+  pass "T39b a targeted run does not warn about width"
+fi
+
+# ---------------------------------------------------------------------------
+# T40: reconciling from a single run asserts every one-time failure as a
+# permanent one. That must be called out, because the resulting list passes
+# locally and reds the gate on the first run that disagrees.
+# ---------------------------------------------------------------------------
+printf '{"tests":[{"nodeid":"compatibility/tests/z.py::t","outcome":"failed","call":{"longrepr":"e"}}]}' \
+  > "${WORK}/one.json"
+ONE=$(cd "${ROOT}" && bash "${SUT}" xfail reconcile --report "${WORK}/one.json" --out /dev/null 2>&1 || true)
+if printf '%s' "${ONE}" | grep -q "one run only"; then
+  pass "T40 reconciling from a single run warns that it cannot assert always-fails"
+else
+  fail "T40 reconciling from a single run warns" "no warning in: ${ONE}"
+fi
+
   echo "all parity tests passed"
   exit 0
 fi

@@ -357,14 +357,102 @@ def report_identity(report: dict) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def reconcile_identity(report_paths) -> str:
+    """The id recorded in the list: one value covering EVERY run consumed.
+
+    It has to span all of them. Reconciling from run A and then from runs A and
+    B are different operations with different outcomes, so if the id covered
+    only the first report the second would be refused as a repeat of the first.
+    """
+    ids = []
+    for path in report_paths:
+        with open(path) as f:
+            ids.append(report_identity(json.load(f)))
+    if len(ids) == 1:
+        return ids[0]
+    return hashlib.sha256("|".join(ids).encode("utf-8")).hexdigest()[:16]
+
+
 RECONCILED_MARKER = "# reconciled-from-report: "
+
+
+def _actually_failed(outcome: str, was_listed: bool):
+    """Translate a reported outcome into "did this test really fail?".
+
+    The report does not say that directly, because the known-failure plugin has
+    already inverted the result for anything it marked. A listed test that
+    fails is reported ``xfailed``; a listed test that passes is reported
+    ``failed`` (XPASS under strict). So the same word means opposite things
+    depending on whether the id was on the list for that run.
+
+    Returns True (really failed), False (really passed), or None when the
+    outcome carries no verdict (skipped, or a shape not seen before).
+    """
+    if was_listed:
+        if outcome == "xfailed":
+            return True
+        if outcome in ("failed", "error"):
+            return False       # XPASS: the expected failure did not happen
+        if outcome in ("passed", "xpassed"):
+            return False
+        return None
+    if outcome in ("failed", "error"):
+        return True
+    if outcome in ("passed", "xpassed", "xfailed"):
+        return False
+    return None
+
+
+def classify_across_runs(report_paths, listed_norm) -> dict:
+    """Split tests into consistently failing, inconsistent, and consistently passing.
+
+    One run cannot tell "always fails" apart from "failed that time", yet strict
+    xfail asserts the former: an entry that only sometimes fails turns every run
+    where it passes into a gate failure. Comparing two or more runs is what
+    makes the distinction observable, so this returns:
+
+      always  — really failed in every run that observed it -> strict
+      mixed   — really failed in some runs and not others   -> flaky
+      never   — really failed in no run that observed it    -> neither
+
+    Runs must all have been produced with the same list state, since that state
+    is what ``_actually_failed`` inverts against.
+    """
+    seen, failed = {}, {}
+    for path in report_paths:
+        with open(path) as f:
+            report = json.load(f)
+        for test in report.get("tests", []):
+            nid = test.get("nodeid", "")
+            if not nid:
+                continue
+            norm = _normalize_node_id(nid)
+            verdict = _actually_failed(test.get("outcome", "unknown"),
+                                       norm in listed_norm)
+            if verdict is None:
+                continue
+            seen[norm] = seen.get(norm, 0) + 1
+            failed[norm] = failed.get(norm, 0) + (1 if verdict else 0)
+
+    always, mixed, never = [], [], []
+    for norm, n in seen.items():
+        f = failed[norm]
+        if f == n:
+            always.append(norm)
+        elif f == 0:
+            never.append(norm)
+        else:
+            mixed.append(norm)
+    return {"always": sorted(always), "mixed": sorted(mixed),
+            "never": sorted(never), "runs": len(report_paths)}
 
 
 def reconcile_failing_list(report_path: str, failing_path: str,
                            flaky_path: str = "",
                            prune_uncollected: bool = False,
                            force: bool = False,
-                           crash_path: str = "") -> dict:
+                           crash_path: str = "",
+                           extra_reports=None) -> dict:
     """Reconcile a known-failures list against a (merged) pytest JSON report.
 
     The classification mirrors the gate's strict-xfail semantics under
@@ -407,7 +495,7 @@ def reconcile_failing_list(report_path: str, failing_path: str,
     # Refuse to apply the same report twice. See report_identity() for why this
     # is not a style preference: the second pass adds back exactly what the
     # first removed, and nothing in the output would say so.
-    rid = report_identity(report)
+    rid = reconcile_identity([report_path] + list(extra_reports or []))
     already = [l for l in raw_lines if l.strip().startswith(RECONCILED_MARKER)]
     if already and not force:
         prev = already[-1].strip()[len(RECONCILED_MARKER):].strip()
@@ -443,24 +531,53 @@ def reconcile_failing_list(report_path: str, failing_path: str,
                     crash_norm.add(_normalize_node_id(line))
 
     added, removed, kept_errored, skipped_flaky, skipped_crash = [], [], [], [], []
-    for norm, outcome in sorted(outcomes.items()):
-        if outcome not in ("failed", "error"):
-            continue
-        if norm in entry_by_norm:
-            # Listed + failed = XPASS(strict) in the gate. A listed test can
-            # also 'error' outside the call phase (xfail does not cover setup
-            # errors) — keep those and let a human look.
-            detail = details.get(norm, "")
-            if outcome == "error" and "XPASS" not in detail:
-                kept_errored.append(norm)
+    demoted_flaky = []
+
+    if extra_reports:
+        # Two or more runs: a test earns a strict entry only by failing in all
+        # of them. Anything that disagrees between runs is timing- or
+        # order-dependent, and strict xfail cannot express "sometimes", so it
+        # goes to the flaky list instead. This is the whole reason to pass more
+        # than one report.
+        verdicts = classify_across_runs([report_path] + list(extra_reports),
+                                        set(entry_by_norm))
+        always, mixed = set(verdicts["always"]), set(verdicts["mixed"])
+        never = set(verdicts["never"])
+
+        for norm in sorted(always):
+            if norm in entry_by_norm or norm in flaky_norm:
+                continue
+            if norm in crash_norm:
+                skipped_crash.append(norm)
             else:
+                added.append(norm)
+        for norm in sorted(mixed):
+            if norm in crash_norm or norm in flaky_norm:
+                continue
+            demoted_flaky.append(norm)
+        for norm in sorted(never):
+            # Passed in every run, so a strict entry asserting failure is wrong.
+            if norm in entry_by_norm:
                 removed.append(norm)
-        elif norm in flaky_norm:
-            skipped_flaky.append(norm)
-        elif norm in crash_norm:
-            skipped_crash.append(norm)
-        else:
-            added.append(norm)
+    else:
+        for norm, outcome in sorted(outcomes.items()):
+            if outcome not in ("failed", "error"):
+                continue
+            if norm in entry_by_norm:
+                # Listed + failed = XPASS(strict) in the gate. A listed test can
+                # also 'error' outside the call phase (xfail does not cover setup
+                # errors) — keep those and let a human look.
+                detail = details.get(norm, "")
+                if outcome == "error" and "XPASS" not in detail:
+                    kept_errored.append(norm)
+                else:
+                    removed.append(norm)
+            elif norm in flaky_norm:
+                skipped_flaky.append(norm)
+            elif norm in crash_norm:
+                skipped_crash.append(norm)
+            else:
+                added.append(norm)
 
     uncollected = [norm for norm in entry_by_norm if norm not in outcomes]
     pruned = uncollected if prune_uncollected else []
@@ -473,6 +590,9 @@ def reconcile_failing_list(report_path: str, failing_path: str,
     drop = {entry_by_norm[n] for n in removed}
     drop.update(entry_by_norm[n] for n in pruned)
     drop.update(entry_by_norm[n] for n in collided)
+    # A test that disagreed between runs must not keep a strict entry: strict
+    # asserts it always fails, and the runs just showed it does not.
+    drop.update(entry_by_norm[n] for n in demoted_flaky if n in entry_by_norm)
     new_lines = [l for l in raw_lines
                  if l.strip() not in drop
                  and not l.strip().startswith(RECONCILED_MARKER)]
@@ -506,6 +626,8 @@ def reconcile_failing_list(report_path: str, failing_path: str,
         "kept_errored": kept_errored,
         "skipped_flaky": skipped_flaky,
         "skipped_crash": skipped_crash,
+        "demoted_flaky": demoted_flaky,
+        "runs": 1 + len(extra_reports or []),
         "crash_collisions": sorted(collided),
         "flaky_passes": sorted(n for n, o in outcomes.items()
                                if o == "xpassed" and n in flaky_norm),
@@ -513,15 +635,43 @@ def reconcile_failing_list(report_path: str, failing_path: str,
 
 
 def cmd_reconcile(args):
-    result = reconcile_failing_list(args.report, args.failing, args.flaky,
+    reports = args.report if isinstance(args.report, list) else [args.report]
+    primary, extra = reports[0], reports[1:]
+    result = reconcile_failing_list(primary, args.failing, args.flaky,
                                     prune_uncollected=args.prune_uncollected,
                                     force=getattr(args, "force", False),
-                                    crash_path=getattr(args, "crash", ""))
+                                    crash_path=getattr(args, "crash", ""),
+                                    extra_reports=extra)
     out_path = args.out or args.failing
     with open(out_path, "w", newline="\n") as f:
         f.write("\n".join(result["lines"]) + "\n")
 
-    print(f"Reconciled {args.failing} from {args.report} -> {out_path}")
+    # Demotions only exist in the multi-run mode, and they are only meaningful
+    # if they actually reach the flaky list, so write it here rather than
+    # leaving the caller to move them by hand.
+    if result["demoted_flaky"]:
+        if not args.flaky:
+            raise SystemExit(
+                f"{len(result['demoted_flaky'])} test(s) disagreed between runs and belong "
+                "on the flaky list, but --flaky was not given. Re-run with --flaky <path>.")
+        prefix = ""
+        for entry in (l.strip() for l in result["lines"]):
+            if entry and not entry.startswith("#") and _normalize_node_id(entry) != entry:
+                prefix = entry[: len(entry) - len(_normalize_node_id(entry))]
+                break
+        with open(args.flaky, encoding="utf-8") as f:
+            existing = f.read().rstrip("\n").split("\n")
+        existing.append("")
+        existing.append(f"# --- disagreed across {result['runs']} runs, so not assertable as "
+                        "a consistent failure ---")
+        existing.extend(prefix + n for n in result["demoted_flaky"])
+        with open(args.flaky, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(existing) + "\n")
+
+    print(f"Reconciled {args.failing} from {primary} -> {out_path}")
+    if extra:
+        print(f"  runs compared:                 {result['runs']} "
+              "(strict requires failing in every run)")
     print(f"  report id:                     {result['report_id']}")
     print(f"  added (new failures):          {len(result['added'])}")
     print(f"  removed (XPASS strict):        {len(result['removed'])}")
@@ -535,6 +685,8 @@ def cmd_reconcile(args):
         print(f"  SKIPPED failures already on the flaky list (would overlap): {len(result['skipped_flaky'])}")
         for n in result["skipped_flaky"]:
             print(f"    {n}")
+    if result.get("demoted_flaky"):
+        print(f"  MOVED strict -> flaky (disagreed between runs): {len(result['demoted_flaky'])}")
     if result.get("skipped_crash"):
         print(f"  SKIPPED failures on the crash list (skip beats xfail): {len(result['skipped_crash'])}")
     if result.get("crash_collisions"):
@@ -1190,8 +1342,13 @@ def main():
         "reconcile",
         help="Update a known-failures list from a (merged) JSON report: add new "
              "failures, drop XPASS(strict) entries (used after a source_sha bump)")
-    reconcile_parser.add_argument("--report", required=True,
-                                  help="Path to the merged pytest JSON report of a gate run")
+    reconcile_parser.add_argument("--report", required=True, action="append",
+                                  help="Path to the merged pytest JSON report of a gate run. "
+                                       "Repeat it to compare runs: with two or more, a test "
+                                       "only earns a strict entry by failing in EVERY run, and "
+                                       "anything that disagrees between them is moved to the "
+                                       "flaky list. One run cannot tell 'always fails' from "
+                                       "'failed that time', and strict xfail asserts the former")
     reconcile_parser.add_argument("--failing", required=True,
                                   help="Path to the known-failures list to reconcile")
     reconcile_parser.add_argument("--flaky", default="",

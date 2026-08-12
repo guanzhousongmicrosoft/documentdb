@@ -365,22 +365,39 @@ cmd_xfail() {
     reconcile)
       # The list-maintenance path after a pin bump: feed a report in, get lists
       # that match observed behavior out. functional_gate.py owns the logic.
-      local report="" extra=()
+      #
+      # --report is repeatable, and repeating it is the difference between a
+      # baseline that holds and one that reds the gate. A strict entry asserts
+      # a test ALWAYS fails, which a single run cannot establish; give one
+      # report per run and only consistent failures are asserted, with the
+      # disagreements moved to the flaky list.
+      local -a reports=() extra=()
       while [ $# -gt 0 ]; do
         case "$1" in
-          --report) need_arg "$1" $#; report="$2"; shift 2 ;;
+          --report) need_arg "$1" $#; reports+=("$2"); shift 2 ;;
           *) extra+=("$1"); shift ;;
         esac
       done
-      [ -n "${report}" ] || die "usage: docdb xfail reconcile --report <report.json> [--prune-uncollected]"
-      [ -f "${report}" ] || die "no such report: ${report}"
+      [ "${#reports[@]}" -ge 1 ] || die "usage: docdb xfail reconcile --report <report.json> [--report <second-run.json>] [--prune-uncollected]"
+      local r
+      for r in "${reports[@]}"; do
+        [ -f "${r}" ] || die "no such report: ${r}"
+      done
+      if [ "${#reports[@]}" -eq 1 ]; then
+        warn "one run only: every test that failed once will be asserted as ALWAYS failing."
+        warn "  A test that merely failed this time then reds the gate the next time it passes."
+        warn "  Pass --report again with a second run's report to assert only consistent failures."
+      fi
       # --prune-uncollected is only valid on a full-suite report; on a single
       # leg it would prune every other leg's entries.
       if printf '%s\n' "${extra[@]+"${extra[@]}"}" | grep -q -- '--prune-uncollected'; then
         warn "--prune-uncollected assumes a FULL-suite report. On one leg's report it deletes the other legs' entries."
       fi
+      local -a report_args=()
+      for r in "${reports[@]}"; do report_args+=(--report "${r}"); done
       python3 "${GATE_PY}" reconcile \
-        --report "${report}" --failing "${FAILING_LIST}" --flaky "${FLAKY_LIST}" \
+        "${report_args[@]}" --failing "${FAILING_LIST}" --flaky "${FLAKY_LIST}" \
+        --crash "${CRASH_LIST}" \
         "${extra[@]+"${extra[@]}"}"
       ;;
     combine)
@@ -412,8 +429,15 @@ docdb xfail <status|add|remove|reconcile|combine>
   remove <node-id>          Drop a test from the failing list.
   combine --out C R1 R2...  Merge per-leg reports into one full-suite report.
   reconcile --report R      Rewrite the failing/flaky lists so they match the
-                            observed report. Add --prune-uncollected only when
+            [--report R2]   observed reports. Add --prune-uncollected only when
                             R covers the whole suite.
+
+Repeat --report with one report per RUN. A strict entry asserts a test always
+fails, and one run cannot show that: everything that failed once is asserted,
+so the first run that passes any of them reds the gate. With two or more runs
+only consistent failures are asserted and the disagreements go to the flaky
+list, which accepts either outcome. Runs must share the same list state, and
+should use the gate's split width (docdb test --split-total ci).
 
 After reconciling, re-run the gate: strict xfail proves the lists are exactly
 right, because an over- or under-edited list cannot pass.

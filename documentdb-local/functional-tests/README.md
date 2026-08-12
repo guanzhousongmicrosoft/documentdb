@@ -99,8 +99,13 @@ $docdb test --tests compatibility/tests/core/cursors
 $docdb test --all --no-xfail
 
 # reproduce the CI matrix shape locally
-CONNECTION_STRING=... $docdb test --all --split-total 6
+CONNECTION_STRING=... $docdb test --all --split-total ci
 ```
+
+`--split-total ci` uses the width the workflow declares rather than a number
+typed from memory. Use it for any run whose results will become a baseline: the
+width sets how much of the suite shares one engine, so a different width fails a
+different set of state-dependent tests.
 
 `--all`, `--tests` or `--smoke` is required: there is no implicit default,
 because running the whole suite by accident is expensive. Add `--dry-run` to
@@ -173,21 +178,38 @@ $docdb suite update                # refresh the host checkout to match
 $docdb suite status                # checkout matches, and an image exists
 ```
 
-Then re-run the suite and fold the result back into the lists:
+Then re-run the suite and fold the result back into the lists. Run it **twice**,
+and pass both reports:
 
 ```bash
-CONNECTION_STRING=... $docdb test --all --results-dir /tmp/rebase
-$docdb xfail reconcile --report /tmp/rebase/report.json --prune-uncollected
+CONNECTION_STRING=... $docdb test --all --split-total ci --results-dir /tmp/run1
+CONNECTION_STRING=... $docdb test --all --split-total ci --results-dir /tmp/run2
+$docdb xfail reconcile --report /tmp/run1/report.json \
+                       --report /tmp/run2/report.json --prune-uncollected
 ```
 
+Both details matter, and skipping either produces a baseline that passes locally
+and reds the gate:
+
+- **`--split-total ci`** uses the width the workflow declares. The width decides
+  how much of the suite shares one engine, so tests that read shared state (the
+  set of databases, live connections, index counters) fail differently at a
+  different width.
+- **Two runs.** A strict entry asserts a test *always* fails, which one run
+  cannot show. From a single report every test that failed once is asserted, and
+  the first run that passes any of them is an `XPASS(strict)` that fails the
+  gate. With two or more reports only consistent failures are asserted; whatever
+  disagrees is moved to the flaky list, which accepts either outcome.
+
 A CI run publishes one report per leg (`functional-test-results-<tag>`
-artifacts). Combine them first, because `--prune-uncollected` is only valid on
-a full-suite report; on a single leg's report it would prune every other leg's
-entries:
+artifacts). Combine each run's legs into one full-suite report first, because
+`--prune-uncollected` is only valid on a full-suite report; on a single leg's
+report it would prune every other leg's entries:
 
 ```bash
-$docdb xfail combine --out combined.json p0/report.json p1/report.json ... np/report.json
-$docdb xfail reconcile --report combined.json --prune-uncollected
+$docdb xfail combine --out run1.json p0/report.json p1/report.json ... np/report.json
+$docdb xfail combine --out run2.json <the second run's legs>
+$docdb xfail reconcile --report run1.json --report run2.json --prune-uncollected
 ```
 
 Both wrap `tools/functional_gate.py` (`merge-reports` and `reconcile`), which
