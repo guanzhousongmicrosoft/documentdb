@@ -240,3 +240,65 @@ class TestDoubleApplyGuard:
         second = reconcile_failing_list(fresh, failing)
         markers = [l for l in second["lines"] if l.startswith("# reconciled-from-report: ")]
         assert len(markers) == 1
+
+class TestCrashListPrecedence:
+    """A crash-listed test is SKIPPED, so it must never also be xfailed.
+
+    conftest_known_failures refuses any exact id present in both the crash list
+    and the failing/flaky pair, and that refusal happens during collection, so
+    the whole suite fails to run. Reconcile therefore has to know about the
+    crash list: without it, a rebaseline adds the crash-listed failures straight
+    back and the next run cannot collect at all.
+    """
+
+    def test_crash_listed_failure_is_not_added(self, tmp_path):
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/c.py::t_crasher", "failed", "boom"),
+            ("compatibility/tests/n.py::t_normal", "failed", "AssertionError"),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        crash = _write_list(tmp_path, "crash.txt", [
+            "compatibility/tests/c.py::t_crasher",
+        ])
+        result = reconcile_failing_list(report, failing, crash_path=crash)
+        assert result["added"] == ["compatibility/tests/n.py::t_normal"]
+        assert result["skipped_crash"] == ["compatibility/tests/c.py::t_crasher"]
+
+    def test_existing_entry_colliding_with_crash_list_is_dropped(self, tmp_path):
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/c.py::t_crasher", "passed", ""),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/c.py::t_crasher",
+        ])
+        crash = _write_list(tmp_path, "crash.txt", [
+            "compatibility/tests/c.py::t_crasher",
+        ])
+        result = reconcile_failing_list(report, failing, crash_path=crash)
+        assert result["crash_collisions"] == ["compatibility/tests/c.py::t_crasher"]
+        assert "compatibility/tests/c.py::t_crasher" not in result["lines"]
+
+    def test_file_and_directory_crash_entries_do_not_collide(self, tmp_path):
+        # Only exact ids can collide. Prefix entries are how the crash list
+        # covers a whole family, and they must not suppress unrelated adds.
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/d.py::t_one", "failed", "AssertionError"),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        crash = _write_list(tmp_path, "crash.txt", [
+            "compatibility/tests/other.py",
+            "compatibility/tests/somedir/",
+        ])
+        result = reconcile_failing_list(report, failing, crash_path=crash)
+        assert result["added"] == ["compatibility/tests/d.py::t_one"]
+        assert result["skipped_crash"] == []
+
+    def test_no_crash_list_is_backward_compatible(self, tmp_path):
+        report = _write_report(tmp_path, [
+            ("compatibility/tests/n.py::t_normal", "failed", "AssertionError"),
+        ])
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        result = reconcile_failing_list(report, failing)
+        assert result["added"] == ["compatibility/tests/n.py::t_normal"]
+        assert result["skipped_crash"] == []
+        assert result["crash_collisions"] == []

@@ -363,7 +363,8 @@ RECONCILED_MARKER = "# reconciled-from-report: "
 def reconcile_failing_list(report_path: str, failing_path: str,
                            flaky_path: str = "",
                            prune_uncollected: bool = False,
-                           force: bool = False) -> dict:
+                           force: bool = False,
+                           crash_path: str = "") -> dict:
     """Reconcile a known-failures list against a (merged) pytest JSON report.
 
     The classification mirrors the gate's strict-xfail semantics under
@@ -429,7 +430,19 @@ def reconcile_failing_list(report_path: str, failing_path: str,
                 if line and not line.startswith("#"):
                     flaky_norm.add(_normalize_node_id(line))
 
-    added, removed, kept_errored, skipped_flaky = [], [], [], []
+    # A crash-listed test is SKIPPED and must not also be xfailed: the plugin
+    # rejects any exact id present in both, so adding one here would make the
+    # whole suite fail to collect. Only exact ids can collide; file (.py) and
+    # directory (/) crash entries are prefixes the plugin handles separately.
+    crash_norm = set()
+    if crash_path and os.path.exists(crash_path):
+        with open(crash_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "::" in line:
+                    crash_norm.add(_normalize_node_id(line))
+
+    added, removed, kept_errored, skipped_flaky, skipped_crash = [], [], [], [], []
     for norm, outcome in sorted(outcomes.items()):
         if outcome not in ("failed", "error"):
             continue
@@ -444,14 +457,22 @@ def reconcile_failing_list(report_path: str, failing_path: str,
                 removed.append(norm)
         elif norm in flaky_norm:
             skipped_flaky.append(norm)
+        elif norm in crash_norm:
+            skipped_crash.append(norm)
         else:
             added.append(norm)
 
     uncollected = [norm for norm in entry_by_norm if norm not in outcomes]
     pruned = uncollected if prune_uncollected else []
 
+    # An entry already on the list that is ALSO crash-listed is the same
+    # collision seen from the other side, and it fails collection just as hard.
+    # Drop it here: skip beats xfail, because the test never runs.
+    collided = [n for n in entry_by_norm if n in crash_norm]
+
     drop = {entry_by_norm[n] for n in removed}
     drop.update(entry_by_norm[n] for n in pruned)
+    drop.update(entry_by_norm[n] for n in collided)
     new_lines = [l for l in raw_lines
                  if l.strip() not in drop
                  and not l.strip().startswith(RECONCILED_MARKER)]
@@ -484,6 +505,8 @@ def reconcile_failing_list(report_path: str, failing_path: str,
         "pruned": pruned,
         "kept_errored": kept_errored,
         "skipped_flaky": skipped_flaky,
+        "skipped_crash": skipped_crash,
+        "crash_collisions": sorted(collided),
         "flaky_passes": sorted(n for n, o in outcomes.items()
                                if o == "xpassed" and n in flaky_norm),
     }
@@ -492,7 +515,8 @@ def reconcile_failing_list(report_path: str, failing_path: str,
 def cmd_reconcile(args):
     result = reconcile_failing_list(args.report, args.failing, args.flaky,
                                     prune_uncollected=args.prune_uncollected,
-                                    force=getattr(args, "force", False))
+                                    force=getattr(args, "force", False),
+                                    crash_path=getattr(args, "crash", ""))
     out_path = args.out or args.failing
     with open(out_path, "w", newline="\n") as f:
         f.write("\n".join(result["lines"]) + "\n")
@@ -510,6 +534,12 @@ def cmd_reconcile(args):
     if result["skipped_flaky"]:
         print(f"  SKIPPED failures already on the flaky list (would overlap): {len(result['skipped_flaky'])}")
         for n in result["skipped_flaky"]:
+            print(f"    {n}")
+    if result.get("skipped_crash"):
+        print(f"  SKIPPED failures on the crash list (skip beats xfail): {len(result['skipped_crash'])}")
+    if result.get("crash_collisions"):
+        print(f"  DROPPED entries that are also crash-listed: {len(result['crash_collisions'])}")
+        for n in result["crash_collisions"]:
             print(f"    {n}")
     if result["flaky_passes"]:
         print(f"  flaky-list entries that passed this run (pruning candidates): {len(result['flaky_passes'])}")
@@ -1167,6 +1197,11 @@ def main():
     reconcile_parser.add_argument("--flaky", default="",
                                   help="Path to the flaky list (new failures already on it are "
                                        "skipped so the plugin's overlap check cannot throw)")
+    reconcile_parser.add_argument("--crash", default="",
+                                  help="Path to the crash/skip list. Failures on it are not added, "
+                                       "and existing entries that collide with it are dropped: a "
+                                       "crash-listed test is skipped, and the plugin refuses any "
+                                       "exact id present in both, which fails collection outright")
     reconcile_parser.add_argument("--out", default="",
                                   help="Write the updated list here (default: rewrite --failing in place)")
     reconcile_parser.add_argument("--prune-uncollected", action="store_true",
