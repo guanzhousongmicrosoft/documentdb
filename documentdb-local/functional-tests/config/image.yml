@@ -5,5 +5,5 @@ schema_version: 2
 # rather than recording a second reference is what stops the two from naming
 # different suite versions.
 source_ref: documentdb/functional-tests@main
-source_sha: 5a50ef4ad4092ad90df34992d22fc2a8fb5d8041
+source_sha: 935605abe70b8f0230ab9a3b3767608e1d57a283
 updated_by: guanzhousong

@@ -98,8 +98,8 @@ run_pytest() {  # $1 = json report path ; rest = parallelism + markers + targets
 # MIN_MANIFEST additionally guards the parallel collect: a short manifest on one
 # leg desyncs its ids[split_id::total] stride from the others, dropping tests at
 # some positions on no leg. Bump it if a source_sha update legitimately shrinks
-# the ~48k non-no_parallel suite.
-MIN_MANIFEST=30000
+# the ~51k non-no_parallel suite.
+MIN_MANIFEST=32000
 COLLECT_RC=0
 COLLECT_N=0
 collect_count() {  # $1 = out manifest ; rest = -m marker + targets.
