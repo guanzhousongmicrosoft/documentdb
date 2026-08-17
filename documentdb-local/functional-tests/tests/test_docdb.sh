@@ -503,10 +503,17 @@ fi
 # ---------------------------------------------------------------------------
 # T27: --dry-run must not touch the filesystem. It previously created the
 # results tree and, worse, cleared the leg directories of a previous run.
+#
+# Both cases assert the ABSENCE of an effect, so they only mean anything if the
+# run actually happened: a command that never ran, or that died before reaching
+# the results-dir handling, leaves the same filesystem behind as one that
+# correctly did nothing. Each case therefore also requires a successful plan.
 # ---------------------------------------------------------------------------
 DRYDIR="${WORK}/dry-untouched"
-run_sut_at "${DRYDIR}" test --all --split-total 2 --connection-string "${CS}" --dry-run
-if [ ! -e "${DRYDIR}" ]; then
+run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${DRYDIR}" --dry-run
+if [ "${SUT_RC}" -ne 0 ] || ! printf '%s' "${SUT_OUT}" | grep -q 'plan only'; then
+  fail "T27a --dry-run creates nothing" "the dry run itself did not complete (exit ${SUT_RC}): ${SUT_OUT}"
+elif [ ! -e "${DRYDIR}" ]; then
   pass "T27a --dry-run creates nothing"
 else
   fail "T27a --dry-run creates nothing" "created: $(ls -A "${DRYDIR}" 2>/dev/null | tr '\n' ' ')"
@@ -515,8 +522,11 @@ fi
 # And it must not clear a previous run's legs.
 KEEPDIR="${WORK}/dry-keep"
 mkdir -p "${KEEPDIR}/p0"; : > "${KEEPDIR}/.docdb-results"; echo prior > "${KEEPDIR}/p0/report.json"
-run_sut_at "${KEEPDIR}" test --all --split-total 2 --connection-string "${CS}" --dry-run
-if [ -f "${KEEPDIR}/p0/report.json" ]; then
+run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${KEEPDIR}" --dry-run
+if [ "${SUT_RC}" -ne 0 ] || ! printf '%s' "${SUT_OUT}" | grep -q 'plan only'; then
+  fail "T27b --dry-run leaves a previous run's results intact" \
+       "the dry run itself did not complete (exit ${SUT_RC}): ${SUT_OUT}"
+elif [ -f "${KEEPDIR}/p0/report.json" ]; then
   pass "T27b --dry-run leaves a previous run's results intact"
 else
   fail "T27b --dry-run leaves a previous run's results intact" "p0/report.json was deleted"
