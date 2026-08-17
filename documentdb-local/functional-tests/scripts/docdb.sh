@@ -415,7 +415,10 @@ cmd_xfail() {
       cp "${reports[0]}" "${out}" || die "cannot write ${out}"
       local i
       for ((i=1; i<${#reports[@]}; i++)); do
-        python3 "${GATE_PY}" merge-reports --base "${out}" --overlay "${reports[$i]}" --out "${out}" \
+        # --sum-collected: split legs cover disjoint slices, so the combined
+        # collection count is their sum. Without it the merged report claims
+        # only the first leg's count.
+        python3 "${GATE_PY}" merge-reports --base "${out}" --overlay "${reports[$i]}" --out "${out}" --sum-collected \
           || die "merge-reports failed on ${reports[$i]}"
       done
       info "combined ${#reports[@]} report(s) into ${out}"
@@ -508,18 +511,34 @@ EOF
       local -a img_args=()
       [ -n "${os}" ] && img_args+=(--package-os "${os}")
       [ -n "${pg}" ] && img_args+=(--pg-version "${pg}")
+      # `smoke` only runs after the image build succeeds (the runner is set -e
+      # and builds first), so a fresh smoke report is proof the build completed.
+      # The image id alone cannot decide this: a fully cached rebuild
+      # legitimately produces the SAME id, and a FAILED build leaves the
+      # previous image carrying the same fixed tag. Using both separates the
+      # three cases instead of reporting a stale image as this build's success.
+      local img_ref="${DOCUMENTDB_IMAGE:-documentdb-local:functional-tests}"
+      local smoke_report="${ROOT}/.test-results/functional-tests/smoke/report.json"
+      local before_id; before_id="$(docker image inspect --format '{{.Id}}' "${img_ref}" 2>/dev/null || true)"
+      rm -f "${smoke_report}"
       ( cd "${ROOT}" && bash "${RUNNER}" smoke --build-documentdb --keep-documentdb \
           "${img_args[@]+"${img_args[@]}"}" "${passthru[@]+"${passthru[@]}"}" )
       local runner_rc=$?
-      # The verdict is whether the IMAGE exists, not whether smoke passed.
+      local after_id; after_id="$(docker image inspect --format '{{.Id}}' "${img_ref}" 2>/dev/null || true)"
+      # The verdict is whether the BUILD completed, not whether smoke passed.
       # `smoke` is ungated on purpose (see the README), so it reports real
       # feature gaps in the engine; treating those as a build failure would
       # make `docdb build` fail on a perfectly good image.
-      if docker image inspect "${DOCUMENTDB_IMAGE:-documentdb-local:functional-tests}" >/dev/null 2>&1; then
-        info "image built: ${DOCUMENTDB_IMAGE:-documentdb-local:functional-tests}"
+      if [ -z "${after_id}" ]; then
+        die "image build failed: ${img_ref} does not exist"
+      elif [ -f "${smoke_report}" ]; then
+        info "image built: ${img_ref}"
         [ "${runner_rc}" -ne 0 ] && info "the smoke suite reported failures (it is ungated and records known gaps); see .test-results/functional-tests/smoke/"
+      elif [ "${after_id}" != "${before_id}" ]; then
+        info "image built: ${img_ref}"
+        warn "the smoke suite did not run, so the image was not exercised at all; see the output above"
       else
-        die "image build failed: ${DOCUMENTDB_IMAGE:-documentdb-local:functional-tests} does not exist"
+        die "image build failed: smoke never ran and ${img_ref} still points at the image that was already there (${before_id:0:19}), so nothing new was produced."
       fi
       ;;
   esac

@@ -407,10 +407,15 @@ fi
 
 # The suite image is DERIVED from the pinned commit rather than recorded
 # separately: config/image.yml names one commit, upstream publishes one image
-# per commit as sha-<short7>, and deriving the reference is what guarantees the
-# image executed here holds the same suite that setup_functional_tests.sh
-# checks out and that CI runs. A second recorded reference could name a
-# different version while every status line still looked consistent.
+# per commit as sha-<short7>, and deriving the reference is what keeps the image
+# executed here on the same suite that setup_functional_tests.sh checks out and
+# that CI runs. A second recorded reference could name a different version while
+# every status line still looked consistent.
+#
+# A tag is mutable where the old recorded digest was not, so the derived
+# reference alone is a weaker promise: `docker run` uses a cached tag without
+# consulting the registry. The label check below closes that gap on the copy
+# that will actually run.
 #
 # docdb.sh reproduces this formula for `suite status`; tests/test_docdb.sh
 # asserts the two stay identical.
@@ -420,6 +425,26 @@ if [ -z "$SUITE_SHA" ]; then
     exit 1
 fi
 IMAGE="${FUNCTIONAL_TESTS_IMAGE_REPO:-ghcr.io/documentdb/functional-tests}:sha-${SUITE_SHA:0:7}"
+
+# Check the LOCAL copy, which is the one `docker run` will use: a tag that moved
+# upstream after the pin, or a stale cache, otherwise runs a different suite
+# than the pin claims. Deliberately offline-safe — an image that is absent is
+# left to `docker run` to pull, and an image with no revision label is accepted
+# the same way `docdb suite status` accepts it.
+if command -v docker >/dev/null 2>&1 && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    SUITE_IMAGE_REV=$(docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+        "$IMAGE" 2>/dev/null || true)
+    case "$SUITE_IMAGE_REV" in
+        ""|"<no value>") ;;
+        "$SUITE_SHA"*) ;;
+        *)
+            echo "The cached $IMAGE was built from $SUITE_IMAGE_REV, not the pinned $SUITE_SHA."
+            echo "Refresh it with: docker pull $IMAGE"
+            exit 1
+            ;;
+    esac
+fi
 mkdir -p "$RESULTS_DIR"
 chmod 777 "$RESULTS_DIR"
 trap cleanup_managed_documentdb EXIT

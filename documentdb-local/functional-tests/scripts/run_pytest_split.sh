@@ -45,6 +45,10 @@ CS="mongodb://${CONN_USER}:${CONN_PASS}@localhost:${CONN_PORT}/?tls=true&tlsAllo
 GATE="python3 ${FT}/tools/functional_gate.py"
 REPORT="${RESULTS_DIR}/report.json"
 JUNIT="${RESULTS_DIR}/results.xml"
+# The GATE's verdict, rendered for reporting. results.xml is the main pass and is
+# frozen before recovery rewrites report.json, so it is kept as a raw artifact
+# and this file is what gets published.
+GATE_JUNIT="${RESULTS_DIR}/gate-results.xml"
 
 mkdir -p "${RESULTS_DIR}"
 
@@ -317,15 +321,31 @@ fi
 # transient crash victims pass), merges each pass (bounded to 3; over the
 # transient limit = real breakage), and exits 1 on any residual failed/error. The
 # re-run command mirrors the main pass minus the marker/targets; recover-and-gate
-# appends --json-report and the @argfile of failing IDs. exec so the leg's exit
-# status IS the verdict — which is also why --output must write straight into
-# RESULTS_DIR (nothing below the exec would ever run to copy it there).
+# appends --json-report and the @argfile of failing IDs. Its exit status IS the
+# leg's verdict, so it is captured and re-raised below rather than exec'd: the
+# verdict still has to be rendered for reporting first. --output writes straight
+# into RESULTS_DIR so the residual list lands with the rest of the artifacts.
 # shellcheck disable=SC2086
-exec ${GATE} recover-and-gate \
+GATE_RC=0
+${GATE} recover-and-gate \
   --report "${REPORT}" --strip-prefix "${PFX}" --prefix "${PFX}" \
   --transient-limit "${TRANSIENT_LIMIT}" \
   --expected-ids "${EXPECTED_IDS}" --missing-limit "${MISSING_LIMIT}" \
   --workdir "${TMPDIR}" --output "${RESULTS_DIR}/gate-failures.txt" \
   -- python3 -m pytest -p conftest_known_failures -q --color=no ${IGN} \
      --engine-name="${ENGINE}" --connection-string="${CS}" --rootdir="${ROOTDIR}" \
-     -n=0 --timeout=600 --timeout-method=signal
+     -n=0 --timeout=600 --timeout-method=signal || GATE_RC=$?
+
+# Render what the GATE decided, not what the main pass saw. results.xml above is
+# frozen before recovery rewrote report.json, so it disagrees in both directions:
+# a rescued crash victim still reads failed there, and a test lost with a dying
+# xdist worker is simply absent while the gate fails the build for it. Publishing
+# this file instead is what lets the pipeline fail the task on a failed test.
+# Never let reporting change the verdict — GATE_RC already decided.
+# shellcheck disable=SC2086
+${GATE} emit-junit --report "${REPORT}" --out "${GATE_JUNIT}" \
+  --failing "${KF}/ci_failing_tests.txt" --flaky "${KF}/ci_flaky_tests.txt" \
+  --crash "${KF}/ci_crash_tests.txt" --expected-ids "${EXPECTED_IDS}" \
+  --suite-name "${SPLIT_TAG}" || echo "could not render the gate verdict as JUnit"
+
+exit "${GATE_RC}"

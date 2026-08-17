@@ -60,11 +60,21 @@ cat > "${STUB}" <<'STUBEOF'
   done
   echo "PWD=${PWD}"
 } >> "${STUB_RECORD}"
+# Stand in for the real runner's artifacts. The combined-report and
+# universe-check cases are about what docdb.sh does with them, so a leg that
+# produced none would exercise the wrong branch.
+if [ -n "${RESULTS_DIR:-}" ] && [ "${STUB_NO_ARTIFACTS:-0}" != 1 ]; then
+  mkdir -p "${RESULTS_DIR}"
+  printf '{"summary":{"collected":1,"total":1,"failed":1},"tests":[{"nodeid":"compatibility/tests/%s.py::t","outcome":"failed","call":{"longrepr":"e"}}]}\n' \
+    "${SPLIT_TAG:-leg}" > "${RESULTS_DIR}/report.json"
+  # Every parallel leg must report the SAME universe; no_parallel is not part
+  # of that check.
+  [ "${SPLIT_MODE:-}" = parallel ] && printf 'universe_hash=deadbeef\ncount=2\n' > "${RESULTS_DIR}/universe.txt"
+fi
 [ -n "${STUB_MESSAGE:-}" ] && echo "${STUB_MESSAGE}"
 exit "${STUB_RC:-0}"
 STUBEOF
 chmod +x "${STUB}"
-
 # --- stub for the registry lookup: resolves any ref to one fixed pair --------
 # Keeps the pin and drift cases hermetic; a ref named 'missing' fails like a 404.
 REG_STUB="${WORK}/reg_stub.sh"
@@ -790,6 +800,135 @@ else
   fail "T40 reconciling from a single run warns" "no warning in: ${ONE}"
 fi
 
+# ---------------------------------------------------------------------------
+# T41: a full-suite split run must leave the combined report the documented
+# rebaseline workflow reconciles from. Without it, the very next command in the
+# README and the pin-bump SOP dies on a missing file.
+# ---------------------------------------------------------------------------
+R41="${WORK}/res41"
+run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${R41}"
+if [ -f "${R41}/report.json" ]; then
+  pass "T41 a full-suite split run writes the combined report the docs reconcile from"
+else
+  fail "T41 a full-suite split run writes a combined report" \
+       "no ${R41}/report.json; output: ${SUT_OUT}"
+fi
+# It has to cover every leg, or --prune-uncollected deletes the missing legs'
+# entries from the baseline.
+if [ -f "${R41}/report.json" ] && \
+   grep -q 'p0' "${R41}/report.json" && grep -q 'p1' "${R41}/report.json" && \
+   grep -q 'np' "${R41}/report.json"; then
+  pass "T41b the combined report merges every leg (p0, p1, np)"
+else
+  fail "T41b the combined report merges every leg" \
+       "contents: $(cat "${R41}/report.json" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------
+# T41c: a run that did NOT cover the whole suite must not produce that filename.
+# reconcile --prune-uncollected trusts it to be full-suite and deletes every
+# entry it does not mention, so a narrowed run under the same name would wipe
+# the rest of the baseline.
+# ---------------------------------------------------------------------------
+R41C="${WORK}/res41c"
+run_sut test --all --split-total 2 --split-id 0 --connection-string "${CS}" --results-dir "${R41C}"
+if [ ! -f "${R41C}/report.json" ] && printf '%s' "${SUT_OUT}" | grep -q "did not cover the whole suite"; then
+  pass "T41c a single-leg run writes no combined report, and says why"
+else
+  fail "T41c a single-leg run writes no combined report" \
+       "report exists: $([ -f "${R41C}/report.json" ] && echo yes || echo no); output: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T42: a leg that reports no universe means the legs were never shown to slice
+# the same set. CI fails closed on that; passing locally on a check that did not
+# happen is worse than failing it.
+# ---------------------------------------------------------------------------
+R42="${WORK}/res42"
+STUB_NO_ARTIFACTS=1 run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${R42}"
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q "not every parallel leg reported a universe"; then
+  pass "T42 a missing leg universe fails the run rather than skipping the check"
+else
+  fail "T42 a missing leg universe fails the run" "rc=${SUT_RC}; output: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T43: run_pytest_split.sh is driven entirely by environment variables and reads
+# no argv, so pytest args after -- cannot reach a split leg. Accepting them
+# would run the whole suite while ignoring the filter that was asked for.
+# ---------------------------------------------------------------------------
+run_sut test --all --split-total 2 --connection-string "${CS}" --dry-run -- -k sentinel_xyz
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q "not supported with --split-total"; then
+  pass "T43 pytest args after -- are refused for split legs, not silently dropped"
+else
+  fail "T43 pytest args after -- are refused for split legs" "rc=${SUT_RC}; output: ${SUT_OUT}"
+fi
+# The same args must still work for the single-engine modes.
+run_sut test --tests compatibility/tests --dry-run -- -k sentinel_xyz
+if printf '%s' "${SUT_OUT}" | grep -q 'sentinel_xyz'; then
+  pass "T43b a single-engine run still forwards args after --"
+else
+  fail "T43b a single-engine run still forwards args after --" "output: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T20b: the image tag is a fixed mutable name, so a failed build leaves the
+# PREVIOUS image carrying it. Judging on existence alone reports that stale
+# image as this build's success -- and with --keep-documentdb the developer then
+# tests against it. The verdict must be that a NEW image was produced.
+# ---------------------------------------------------------------------------
+FAKE_BIN="${WORK}/bin"
+mkdir -p "${FAKE_BIN}"
+cat > "${FAKE_BIN}/docker" <<'DOCKEREOF'
+#!/bin/bash
+# `image inspect --format {{.Id}}` always answers with the SAME id, standing in
+# for a tag left over from an earlier successful build.
+[ "${1:-}" = image ] && [ "${2:-}" = inspect ] && { echo "sha256:staleimageid"; exit 0; }
+exit 0
+DOCKEREOF
+chmod +x "${FAKE_BIN}/docker"
+# docdb.sh derives ROOT as scripts/../../.., so mirror the real layout: the
+# copy must land under <root>/documentdb-local/functional-tests/scripts.
+FAKE_ROOT="${WORK}/fakeroot"
+FAKE_RUNNER_DIR="${FAKE_ROOT}/documentdb-local/functional-tests/scripts"
+mkdir -p "${FAKE_RUNNER_DIR}"
+cp "${SUT}" "${FAKE_RUNNER_DIR}/docdb.sh"
+cp "${FT}/scripts/docdb_test_cmd.sh" "${FAKE_RUNNER_DIR}/docdb_test_cmd.sh"
+FAKE_SMOKE="${FAKE_ROOT}/.test-results/functional-tests/smoke"
+
+# A failed build: the runner exits non-zero and smoke never runs, so no report.
+printf '#!/bin/bash\necho "[stub-runner] simulating a build failure"\nexit 1\n' \
+  > "${FAKE_RUNNER_DIR}/run-functional-tests.sh"
+chmod +x "${FAKE_RUNNER_DIR}/run-functional-tests.sh"
+B20=$(cd "${ROOT}" && PATH="${FAKE_BIN}:${PATH}" bash "${FAKE_RUNNER_DIR}/docdb.sh" build --target image 2>&1)
+B20_RC=$?
+if [ "${B20_RC}" -ne 0 ] && printf '%s' "${B20}" | grep -q "nothing new was produced"; then
+  pass "T20b a failed build is not reported as success just because the tag exists"
+else
+  fail "T20b a failed build is not reported as success" "rc=${B20_RC}; output: ${B20}"
+fi
+
+# ---------------------------------------------------------------------------
+# T20c: the mirror of T20b. A fully cached rebuild legitimately produces the
+# SAME image id, so comparing ids alone would call a good build a failure.
+# smoke runs only once the build has succeeded, so its report is the proof --
+# and smoke failing is expected, because it is ungated by design.
+# ---------------------------------------------------------------------------
+printf '#!/bin/bash\nmkdir -p "%s"\nprintf "{}" > "%s/report.json"\necho "[stub-runner] smoke reported known gaps"\nexit 1\n' \
+  "${FAKE_SMOKE}" "${FAKE_SMOKE}" > "${FAKE_RUNNER_DIR}/run-functional-tests.sh"
+chmod +x "${FAKE_RUNNER_DIR}/run-functional-tests.sh"
+B20C=$(cd "${ROOT}" && PATH="${FAKE_BIN}:${PATH}" bash "${FAKE_RUNNER_DIR}/docdb.sh" build --target image 2>&1)
+B20C_RC=$?
+if [ "${B20C_RC}" -eq 0 ] && printf '%s' "${B20C}" | grep -q "image built"; then
+  pass "T20c a cached rebuild whose smoke reports gaps is still a successful build"
+else
+  fail "T20c a cached rebuild is still a successful build" "rc=${B20C_RC}; output: ${B20C}"
+fi
+
+fi
+# Re-check: the guard above skips the later tests when an earlier one failed,
+# but a failure raised INSIDE it must still decide the verdict.
+if [ "${FAILS}" -eq 0 ]; then
   echo "all parity tests passed"
   exit 0
 fi

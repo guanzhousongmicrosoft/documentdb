@@ -421,3 +421,142 @@ class TestTwoRunClassification:
         # Must not raise: this is a different operation, not a repeat.
         second = reconcile_failing_list(r1, failing, extra_reports=[r2])
         assert second["runs"] == 2
+
+class TestMultiRunUsesEveryReportsCollection:
+    """Pruning and flaky-pass detection must look at ALL the reports given.
+
+    A run can lose tests it really executed: an xdist worker death drops its
+    assigned tests from that run's report. If only the primary report is
+    consulted, an entry the primary lost but another run collected AND failed
+    looks uncollected, and --prune-uncollected deletes it. The next gate run
+    fails it unlisted and reds.
+    """
+
+    def test_entry_present_only_in_an_extra_report_is_not_pruned(self, tmp_path):
+        r1 = _write_report(tmp_path, [
+            ("compatibility/tests/z.py::t_other", "failed", "AssertionError"),
+        ], filename="r1.json")
+        r2 = _write_report(tmp_path, [
+            ("compatibility/tests/z.py::t_other", "failed", "AssertionError"),
+            ("compatibility/tests/a.py::t_listed", "xfailed", ""),
+        ], filename="r2.json")
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/a.py::t_listed",
+        ])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2],
+                                     prune_uncollected=True)
+        assert res["uncollected"] == []
+        assert res["pruned"] == []
+        assert any("t_listed" in line for line in res["lines"]), \
+            "an entry another run collected and failed must survive pruning"
+
+    def test_entry_no_report_collected_is_still_pruned(self, tmp_path):
+        # The genuine case pruning exists for: deleted upstream, so absent
+        # everywhere.
+        r1 = _write_report(tmp_path, [
+            ("compatibility/tests/z.py::t_other", "failed", "AssertionError"),
+        ], filename="r1.json")
+        r2 = _write_report(tmp_path, [
+            ("compatibility/tests/z.py::t_other", "failed", "AssertionError"),
+        ], filename="r2.json")
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/gone.py::t_deleted",
+        ])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2],
+                                     prune_uncollected=True)
+        assert res["pruned"] == ["compatibility/tests/gone.py::t_deleted"]
+
+    def test_flaky_xpass_in_an_extra_report_is_reported(self, tmp_path):
+        r1 = _write_report(tmp_path, [
+            ("compatibility/tests/z.py::t_other", "failed", "AssertionError"),
+        ], filename="r1.json")
+        r2 = _write_report(tmp_path, [
+            ("compatibility/tests/f.py::t_flaky", "xpassed", ""),
+        ], filename="r2.json")
+        failing = _write_list(tmp_path, "failing.txt", ["# empty"])
+        flaky = _write_list(tmp_path, "flaky.txt", [
+            "compatibility/tests/f.py::t_flaky",
+        ])
+        res = reconcile_failing_list(r1, failing, flaky, extra_reports=[r2])
+        assert res["flaky_passes"] == ["compatibility/tests/f.py::t_flaky"]
+
+
+class TestMultiRunKeepsListedErrors:
+    """An 'error' is not evidence that a listed test passed.
+
+    _actually_failed reads a listed 'error' as "did not fail", because under
+    strict xfail a listed test that passes is reported as failed/error. An error
+    the xfail model does not account for would therefore delete a live
+    known-failure entry. The single-report path keeps those for a human; the
+    multi-run path must not be laxer.
+    """
+
+    def test_listed_error_in_every_run_is_kept_not_removed(self, tmp_path):
+        r1 = _write_report(tmp_path, [
+            ("compatibility/tests/e.py::t_err", "error", "fixture blew up"),
+        ], filename="r1.json")
+        r2 = _write_report(tmp_path, [
+            ("compatibility/tests/e.py::t_err", "error", "fixture blew up"),
+        ], filename="r2.json")
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/e.py::t_err",
+        ])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["removed"] == []
+        assert res["kept_errored"] == ["compatibility/tests/e.py::t_err"]
+        assert any("t_err" in line for line in res["lines"])
+
+    def test_listed_xpass_in_every_run_is_still_removed(self, tmp_path):
+        # The genuine XPASS(strict) case must keep working.
+        r1 = _write_report(tmp_path, [
+            ("compatibility/tests/e.py::t_pass", "failed", "[XPASS(strict)]"),
+        ], filename="r1.json")
+        r2 = _write_report(tmp_path, [
+            ("compatibility/tests/e.py::t_pass", "failed", "[XPASS(strict)]"),
+        ], filename="r2.json")
+        failing = _write_list(tmp_path, "failing.txt", [
+            "compatibility/tests/e.py::t_pass",
+        ])
+        res = reconcile_failing_list(r1, failing, extra_reports=[r2])
+        assert res["removed"] == ["compatibility/tests/e.py::t_pass"]
+        assert res["kept_errored"] == []
+
+
+class TestReportIdentityIsCanonical:
+    """The duplicate guard is only as good as the id it compares.
+
+    Hashing the counters plus the first and last node id lets two reports that
+    fail DIFFERENT tests collide, so a genuinely new report is refused; and it
+    makes the id depend on record order, so re-serialising the SAME report gets
+    it applied twice. Both defeat the guard, in opposite directions.
+    """
+
+    def _report(self, tests):
+        return {
+            "summary": {"collected": len(tests), "total": len(tests),
+                        "passed": sum(1 for t in tests if t[1] == "passed"),
+                        "failed": sum(1 for t in tests if t[1] == "failed")},
+            "tests": [{"nodeid": PREFIX + nid, "outcome": outcome} for nid, outcome in tests],
+        }
+
+    def test_same_totals_and_endpoints_different_failures_differ(self):
+        from functional_gate import report_identity
+        a = self._report([("a.py::first", "passed"), ("m1.py::mid", "failed"),
+                          ("m2.py::mid", "passed"), ("z.py::last", "passed")])
+        b = self._report([("a.py::first", "passed"), ("m1.py::mid", "passed"),
+                          ("m2.py::mid", "failed"), ("z.py::last", "passed")])
+        assert report_identity(a) != report_identity(b)
+
+    def test_reordering_the_same_report_keeps_its_identity(self):
+        from functional_gate import report_identity
+        tests = [("a.py::first", "passed"), ("m.py::mid", "failed"),
+                 ("z.py::last", "passed")]
+        a = self._report(tests)
+        b = self._report(list(reversed(tests)))
+        assert report_identity(a) == report_identity(b)
+
+    def test_prefixed_and_bare_node_ids_agree(self):
+        from functional_gate import report_identity
+        a = {"tests": [{"nodeid": PREFIX + "a.py::t", "outcome": "failed"}]}
+        b = {"tests": [{"nodeid": "a.py::t", "outcome": "failed"}]}
+        assert report_identity(a) == report_identity(b)

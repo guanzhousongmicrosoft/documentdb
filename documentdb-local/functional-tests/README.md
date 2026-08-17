@@ -79,6 +79,39 @@ Each leg fails CLOSED on: a collection error (pytest exit ≠ 0/5), a
 suspiciously small universe (`MIN_MANIFEST`), an empty slice, a missing
 `report.json`, or fewer than half the assigned tests recording an outcome.
 
+### What the test-results view shows
+
+Each leg writes two JUnit files, and only one of them is the verdict:
+
+| File | What it is |
+|---|---|
+| `results.xml` | pytest's own JUnit from the **main pass**. Kept in the artifact for debugging. **Not published.** |
+| `gate-results.xml` | the **gate's verdict** (`functional_gate.py emit-junit` over the post-recovery report). This is what is published, and a failure in it fails the build. |
+
+They differ because recovery rewrites `report.json` *after* the main pass, so
+`results.xml` disagrees with the verdict in both directions: a crash victim the
+serial re-run rescued still reads `failed` there, and a test lost with a dying
+xdist worker is simply **absent** while the gate fails the build for it.
+Publishing the main pass therefore needed `failTaskOnFailedTests: false`, which
+suppressed the first case and hid the second.
+
+`gate-results.xml` states the verdict per test, with the remediation in the
+message:
+
+| Verdict | Shown as | Message |
+|---|---|---|
+| passed | Passed | — |
+| passed only after a serial re-run | Passed | `recovered: ... passed on sequential re-run N` |
+| failed, and on the failing list | Skipped | `expected failure (strict xfail from ...)` |
+| on the flaky list, either outcome | Skipped | `known flaky ...` |
+| crash-listed, never executed | Skipped | `crash skip list: ... cascades onto every test sharing the run` |
+| listed but now passes | **Failed** | `XPASS(strict): ... remove the entry` |
+| residual failure | **Failed** | the real assertion |
+| assigned but never reported | **Failed** | `no outcome recorded ... an xdist worker died with it queued` |
+
+So "tests tab red" and "build red" are the same statement, and the `recovered`
+count is a crash-rate signal that used to be invisible.
+
 ## Run locally
 
 One command, whether or not an engine is already up:

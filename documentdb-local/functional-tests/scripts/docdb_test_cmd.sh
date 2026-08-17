@@ -93,9 +93,13 @@ DISTRIBUTION (matches the CI matrix)
   --workers N         pytest-xdist workers for the single-engine modes.
 
 OUTPUT
-  --results-dir DIR   Where reports and logs land.
+  --results-dir DIR   Where reports and logs land. A full-suite split run also
+                      leaves the combined <DIR>/report.json that `xfail
+                      reconcile` reads.
 
-Anything after -- is passed through to the underlying runner.
+Anything after -- is passed through to the underlying runner. Split legs take
+none: run_pytest_split.sh is driven entirely by environment variables, so extra
+arguments are refused there rather than silently dropped.
 EOF
 }
 
@@ -150,6 +154,11 @@ cmd_test() {
     [ "${#engine_args[@]}" -eq 0 ] || die "--build-and-start / --start / --image / --keep only apply to single-engine runs; split legs need an engine that is already up (--connection-string)"
     [ "${NO_XFAIL}" = 0 ] || die "--no-xfail does not apply to split legs: the split runner always applies the known-failure model. Drop --split-total for a raw run."
     [ "${SMOKE}" = 0 ] || die "--smoke is a single-engine mode and cannot be combined with --split-total"
+    # run_pytest_split.sh is driven entirely by environment variables and reads
+    # no argv at all (CI passes it none), so extra pytest args cannot reach the
+    # legs. Accepting them would run the whole expensive suite while quietly
+    # ignoring the filter the caller asked for.
+    [ "${#passthru[@]}" -eq 0 ] || die "extra arguments after -- are not supported with --split-total: run_pytest_split.sh takes none, so they would be silently dropped. Narrow with --tests, or use a single-engine run to pass pytest flags."
   fi
 
   [ -n "${CONN}" ] && engine_args+=(--connection-string "${CONN}")
@@ -301,6 +310,10 @@ PY
         [ -d "${stale}" ] || continue
         case "$(basename "${stale}")" in np|.tmp|p[0-9]|p[0-9][0-9]) rm -rf "${stale}" ;; esac
       done
+      # The combined report is written only after a successful full-suite run,
+      # so a leftover one from a previous run would be reconciled as if it were
+      # this run's evidence.
+      rm -f "${RESULTS_DIR}/report.json"
     elif [ -e "${RESULTS_DIR}" ] && [ ! -e "${marker}" ] && [ -n "$(ls -A "${RESULTS_DIR}" 2>/dev/null)" ]; then
       # Report the same refusal a real run would hit, without writing anything.
       die "${RESULTS_DIR} is not empty and was not created by docdb (no .docdb-results marker). Point --results-dir at a new or empty directory."
@@ -370,11 +383,58 @@ PY
         if [ -f "${u2}" ]; then uargs+=(--universe "${u2}"); else missing=1; fi
       done
       if [ "${missing}" = 1 ]; then
-        info "split-universe check skipped: not every parallel leg reported a universe"
+        # CI fails closed here, and so must this: a leg that reports no universe
+        # never proved it sliced the same set as its neighbours, so the run
+        # cannot certify that the stride tiled the suite. Passing on a check
+        # that did not happen is the one outcome worse than failing it.
+        err "split-universe check: not every parallel leg reported a universe, so the legs cannot be shown to have sliced the same set"
+        overall=1
       else
         info "=== verifying the parallel legs collected one universe ==="
         python3 "${GATE_PY}" verify-split-universes "${uargs[@]}" --expected-splits "${SPLIT_TOTAL}" \
           || { err "split-universe check failed; the legs did not slice the same universe"; overall=1; }
+      fi
+    fi
+
+    # The documented rebaseline workflow reconciles from
+    # "<results-dir>/report.json", so a full-suite run has to leave one behind;
+    # without it the very next step of the pin-bump SOP dies on a missing file.
+    # Only a run that actually covered the whole suite gets the name, because
+    # `reconcile --prune-uncollected` deletes every list entry the report does
+    # not mention: handing it a narrowed or single-leg run under the same
+    # filename would wipe the rest of the baseline.
+    if [ "${DRY_RUN}" = 0 ]; then
+      local combined="${RESULTS_DIR}/report.json"
+      if [ -n "${SPLIT_ID}" ] || [ "${MODE}" != all ] || [ -n "${TESTS}" ]; then
+        info "no combined report written: this run did not cover the whole suite."
+        info "  per-leg reports are in ${RESULTS_DIR}/<leg>/report.json; merge them with 'docdb xfail combine' if you need one."
+      else
+        local -a legs=(); local missing_report=0 rp
+        for idx in "${!TAGS[@]}"; do
+          rp="${RESULTS_DIR}/${TAGS[$idx]}/report.json"
+          if [ -f "${rp}" ]; then legs+=("${rp}"); else
+            warn "leg ${TAGS[$idx]} produced no report.json"; missing_report=1
+          fi
+        done
+        if [ "${missing_report}" = 1 ]; then
+          err "not writing ${combined}: a leg is missing its report, so the merge would under-report the suite and --prune-uncollected would delete that leg's entries."
+        elif cp "${legs[0]}" "${combined}"; then
+          local mrc=0 i
+          for ((i=1; i<${#legs[@]}; i++)); do
+            # --sum-collected: the legs slice disjoint parts of the suite, so
+            # the combined collection count is their sum, not any one leg's.
+            python3 "${GATE_PY}" merge-reports --base "${combined}" --overlay "${legs[$i]}" \
+              --out "${combined}" --sum-collected >/dev/null || { mrc=1; break; }
+          done
+          if [ "${mrc}" -eq 0 ]; then
+            info "combined ${#legs[@]} leg report(s) -> ${combined}"
+          else
+            rm -f "${combined}"
+            err "merge-reports failed; ${combined} was not written"
+          fi
+        else
+          err "cannot write ${combined}"
+        fi
       fi
     fi
 
