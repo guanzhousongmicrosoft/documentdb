@@ -45,7 +45,7 @@ static void ConsolidatePrivilege(List **consolidatedPrivileges,
 								 const Privilege *sourcePrivilege);
 static bool ComparePrivileges(const ConsolidatedPrivilege *privilege1,
 							  const Privilege *privilege2);
-static void ConsolidatePrivilegesForRole(const char *roleName,
+static void ConsolidatePrivilegesForRole(const StringView *roleName,
 										 List **consolidatedPrivileges);
 static void WritePrivilegeListToArray(List *consolidatedPrivileges,
 									  pgbson_array_writer *privilegesArrayWriter);
@@ -274,10 +274,10 @@ static const Privilege dropDatabasePrivileges[] = {
  * writes them to the provided BSON array writer.
  */
 void
-WritePrivileges(const char *internalRoleName,
+WritePrivileges(const StringView *internalRoleName,
 				pgbson_array_writer *privilegesArrayWriter)
 {
-	if (internalRoleName == NULL)
+	if (internalRoleName == NULL || internalRoleName->string == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
 						errmsg("Role name cannot be NULL.")));
@@ -313,14 +313,7 @@ WriteMultipleRolePrivileges(HTAB *rolesTable,
 	hash_seq_init(&status, rolesTable);
 	while ((roleEntry = hash_seq_search(&status)) != NULL)
 	{
-		/* Convert StringView to null-terminated string */
-		char *roleName = palloc(roleEntry->length + 1);
-		memcpy(roleName, roleEntry->string, roleEntry->length);
-		roleName[roleEntry->length] = '\0';
-
-		ConsolidatePrivilegesForRole(roleName, &consolidatedPrivileges);
-
-		pfree(roleName);
+		ConsolidatePrivilegesForRole(roleEntry, &consolidatedPrivileges);
 	}
 
 	WritePrivilegeListToArray(consolidatedPrivileges, privilegesArrayWriter);
@@ -359,29 +352,29 @@ ContainsReservedPgRoleNamePrefix(const char *name)
  * Ignores unknown roles silently.
  */
 static void
-ConsolidatePrivilegesForRole(const char *roleName, List **consolidatedPrivileges)
+ConsolidatePrivilegesForRole(const StringView *roleName, List **consolidatedPrivileges)
 {
-	if (roleName == NULL || consolidatedPrivileges == NULL)
+	if (roleName == NULL || roleName->string == NULL || consolidatedPrivileges == NULL)
 	{
 		return;
 	}
 
 	size_t sourcePrivilegeCount;
 
-	if (strcmp(roleName, ApiReadOnlyRole) == 0)
+	if (StringViewEqualsCString(roleName, ApiReadOnlyRole))
 	{
 		sourcePrivilegeCount = sizeof(readOnlyPrivileges) / sizeof(readOnlyPrivileges[0]);
 		ConsolidatePrivileges(consolidatedPrivileges, readOnlyPrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiReadWriteRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiReadWriteRole))
 	{
 		sourcePrivilegeCount = sizeof(readWritePrivileges) /
 							   sizeof(readWritePrivileges[0]);
 		ConsolidatePrivileges(consolidatedPrivileges, readWritePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiAdminRoleV2) == 0)
+	else if (StringViewEqualsCString(roleName, ApiAdminRoleV2))
 	{
 		sourcePrivilegeCount = sizeof(readWritePrivileges) /
 							   sizeof(readWritePrivileges[0]);
@@ -408,7 +401,7 @@ ConsolidatePrivilegesForRole(const char *roleName, List **consolidatedPrivileges
 		ConsolidatePrivileges(consolidatedPrivileges, dropDatabasePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiClusterAdminRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiClusterAdminRole))
 	{
 		sourcePrivilegeCount = sizeof(clusterManagerPrivileges) /
 							   sizeof(clusterManagerPrivileges[0]);
@@ -430,14 +423,14 @@ ConsolidatePrivilegesForRole(const char *roleName, List **consolidatedPrivileges
 		ConsolidatePrivileges(consolidatedPrivileges, dropDatabasePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiUserAdminRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiUserAdminRole))
 	{
 		sourcePrivilegeCount = sizeof(userAdminPrivileges) /
 							   sizeof(userAdminPrivileges[0]);
 		ConsolidatePrivileges(consolidatedPrivileges, userAdminPrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiRootRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiRootRole))
 	{
 		sourcePrivilegeCount = sizeof(readWritePrivileges) /
 							   sizeof(readWritePrivileges[0]);
