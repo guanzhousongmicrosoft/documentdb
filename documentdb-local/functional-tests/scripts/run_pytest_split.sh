@@ -41,12 +41,20 @@ PFX="docdb_functional_tests/documentdb_tests/"
 ROOTDIR="docdb_functional_tests/documentdb_tests"
 TESTPATH="${SPLIT_TESTPATH:-${PFX}compatibility/tests}"
 ENGINE="${ENGINE_NAME:-documentdb}"
-CS="mongodb://${CONN_USER}:${CONN_PASS}@localhost:${CONN_PORT}/?tls=true&tlsAllowInvalidCertificates=true"
+# CONN_USER/CONN_PASS arrive RAW (CI exports the generated secret verbatim), but
+# they are about to be embedded in a URI, so reserved characters have to be
+# percent-encoded first. A password containing '@' or '/' would otherwise build
+# a URI that parses to a different host, or does not parse at all, and the
+# failure would surface deep inside pytest as an unrelated connection error.
+uri_escape() {
+  python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+CS="mongodb://$(uri_escape "${CONN_USER}"):$(uri_escape "${CONN_PASS}")@localhost:${CONN_PORT}/?tls=true&tlsAllowInvalidCertificates=true"
 GATE="python3 ${FT}/tools/functional_gate.py"
 REPORT="${RESULTS_DIR}/report.json"
 JUNIT="${RESULTS_DIR}/results.xml"
-# The gate's verdict rendered as JUnit — the file CI publishes. results.xml is
-# the pre-recovery main pass, kept in the artifact for debugging.
+# The gate's verdict rendered as JUnit, the file to read in the leg artifact.
+# results.xml is the pre-recovery main pass, kept alongside it for debugging.
 GATE_JUNIT="${RESULTS_DIR}/gate-results.xml"
 
 mkdir -p "${RESULTS_DIR}"
@@ -300,7 +308,7 @@ fi
 #     results.xml is informational. ---
 run_pytest "${REPORT}" --junitxml="${JUNIT}" "${MAIN_ARGS[@]}" || true
 
-# Stop the observer before the exec below replaces this shell.
+# Stop the observer before the gate runs.
 [ -n "${OBSERVER_PID}" ] && kill "${OBSERVER_PID}" 2>/dev/null || true
 
 # --- fail CLOSED on a missing/partial run (never let a collapse score green) ---
@@ -336,9 +344,9 @@ ${GATE} recover-and-gate \
      -n=0 --timeout=600 --timeout-method=signal || GATE_RC=$?
 
 # Render the gate's verdict as JUnit. results.xml is frozen before recovery
-# (rescued crash victims read failed, worker-lost tests are absent), so CI
-# publishes this file instead and can fail the task on any failure in it.
-# Reporting never changes the verdict — GATE_RC already decided.
+# (rescued crash victims read failed, worker-lost tests are absent), so this is
+# the file to read in the artifact: every failure in it is a real one.
+# Reporting never changes the verdict, GATE_RC already decided.
 # shellcheck disable=SC2086
 ${GATE} emit-junit --report "${REPORT}" --out "${GATE_JUNIT}" \
   --failing "${KF}/ci_failing_tests.txt" --flaky "${KF}/ci_flaky_tests.txt" \

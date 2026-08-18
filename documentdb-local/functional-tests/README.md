@@ -85,15 +85,16 @@ Each leg writes two JUnit files, and only one of them is the verdict:
 
 | File | What it is |
 |---|---|
-| `results.xml` | pytest's own JUnit from the **main pass**. Kept in the artifact for debugging. **Not published.** |
-| `gate-results.xml` | the **gate's verdict** (`functional_gate.py emit-junit` over the post-recovery report). This is what is published, and a failure in it fails the build. |
+| `results.xml` | pytest's own JUnit from the **main pass**. Kept in the artifact for debugging. **Not the verdict.** |
+| `gate-results.xml` | the **gate's verdict** (`functional_gate.py emit-junit` over the post-recovery report). Read this one: it agrees with the leg's exit status by construction. |
 
 They differ because recovery rewrites `report.json` *after* the main pass, so
 `results.xml` disagrees with the verdict in both directions: a crash victim the
 serial re-run rescued still reads `failed` there, and a test lost with a dying
 xdist worker is simply **absent** while the gate fails the build for it.
-Publishing the main pass therefore needed `failTaskOnFailedTests: false`, which
-suppressed the first case and hid the second.
+Reading the main pass as the verdict would therefore report a rescued crash
+victim as a failure, and say nothing at all about a test the gate failed the
+run for.
 
 `gate-results.xml` states the verdict per test, with the remediation in the
 message:

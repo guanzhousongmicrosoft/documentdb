@@ -68,8 +68,12 @@ if [ -n "${RESULTS_DIR:-}" ] && [ "${STUB_NO_ARTIFACTS:-0}" != 1 ]; then
   printf '{"summary":{"collected":1,"total":1,"failed":1},"tests":[{"nodeid":"compatibility/tests/%s.py::t","outcome":"failed","call":{"longrepr":"e"}}]}\n' \
     "${SPLIT_TAG:-leg}" > "${RESULTS_DIR}/report.json"
   # Every parallel leg must report the SAME universe; no_parallel is not part
-  # of that check.
-  [ "${SPLIT_MODE:-}" = parallel ] && printf 'universe_hash=deadbeef\ncount=2\n' > "${RESULTS_DIR}/universe.txt"
+  # of that check. The record must be in write_universe_record's format
+  # (`<tag> <mode> <hash> <count>` on one line): an unparseable record reds the
+  # universe check on EVERY simulated run, which would hide any regression in
+  # the all-green path behind a failure this stub caused itself.
+  [ "${SPLIT_MODE:-}" = parallel ] && \
+    printf '%s parallel deadbeefdeadbeef 2\n' "${SPLIT_TAG:-leg}" > "${RESULTS_DIR}/universe.txt"
 fi
 [ -n "${STUB_MESSAGE:-}" ] && echo "${STUB_MESSAGE}"
 exit "${STUB_RC:-0}"
@@ -118,19 +122,23 @@ else
 fi
 
 # The split runner documents its own required env; that is the contract to meet.
-mapfile -t REQ_ENV < <(sed -n 's/^# Required env: *//p;s/^#  *\([A-Z_ ]*\)$/\1/p' "${SPLIT_SH}" \
+# Read into a newline-delimited string rather than an array: `mapfile` is bash 4
+# only, and on bash 3.2 it failed silently here, skipping the single most
+# important assertion in this file without incrementing the failure count.
+REQ_ENV_LIST=$(sed -n 's/^# Required env: *//p;s/^#  *\([A-Z_ ]*\)$/\1/p' "${SPLIT_SH}" \
   | tr ' ' '\n' | grep -E '^[A-Z][A-Z_]+$' | sort -u)
-if [ "${#REQ_ENV[@]}" -eq 0 ]; then
+if [ -z "${REQ_ENV_LIST}" ]; then
   fail "T1b required env readable" "could not parse 'Required env:' from run_pytest_split.sh"
 else
-  missing=()
-  for v in "${REQ_ENV[@]}"; do
-    grep -qh "\"${v}=" "${SUT}" "${FT}/scripts/docdb_test_cmd.sh" 2>/dev/null || missing+=("${v}")
-  done
-  if [ "${#missing[@]}" -eq 0 ]; then
-    pass "T1b sets every env var run_pytest_split.sh requires (${REQ_ENV[*]})"
+  missing=""
+  while IFS= read -r v; do
+    [ -n "${v}" ] || continue
+    grep -qh "\"${v}=" "${SUT}" "${FT}/scripts/docdb_test_cmd.sh" 2>/dev/null || missing="${missing}${v} "
+  done <<< "${REQ_ENV_LIST}"
+  if [ -z "${missing}" ]; then
+    pass "T1b sets every env var run_pytest_split.sh requires ($(printf '%s' "${REQ_ENV_LIST}" | tr '\n' ' '))"
   else
-    fail "T1b sets every env var run_pytest_split.sh requires" "never set: ${missing[*]}"
+    fail "T1b sets every env var run_pytest_split.sh requires" "never set: ${missing% }"
   fi
 fi
 
@@ -464,10 +472,30 @@ fi
 # T23: a missing option value must fail fast, not spin. `shift 2` with one
 # argument left neither shifts nor exits without `set -e`, so the parsing loop
 # would loop forever at 100% CPU with no output.
+#
+# The watchdog is written by hand rather than with timeout(1), which is absent
+# on some developer machines: there, every command exited 127 and scored as
+# "fails fast", so the regression this test exists for would have passed
+# unnoticed on exactly the machines people iterate on.
 # ---------------------------------------------------------------------------
+run_bounded() {  # $1 = seconds ; rest = command. 124 on timeout, like timeout(1)
+  local secs="$1"; shift
+  "$@" >/dev/null 2>&1 &
+  local pid=$! waited=0
+  while kill -0 "${pid}" 2>/dev/null; do
+    if [ "${waited}" -ge "${secs}" ]; then
+      kill -9 "${pid}" 2>/dev/null
+      wait "${pid}" 2>/dev/null
+      return 124
+    fi
+    sleep 1; waited=$((waited+1))
+  done
+  wait "${pid}"
+}
+
 for spec in "build --target" "xfail reconcile --report" "xfail combine --out" "suite pin --sha"; do
   # shellcheck disable=SC2086
-  timeout 15 bash "${SUT}" ${spec} >/dev/null 2>&1
+  run_bounded 15 bash "${SUT}" ${spec}
   rc=$?
   if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 124 ]; then
     pass "T23 '${spec}' without a value fails fast (exit ${rc})"
@@ -662,16 +690,34 @@ fi
 # the runner cannot source docdb.sh, so the formula is written twice. If the two
 # drift, `suite status` reports on an image the runner never executes, which is
 # the same failure the single pin was introduced to remove.
+#
+# Ask docdb.sh what it derives rather than scraping assignments out of its
+# source: status is the line a developer actually reads, and a scrape silently
+# stops matching the moment the assignment moves.
 # ---------------------------------------------------------------------------
 RUNNER_FORMULA=$(grep -oE 'IMAGE="\$\{FUNCTIONAL_TESTS_IMAGE_REPO:-[^}]+\}:sha-\$\{SUITE_SHA:0:7\}"' "${RUNNER}" | head -1)
 RUNNER_REPO=$(printf '%s' "${RUNNER_FORMULA}" | sed -E 's/.*:-([^}]+)\}.*/\1/')
-DOCDB_REPO=$(cd "${ROOT}" && bash -c '
-  IMAGE_YML='"${CONFIG}"'/image.yml
-  eval "$(sed -n "/^SUITE_REGISTRY=/p;/^SUITE_IMAGE_REPO=/p" '"${SUT}"')"
-  printf "%s/%s" "${SUITE_REGISTRY}" "${SUITE_IMAGE_REPO}"')
+PIN_NOW="$(awk '/^source_sha:/ {print $2; exit}' "${CONFIG}/image.yml")"
+
+docdb_ref() {  # $1 = FUNCTIONAL_TESTS_IMAGE_REPO value, empty to leave it unset
+  local out
+  if [ -n "${1:-}" ]; then
+    out=$(cd "${ROOT}" && FUNCTIONAL_TESTS_IMAGE_REPO="$1" \
+      DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
+  else
+    out=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
+  fi
+  printf '%s' "${out}" | grep -oE '[A-Za-z0-9._/-]+:sha-[0-9a-f]{7}' | head -1
+}
+
+DOCDB_REF="$(docdb_ref "")"
+DOCDB_REPO="${DOCDB_REF%%:sha-*}"
 if [ -z "${RUNNER_FORMULA}" ]; then
   fail "T35 both scripts derive the same image reference" \
        "run-functional-tests.sh no longer derives IMAGE from source_sha (formula not found)"
+elif [ -z "${DOCDB_REPO}" ]; then
+  fail "T35 both scripts derive the same image reference" \
+       "'docdb suite status' printed no <repo>:sha-<short7> reference"
 elif [ "${RUNNER_REPO}" = "${DOCDB_REPO}" ]; then
   pass "T35 both scripts derive the same image reference (${DOCDB_REPO}:sha-<short7>)"
 else
@@ -681,14 +727,25 @@ fi
 
 # The derived reference must also be exactly what `suite status` reports, so a
 # developer reading status sees the image the runner will actually pull.
-PIN_NOW="$(awk '/^source_sha:/ {print $2; exit}' "${CONFIG}/image.yml")"
 WANT_REF="${DOCDB_REPO}:sha-${PIN_NOW:0:7}"
-ST=$(cd "${ROOT}" && DOCDB_REGISTRY_LOOKUP="${REG_STUB}" bash "${SUT}" suite status 2>&1)
-if printf '%s' "${ST}" | grep -qF "${WANT_REF}"; then
+if [ "${DOCDB_REF}" = "${WANT_REF}" ]; then
   pass "T35b suite status reports the derived reference (${WANT_REF})"
 else
   fail "T35b suite status reports the derived reference" \
-       "expected ${WANT_REF} in: ${ST}"
+       "expected ${WANT_REF}, got '${DOCDB_REF}'"
+fi
+
+# T35c: the OVERRIDE has to be shared too. Comparing only the defaults let the
+# two sides read different variables, so setting the runner's override moved the
+# image the runner pulls while status kept reporting the default: the same
+# disagreement, reachable by anyone testing against a mirror.
+OVR_REPO="example.invalid/team/functional-tests"
+OVR_REF="$(docdb_ref "${OVR_REPO}")"
+if [ "${OVR_REF}" = "${OVR_REPO}:sha-${PIN_NOW:0:7}" ]; then
+  pass "T35c FUNCTIONAL_TESTS_IMAGE_REPO moves both sides (${OVR_REF})"
+else
+  fail "T35c FUNCTIONAL_TESTS_IMAGE_REPO moves both sides" \
+       "the runner honours FUNCTIONAL_TESTS_IMAGE_REPO but docdb reported '${OVR_REF}'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -926,6 +983,85 @@ else
 fi
 
 fi
+
+# ---------------------------------------------------------------------------
+# T44: the all-green path. Every other split case asserts a failure, so a
+# regression that permanently reds a good run would pass this whole suite
+# unnoticed. It already had: the stub wrote its universe record in a format the
+# cross-leg check cannot parse, so every simulated run ended red for a reason
+# the stub invented.
+# ---------------------------------------------------------------------------
+STUB_RC=0
+STUB_MESSAGE=""
+run_sut test --all --split-total 2 --connection-string "${CS}" --results-dir "${WORK}/r44"
+if [ "${SUT_RC}" -eq 0 ] && printf '%s' "${SUT_OUT}" | grep -qE '^\[docdb\] PASS$'; then
+  pass "T44 an all-green split run exits 0"
+else
+  fail "T44 an all-green split run exits 0" "rc=${SUT_RC}; output: ${SUT_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# T45: an id on two lists makes conftest_known_failures raise during COLLECTION,
+# so the suite reports an internal error with zero tests run. reconcile guards
+# this; the interactive command has to as well, or the cheapest edit becomes the
+# most expensive failure.
+# ---------------------------------------------------------------------------
+FAILING_PATH="${CONFIG}/oss_ci_failing_tests.txt"
+FLAKY_ID=$(grep -m1 '::' "${CONFIG}/oss_ci_flaky_tests.txt" 2>/dev/null || true)
+if [ -z "${FLAKY_ID}" ]; then
+  fail "T45 xfail add refuses an id already on the flaky list" "the flaky list holds no id to test with"
+else
+  SZ_BEFORE=$(wc -c < "${FAILING_PATH}")
+  run_sut xfail add "${FLAKY_ID}"
+  SZ_AFTER=$(wc -c < "${FAILING_PATH}")
+  if [ "${SUT_RC}" -ne 0 ] && [ "${SZ_BEFORE}" = "${SZ_AFTER}" ]; then
+    pass "T45 xfail add refuses an id already on the flaky list, and writes nothing"
+  else
+    fail "T45 xfail add refuses an id already on the flaky list" \
+         "rc=${SUT_RC}, list size ${SZ_BEFORE} -> ${SZ_AFTER}; output: ${SUT_OUT}"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# T46: `suite update` removes the target directory before cloning into it, and
+# the target comes from DOCDB_SUITE_DIR. An unlucky export must not be able to
+# hand `rm -rf` a directory full of someone's work.
+# ---------------------------------------------------------------------------
+NOT_A_CHECKOUT="${WORK}/not-a-checkout"
+mkdir -p "${NOT_A_CHECKOUT}/precious"
+: > "${NOT_A_CHECKOUT}/precious/file"
+OUT46=$(cd "${ROOT}" && DOCDB_SUITE_DIR="${NOT_A_CHECKOUT}" bash "${SUT}" suite update 2>&1)
+RC46=$?
+if [ "${RC46}" -ne 0 ] && [ -f "${NOT_A_CHECKOUT}/precious/file" ]; then
+  pass "T46 suite update refuses a target that is not a suite checkout"
+else
+  fail "T46 suite update refuses a target that is not a suite checkout" \
+       "rc=${RC46}, precious file still there: $([ -f "${NOT_A_CHECKOUT}/precious/file" ] && echo yes || echo NO); output: ${OUT46}"
+fi
+
+# ---------------------------------------------------------------------------
+# T47: --collect-only returns before the split code, so accepting --split-total
+# with it would drop the split silently. Refusing options that cannot be
+# honoured is the rule the rest of the entry point follows.
+# ---------------------------------------------------------------------------
+run_sut test --all --collect-only --split-total 2 --connection-string "${CS}"
+if [ "${SUT_RC}" -ne 0 ] && printf '%s' "${SUT_OUT}" | grep -q -- '--collect-only'; then
+  pass "T47 --collect-only with --split-total is refused, not silently unsplit"
+else
+  fail "T47 --collect-only with --split-total is refused" "rc=${SUT_RC}; output: ${SUT_OUT}"
+fi
+
+# T47b: --dry-run documents that nothing is started. Collecting the whole suite
+# is minutes of work and starts pytest, which is exactly what it promises not
+# to do.
+run_sut test --all --collect-only --dry-run
+if [ "${SUT_RC}" -eq 0 ] && printf '%s' "${SUT_OUT}" | grep -q 'plan only'; then
+  pass "T47b --collect-only --dry-run plans without running a collection"
+else
+  fail "T47b --collect-only --dry-run plans without running a collection" \
+       "rc=${SUT_RC}; output: ${SUT_OUT}"
+fi
+
 # Re-check: the guard above skips the later tests when an earlier one failed,
 # but a failure raised INSIDE it must still decide the verdict.
 if [ "${FAILS}" -eq 0 ]; then

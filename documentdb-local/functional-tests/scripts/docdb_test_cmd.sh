@@ -159,6 +159,10 @@ cmd_test() {
     # legs. Accepting them would run the whole expensive suite while quietly
     # ignoring the filter the caller asked for.
     [ "${#passthru[@]}" -eq 0 ] || die "extra arguments after -- are not supported with --split-total: run_pytest_split.sh takes none, so they would be silently dropped. Narrow with --tests, or use a single-engine run to pass pytest flags."
+    # --collect-only returns before the split code below, so combining the two
+    # would drop the split silently. Refusing options that cannot be honoured is
+    # the rule everywhere else in this block.
+    [ "${COLLECT_ONLY}" = 0 ] || die "--collect-only is a host-side listing of the whole target and cannot be combined with --split-total: the listing is not sliced, so the split would be silently ignored."
   fi
 
   [ -n "${CONN}" ] && engine_args+=(--connection-string "${CONN}")
@@ -195,6 +199,7 @@ cmd_test() {
 
   # --- collect only ---
   if [ "${COLLECT_ONLY}" = 1 ]; then
+    [ "${SMOKE}" = 0 ] || die "--collect-only lists a target and cannot be combined with --smoke, which is a fixed upstream subset run inside the image."
     # Run from ROOT with the normalized path, exactly like the split runner, so
     # the prefix means the same thing in both. Running from SUITE_DIR instead
     # would need a different, silently incompatible form of the same target.
@@ -209,6 +214,13 @@ cmd_test() {
       while IFS= read -r line; do
         [ -n "${line}" ] && ign+=("${line}")
       done < <(grep -- '--ignore=' "${CONFIG}/oss_pytest.args" 2>/dev/null)
+    fi
+    if [ "${DRY_RUN}" = 1 ]; then
+      # `--dry-run` documents that nothing is started. A real collection of the
+      # whole suite is minutes of work and starts pytest, so it is exactly the
+      # thing the flag promises not to do.
+      info "plan only: would collect '${ctarget}' from ${ROOT} with ${#ign[@]} --ignore option(s) from config/oss_pytest.args."
+      return 0
     fi
     ( cd "${ROOT}" && python3 -m pytest --collect-only -q -o addopts="" \
         --rootdir="docdb_functional_tests/documentdb_tests" \
@@ -333,6 +345,10 @@ PY
     [ "${#TAGS[@]}" -gt 1 ] && warn "legs run back to back against one engine, while CI gives each leg a fresh one; re-run a suspicious leg alone before believing it."
 
     local overall=0 executed=0 idx
+    # Why the run is red, so the final line names the actual cause. Three
+    # different failures reach the same exit, and reporting all of them as
+    # residual test failures sent readers to an empty gate-failures.txt.
+    local overall_reason=""
     local -a STATUS=()
     for idx in "${!TAGS[@]}"; do
       local tag="${TAGS[$idx]}" m="${MODES[$idx]}" id="${IDS[$idx]}" total="${SPLIT_TOTAL}"
@@ -369,7 +385,10 @@ PY
         info "leg ${tag}: target selects no tests for this leg"; rc=0; st=SKIP
       else executed=$((executed+1)); fi
       STATUS+=("${st}")
-      [ "${rc}" -eq 0 ] || overall=1
+      if [ "${rc}" -ne 0 ]; then
+        overall=1
+        overall_reason="${overall_reason:-residual failures remain after re-run recovery}"
+      fi
       info "=== leg ${tag}: ${st} (exit ${rc}) ==="
     done
 
@@ -389,10 +408,13 @@ PY
         # that did not happen is the one outcome worse than failing it.
         err "split-universe check: not every parallel leg reported a universe, so the legs cannot be shown to have sliced the same set"
         overall=1
+        overall_reason="${overall_reason:-the split-universe check could not be made}"
       else
         info "=== verifying the parallel legs collected one universe ==="
         python3 "${GATE_PY}" verify-split-universes "${uargs[@]}" --expected-splits "${SPLIT_TOTAL}" \
-          || { err "split-universe check failed; the legs did not slice the same universe"; overall=1; }
+          || { err "split-universe check failed; the legs did not slice the same universe"
+               overall=1
+               overall_reason="${overall_reason:-the legs did not slice the same universe}"; }
       fi
     fi
 
@@ -451,7 +473,11 @@ PY
       err "no leg ran a single test: '${TESTS}' selects nothing. This is not a pass."; return 1
     fi
     if [ "${DRY_RUN}" = 1 ]; then info "plan only: nothing was run."; return 0; fi
-    [ "${overall}" -eq 0 ] && info "PASS" || err "FAIL: residual failures remain after re-run recovery."
+    if [ "${overall}" -eq 0 ]; then
+      info "PASS"
+    else
+      err "FAIL: ${overall_reason:-see the leg summary and the errors above}."
+    fi
     return "${overall}"
   fi
 

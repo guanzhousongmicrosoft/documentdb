@@ -337,6 +337,18 @@ def _normalize_node_id(node_id: str, rootdir_name: str = _ROOTDIR_NAME) -> str:
     return node_id
 
 
+def _derive_prefix(lines) -> str:
+    """The path prefix the entries in ``lines`` are written with, "" if bare.
+
+    Lists are written either prefixed (``docdb_functional_tests/...``) or bare,
+    and a file must not mix the two. Comments and blank lines carry no style.
+    """
+    for entry in (line.strip() for line in lines):
+        if entry and not entry.startswith("#") and _normalize_node_id(entry) != entry:
+            return entry[: len(entry) - len(_normalize_node_id(entry))]
+    return ""
+
+
 def report_identity(report: dict) -> str:
     """A stable short id for one pytest report.
 
@@ -753,15 +765,15 @@ def cmd_reconcile(args):
                 f"{len(result['demoted_flaky'])} test(s) disagreed between runs and belong "
                 "on the flaky list, but --flaky was not given. Re-run with --flaky <path>.")
         prefix = ""
-        for entry in (l.strip() for l in result["lines"]):
-            if entry and not entry.startswith("#") and _normalize_node_id(entry) != entry:
-                prefix = entry[: len(entry) - len(_normalize_node_id(entry))]
-                break
         try:
             with open(args.flaky, encoding="utf-8") as f:
                 existing = f.read().rstrip("\n").split("\n")
         except OSError as exc:
             raise SystemExit(f"cannot read the flaky list {args.flaky}: {exc}")
+        # Write the demoted ids in the style of the list they are JOINING, not
+        # the one they are leaving. Deriving from the failing list appended bare
+        # ids to a prefixed flaky list whenever no prefixed entry survived there.
+        prefix = _derive_prefix(existing) or _derive_prefix(result["lines"])
         existing.append("")
         existing.append(f"# --- disagreed across {result['runs']} runs, so not assertable as "
                         "a consistent failure ---")
@@ -774,9 +786,13 @@ def cmd_reconcile(args):
         # XPASS(strict) entries. Uncollected entries (a listed test the run did
         # not collect — deleted/renamed upstream, or a run that did not cover the
         # list) make it false whether or not they were pruned, since dropping them
-        # is a suite-composition change a human should confirm.
+        # is a suite-composition change a human should confirm. Demotions and
+        # crash collisions move entries BETWEEN tracked lists, so they are the
+        # same kind of change and must be reported too: omitting them let a
+        # reconcile rewrite both lists on disk and still report changed=false.
         clean = (not result["added"] and not result["kept_errored"]
-                 and not result["skipped_flaky"] and not result["uncollected"])
+                 and not result["skipped_flaky"] and not result["uncollected"]
+                 and not result["demoted_flaky"] and not result["crash_collisions"])
         summary = {
             "added": result["added"],
             "removed": result["removed"],
@@ -785,7 +801,11 @@ def cmd_reconcile(args):
             "uncollected": result["uncollected"],
             "pruned": result["pruned"],
             "flaky_passes": result["flaky_passes"],
-            "changed": bool(result["added"] or result["removed"] or result["pruned"]),
+            "demoted_flaky": result["demoted_flaky"],
+            "skipped_crash": result["skipped_crash"],
+            "crash_collisions": result["crash_collisions"],
+            "changed": bool(result["added"] or result["removed"] or result["pruned"]
+                            or result["demoted_flaky"] or result["crash_collisions"]),
             "clean": clean,
         }
         staged.append((args.summary_json, json.dumps(summary, indent=2)))
@@ -1199,20 +1219,19 @@ def _rerun_isolated(rerun_cmd: list[str], ids: list[str], prefix: str,
 # ---------------------------------------------------------------------------
 # The gate's verdict, rendered as JUnit
 # ---------------------------------------------------------------------------
-# Publishing pytest's own --junitxml is what forced `failTaskOnFailedTests:
-# false` onto every functional lane, because that file is the MAIN PASS and is
-# frozen before recovery rewrites report.json. It disagrees with the gate in
-# both directions:
+# Pytest's own --junitxml cannot be read as the verdict: that file is the MAIN
+# PASS and is frozen before recovery rewrites report.json. It disagrees with the
+# gate in both directions:
 #
 #   over-reports   a transient crash victim that the sequential re-run rescued
 #                  still reads `failed`, so a green build shows red tests;
 #   under-reports  a test that vanished with a dying xdist worker is simply
-#                  ABSENT, so the tab looks clean on exactly the id the gate
+#                  ABSENT, so the file looks clean on exactly the id the gate
 #                  fails the build for.
 #
-# Suppressing the first hid the second, and it trains everyone to ignore the
-# tab. Rendering the post-recovery verdict instead makes "tests tab red" and
-# "build red" the same statement, so the publish step can fail on a failure
+# Tolerating the first hid the second, and it trains everyone to ignore the
+# results view. Rendering the post-recovery verdict instead makes "results view
+# red" and "build red" the same statement, so a reader can act on a failure
 # like any other suite.
 
 _JUNIT_SKIP_TYPE = "pytest.skip"
@@ -1728,7 +1747,7 @@ def main():
                                        "is refused by default")
 
     # emit-junit: the gate's verdict as JUnit, so the results view and the build
-    # status are the same statement and the publish step can fail on a failure.
+    # status are the same statement and every failure in it is a real one.
     junit_parser = subparsers.add_parser(
         "emit-junit",
         help="Render the post-recovery report as JUnit reflecting the GATE's "
@@ -1754,7 +1773,8 @@ def main():
     # recover-and-gate: sequential re-run recovery of transient crash victims,
     # then gate on the merged report. Shared by the single-job lane and the
     # split matrix lane. The pytest re-run command follows '--'.
-    recover_parser = subparsers.add_parser(        "recover-and-gate",
+    recover_parser = subparsers.add_parser(
+        "recover-and-gate",
         help="Sequentially re-run the still-failing set (transient crash victims) "
              "and gate on the merged report; exit 1 on any residual. Pass the "
              "pytest re-run command after '--'.")

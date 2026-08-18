@@ -103,8 +103,19 @@ EOF
 pinned_sha()   { awk '/^source_sha:/ {print $2; exit}' "${IMAGE_YML}" 2>/dev/null; }
 local_sha()    { git -C "${SUITE_DIR}" rev-parse HEAD 2>/dev/null; }
 
-SUITE_REGISTRY="${DOCDB_SUITE_REGISTRY:-ghcr.io}"
-SUITE_IMAGE_REPO="${DOCDB_SUITE_IMAGE_REPO:-documentdb/functional-tests}"
+# The image reference must be derived the SAME way everywhere, override included.
+# run-functional-tests.sh and functional_gate.py both read
+# FUNCTIONAL_TESTS_IMAGE_REPO (a full registry/repo reference), so honour that
+# first: a status line computed from a different variable would name an image
+# the runner never pulls, which is the exact disagreement the single-pin change
+# was made to remove. The DOCDB_* pair stays as a split registry/repo override.
+if [ -n "${FUNCTIONAL_TESTS_IMAGE_REPO:-}" ]; then
+  SUITE_REGISTRY="${FUNCTIONAL_TESTS_IMAGE_REPO%%/*}"
+  SUITE_IMAGE_REPO="${FUNCTIONAL_TESTS_IMAGE_REPO#*/}"
+else
+  SUITE_REGISTRY="${DOCDB_SUITE_REGISTRY:-ghcr.io}"
+  SUITE_IMAGE_REPO="${DOCDB_SUITE_IMAGE_REPO:-documentdb/functional-tests}"
+fi
 
 # config/image.yml names ONE thing: the suite commit. Both ways of running the
 # suite are derived from it.
@@ -229,6 +240,12 @@ cmd_suite() {
       return "${rc}"
       ;;
     update)
+      # setup_functional_tests.sh removes the target first, and SUITE_DIR comes
+      # from DOCDB_SUITE_DIR, so an unlucky export would hand `rm -rf` a
+      # directory full of someone's work. Only ever delete a suite checkout.
+      if [ -e "${SUITE_DIR}" ] && [ ! -e "${SUITE_DIR}/.git" ]; then
+        die "${SUITE_DIR} exists and is not a git checkout, and 'suite update' removes the directory first. Point DOCDB_SUITE_DIR at a new path or at an existing suite checkout."
+      fi
       info "fetching the suite at the pinned revision into ${SUITE_DIR}"
       info "(this removes the directory first)"
       bash "${SETUP_SH}" "${SUITE_DIR}" "${IMAGE_YML}" || die "setup_functional_tests.sh failed"
@@ -343,6 +360,15 @@ cmd_xfail() {
       [ -n "${id}" ] || die "usage: docdb xfail ${sub} <test-node-id>"
       if [ "${sub}" = add ]; then
         grep -qxF "${id}" "${list}" && { info "already listed"; return 0; }
+        # conftest_known_failures refuses an id that appears on two lists, and
+        # it refuses it during COLLECTION, so the whole suite reports an
+        # internal error with zero tests run. reconcile already guards this;
+        # the interactive command has to as well, or the cheapest edit here
+        # becomes the most expensive failure there.
+        grep -qxF "${id}" "${FLAKY_LIST}" && \
+          die "${id} is already on config/$(basename "${FLAKY_LIST}"). An id on both lists makes the suite fail collection. Remove it from the flaky list first."
+        grep -qxF "${id}" "${CRASH_LIST}" && \
+          die "${id} is on config/$(basename "${CRASH_LIST}"), so it is skipped and never runs. A strict entry could never be satisfied. Remove the crash entry first."
         printf '%s\n' "${id}" >> "${list}"; info "added to config/$(basename "${list}")"
       else
         grep -qxF "${id}" "${list}" || { info "not listed"; return 0; }
@@ -561,7 +587,11 @@ cmd_env() {
   case "${sub}" in
     status)
       local reachable=1 in_container=1
-      timeout 3 bash -c "echo > /dev/tcp/localhost/${port}" 2>/dev/null && reachable=0
+      # bash's own /dev/tcp with SECONDS-free redirection rather than timeout(1),
+      # which is not present on every developer machine and made this always
+      # report "not reachable" there. The connect is non-blocking enough in
+      # practice for a loopback port.
+      (exec 3<>"/dev/tcp/localhost/${port}") 2>/dev/null && reachable=0
       if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
         in_container=0
         echo "engine container '${container}': running"

@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
-# CI test lists are tracked gate inputs — keep them visible past oss/.gitignore's *.txt
+# CI test lists are tracked gate inputs: keep them visible past the root
+# .gitignore's *.txt rule
 !config/*.txt

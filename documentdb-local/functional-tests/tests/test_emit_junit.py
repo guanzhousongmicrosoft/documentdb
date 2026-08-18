@@ -1,16 +1,16 @@
 """Tests for `emit-junit` — the gate's verdict rendered for the results view.
 
-Publishing pytest's own JUnit is what forced `failTaskOnFailedTests: false` onto
-the functional lanes. That file is the MAIN pass, frozen before recover-and-gate
-rewrites report.json, so it disagrees with the verdict in both directions:
+Pytest's own JUnit cannot be read as the verdict. That file is the MAIN pass,
+frozen before recover-and-gate rewrites report.json, so it disagrees with the
+verdict in both directions:
 
   over-reports   a transient crash victim the sequential re-run rescued still
                  reads `failed`, so a green build shows red tests;
   under-reports  a test lost with a dying xdist worker is simply ABSENT, so the
                  view looks clean on exactly the id the gate fails the build for.
 
-Suppressing the first hid the second. These tests pin the mapping so the
-published document and the build status stay the same statement.
+Tolerating the first hid the second. These tests pin the mapping so the rendered
+document and the build status stay the same statement.
 """
 
 import json
