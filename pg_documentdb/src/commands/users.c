@@ -1210,10 +1210,11 @@ connection_status(pgbson *showPrivilegesSpec)
 
 	if (showPrivileges)
 	{
+		StringView parentRoleView = CreateStringViewFromString(parentRole);
 		pgbson_array_writer privilegesArrayWriter;
 		PgbsonWriterStartArray(&authInfoWriter, "authenticatedUserPrivileges", 27,
 							   &privilegesArrayWriter);
-		WritePrivileges(parentRole, &privilegesArrayWriter);
+		WritePrivileges(&parentRoleView, &privilegesArrayWriter);
 		PgbsonWriterEndArray(&authInfoWriter, &privilegesArrayWriter);
 	}
 
