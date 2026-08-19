@@ -2765,5 +2765,62 @@ class EntrypointUxTextTests(unittest.TestCase):
         )
 
 
+class DisableExtendedRumTests(unittest.TestCase):
+    """--disable-extended-rum must actually disable extended RUM.
+
+    start_oss_server.sh defaults useDocumentdbExtendedRum to "true" and its -r
+    flag takes an OPTIONAL value, so omitting -r leaves extended RUM ENABLED.
+    The entrypoint must therefore pass "-r false" explicitly rather than
+    dropping the flag."""
+
+    def _arg_block(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        match = re.search(
+            r"^    start_oss_server_args=\(\)\n"
+            r'^    if \[ "\$DISABLE_EXTENDED_RUM" = "true" \]; then\n'
+            r".*?^    fi$",
+            text,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            match, "could not locate the extended-RUM argument block"
+        )
+        return textwrap.dedent(match.group(0))
+
+    def _args_for(self, disable_extended_rum):
+        script = (
+            f"DISABLE_EXTENDED_RUM={disable_extended_rum}\n"
+            + self._arg_block()
+            + '\nprintf "%s\\n" "${start_oss_server_args[@]}"\n'
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True,
+            timeout=30, stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        return result.stdout.split()
+
+    def test_disabled_passes_r_false_explicitly(self):
+        # The regression: the entrypoint used to OMIT -r, which start_oss_server.sh
+        # treats as "use the default", and the default is true.
+        self.assertEqual(self._args_for("true"), ["-r", "false"])
+
+    def test_enabled_passes_r_true(self):
+        self.assertEqual(self._args_for("false"), ["-r", "true"])
+
+    def test_disable_never_relies_on_omitting_the_flag(self):
+        # Omitting -r cannot express "disabled", so an empty argument list for
+        # the disabled case would silently reintroduce the bug.
+        self.assertIn("false", self._args_for("true"))
+
+    def test_omitting_r_would_leave_extended_rum_enabled(self):
+        # Pin the start_oss_server.sh semantics this fix depends on: if -r ever
+        # starts defaulting to false, this test should fail and prompt a review
+        # of the entrypoint.
+        start_oss_server = REPO_ROOT / "scripts" / "start_oss_server.sh"
+        text = start_oss_server.read_text(encoding="utf-8")
+        self.assertIn('useDocumentdbExtendedRum="true"', text)
+
+
 if __name__ == "__main__":
     unittest.main()

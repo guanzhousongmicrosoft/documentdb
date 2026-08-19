@@ -877,13 +877,19 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
-    EXTENDED_RUM_FLAG="-r"
-    if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
-        EXTENDED_RUM_FLAG=""
-    fi
+    # start_oss_server.sh defaults useDocumentdbExtendedRum to "true", and its
+    # -r flag takes an OPTIONAL value ("-r", "-r true", "-r false"). Omitting
+    # -r therefore does NOT disable extended RUM -- it leaves the default in
+    # place, which made --disable-extended-rum / DISABLE_EXTENDED_RUM a silent
+    # no-op: the extension was still created, still preloaded, and
+    # documentdb.alternate_index_handler_name was still set to extended_rum.
+    # Pass the value explicitly in both directions so the flag actually takes
+    # effect and the intent is visible in the process arguments.
     start_oss_server_args=()
-    if [ -n "$EXTENDED_RUM_FLAG" ]; then
-        start_oss_server_args+=("$EXTENDED_RUM_FLAG")
+    if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
+        start_oss_server_args+=(-r false)
+    else
+        start_oss_server_args+=(-r true)
     fi
     if [ -n "${PGOPTIONS:-}" ]; then
         IFS=' ' read -r -a pgoptions_array <<< "$PGOPTIONS"
