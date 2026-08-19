@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -2763,6 +2764,100 @@ class EntrypointUxTextTests(unittest.TestCase):
             text,
             "the ready banner must print a working mongosh connection string",
         )
+
+
+class DefaultCredentialsWarningTests(unittest.TestCase):
+    """The built-in-default-credentials banner must name the credentials that
+    are ACTUALLY in effect. Extracts the real block from emulator_entrypoint.sh
+    and executes it, rather than asserting on source text, so the behaviour
+    operators see is what is tested."""
+
+    def _banner_block(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        match = re.search(
+            r'^if \[ "\$\{USING_DEFAULT_CREDS\}" = "true" \]; then\n.*?^fi$',
+            text,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            match, "could not locate the default-credentials warning block"
+        )
+        return match.group(0)
+
+    def _run(self, username, password, used_default_username, used_default_password):
+        script = (
+            f"USERNAME={shlex.quote(username)}\n"
+            f"PASSWORD={shlex.quote(password)}\n"
+            f"USING_DEFAULT_USERNAME={'true' if used_default_username else 'false'}\n"
+            f"USING_DEFAULT_PASSWORD={'true' if used_default_password else 'false'}\n"
+            "USING_DEFAULT_CREDS=false\n"
+            'if [ "$USING_DEFAULT_USERNAME" = "true" ] || '
+            '[ "$USING_DEFAULT_PASSWORD" = "true" ]; then USING_DEFAULT_CREDS=true; fi\n'
+            + self._banner_block()
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_supplied_username_is_not_reported_as_default(self):
+        # The regression: --username was provided but only the password
+        # defaulted, yet the banner advertised "default_user".
+        result = self._run("testuser", "Admin100", False, True)
+        output = result.stdout + result.stderr
+        self.assertIn("BUILT-IN DEFAULT CREDENTIALS", output)
+        self.assertIn("testuser", output)
+        self.assertNotIn("default_user", output)
+        self.assertNotIn("--username / USERNAME was not set", output)
+
+    def test_defaulted_password_is_still_reported(self):
+        result = self._run("testuser", "Admin100", False, True)
+        output = result.stdout + result.stderr
+        self.assertIn("Admin100", output)
+        self.assertIn("--password / PASSWORD was not set", output)
+
+    def test_both_defaulted_reports_both(self):
+        result = self._run("default_user", "Admin100", True, True)
+        output = result.stdout + result.stderr
+        self.assertIn("--username / USERNAME was not set", output)
+        self.assertIn("--password / PASSWORD was not set", output)
+        self.assertIn("default_user", output)
+        self.assertIn("Admin100", output)
+
+    def test_supplied_password_is_never_echoed(self):
+        # Only the public built-in default may be printed; a real secret must
+        # not be written to the container log.
+        result = self._run("default_user", "sup3rs3cret", True, False)
+        output = result.stdout + result.stderr
+        self.assertIn("--username / USERNAME was not set", output)
+        self.assertNotIn("sup3rs3cret", output)
+        self.assertNotIn("--password / PASSWORD was not set", output)
+
+    def test_no_warning_when_both_supplied(self):
+        result = self._run("testuser", "sup3rs3cret", False, False)
+        output = result.stdout + result.stderr
+        self.assertNotIn("BUILT-IN DEFAULT CREDENTIALS", output)
+
+    def test_warning_can_be_suppressed(self):
+        script = (
+            "DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true\n"
+            "USERNAME=default_user\nPASSWORD=Admin100\n"
+            "USING_DEFAULT_USERNAME=true\nUSING_DEFAULT_PASSWORD=true\n"
+            "USING_DEFAULT_CREDS=true\n" + self._banner_block()
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True,
+            timeout=30, stdin=subprocess.DEVNULL,
+        )
+        self.assertNotIn(
+            "BUILT-IN DEFAULT CREDENTIALS", result.stdout + result.stderr
+        )
+
+    def test_entrypoint_tracks_username_and_password_separately(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        self.assertIn("USING_DEFAULT_USERNAME=", text)
+        self.assertIn("USING_DEFAULT_PASSWORD=", text)
 
 
 if __name__ == "__main__":

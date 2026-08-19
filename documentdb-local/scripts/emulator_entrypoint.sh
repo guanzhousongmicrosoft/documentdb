@@ -355,11 +355,21 @@ done
 # printed when they apply because anyone reachable on the published port
 # can authenticate with default_user / Admin100. A future major version
 # will refuse to start without --password / PASSWORD set explicitly.
-# A single flag suffices: the warning below fires when EITHER the username or
-# the password fell back to the built-in default, and the warning text is
-# static (it does not distinguish which one defaulted).
+# The two are tracked separately because either can default on its own, and
+# the warning must name the credentials that are ACTUALLY in effect: telling
+# an operator who passed --username that the account is "default_user" sends
+# them to a login that does not exist, while the real, reachable account
+# keeps their username and the public default password.
+USING_DEFAULT_USERNAME=false
+USING_DEFAULT_PASSWORD=false
+if [ -z "${USERNAME:-}" ]; then
+    USING_DEFAULT_USERNAME=true
+fi
+if [ -z "${PASSWORD:-}" ]; then
+    USING_DEFAULT_PASSWORD=true
+fi
 USING_DEFAULT_CREDS=false
-if [ -z "${USERNAME:-}" ] || [ -z "${PASSWORD:-}" ]; then
+if [ "$USING_DEFAULT_USERNAME" = "true" ] || [ "$USING_DEFAULT_PASSWORD" = "true" ]; then
     USING_DEFAULT_CREDS=true
 fi
 export OWNER=${OWNER:-$(whoami)}
@@ -447,8 +457,23 @@ if [ "${USING_DEFAULT_CREDS}" = "true" ]; then
 WARNING: DocumentDB is starting with the BUILT-IN DEFAULT CREDENTIALS.
 ========================================================================
 
-  Username: default_user   (because --username / USERNAME was not set)
-  Password: Admin100       (because --password / PASSWORD was not set)
+WARN
+        # Report only the value that actually fell back, so the banner names
+        # the credentials that are really in effect. Emitting both lines
+        # unconditionally used to advertise "default_user" even when
+        # --username was supplied, pointing operators at an account that does
+        # not exist while the reachable one kept their own username.
+        if [ "${USING_DEFAULT_USERNAME}" = "true" ]; then
+            echo "  Username: ${USERNAME}   (because --username / USERNAME was not set)" >&2
+        else
+            echo "  Username: ${USERNAME}   (as you provided)" >&2
+        fi
+        if [ "${USING_DEFAULT_PASSWORD}" = "true" ]; then
+            echo "  Password: ${PASSWORD}       (because --password / PASSWORD was not set)" >&2
+        else
+            echo "  Password: (as you provided)" >&2
+        fi
+        cat >&2 <<'WARN'
 
 These credentials are PUBLIC and well-known. Any client that can reach
 the gateway port can authenticate as the admin user. Do NOT use this
