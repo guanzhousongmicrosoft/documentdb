@@ -13,6 +13,10 @@
 #      SetupConfiguration.json (so the emulator's policy always matches the
 #      gateway's, including entries like documentdb / citus / pg / internal_role).
 #
+# It also rejects a username PostgreSQL itself could not store verbatim: an
+# identifier longer than NAMEDATALEN-1 (63) bytes is silently truncated, which
+# would create a role the supplied credential can never match.
+#
 # Usage:
 #   documentdb_validate_username.sh <username> [setup_configuration_json]
 #
@@ -22,6 +26,24 @@
 username="$1"
 gateway_setup_config="${2:-$GATEWAY_HOME/pg_documentdb_gw/SetupConfiguration.json}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# PostgreSQL truncates an identifier longer than NAMEDATALEN-1 (63) bytes rather
+# than rejecting it. The truncated role is created successfully, so the container
+# goes on to report ready while the credential the operator actually supplied can
+# never authenticate -- the failure surfaces much later as a confusing
+# "Invalid account: User details not found in the database". Reject up front.
+#
+# The limit is in BYTES, not characters, so a multi-byte UTF-8 username can
+# exceed it with far fewer than 63 characters, and truncation can also split a
+# character mid-sequence. This check runs before any configuration is read
+# because it depends only on the username itself.
+POSTGRES_MAX_IDENTIFIER_BYTES=63
+username_byte_length=$(printf '%s' "$username" | wc -c | tr -d '[:space:]')
+if [ "$username_byte_length" -gt "$POSTGRES_MAX_IDENTIFIER_BYTES" ]; then
+    echo "Error: username is ${username_byte_length} bytes long, exceeding the PostgreSQL identifier limit of ${POSTGRES_MAX_IDENTIFIER_BYTES} bytes." >&2
+    echo "PostgreSQL would silently truncate it to ${POSTGRES_MAX_IDENTIFIER_BYTES} bytes, creating a role that does not match the credential you supplied. Choose a shorter username." >&2
+    exit 1
+fi
 
 if [ ! -f "$gateway_setup_config" ]; then
     echo "Error: gateway configuration '$gateway_setup_config' not found; cannot validate the username against reserved role prefixes." >&2

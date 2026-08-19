@@ -2661,6 +2661,46 @@ raise SystemExit('Unsupported jq expression: ' + expr)
         result = self._run("docdb_admin", config=self.config)
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
+    def test_username_at_postgres_identifier_limit_is_allowed(self):
+        # NAMEDATALEN-1 == 63 bytes is the longest identifier PostgreSQL stores
+        # verbatim, so it must still pass.
+        result = self._run("u" * 63, config=self.config)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+    def test_username_over_postgres_identifier_limit_is_rejected(self):
+        # Without this check PostgreSQL silently truncates to 63 bytes and the
+        # container reports ready with a role the supplied credential can never
+        # authenticate as.
+        result = self._run("u" * 64, config=self.config)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("64 bytes", result.stdout + result.stderr)
+        self.assertIn("63 bytes", result.stdout + result.stderr)
+
+    def test_long_username_rejection_mentions_truncation(self):
+        result = self._run("u" * 200, config=self.config)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("truncate", (result.stdout + result.stderr).lower())
+
+    def test_multibyte_username_limit_is_measured_in_bytes(self):
+        # 32 x 2-byte characters == 64 bytes, so this must be rejected even
+        # though it is only 32 characters long.
+        result = self._run("ä" * 32, config=self.config)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("64 bytes", result.stdout + result.stderr)
+
+    def test_multibyte_username_within_byte_limit_is_allowed(self):
+        # 31 x 2-byte characters == 62 bytes, comfortably inside the limit.
+        result = self._run("ä" * 31, config=self.config)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+    def test_length_check_runs_before_configuration_is_read(self):
+        # The length limit depends only on the username, so it must be reported
+        # even when the gateway configuration is missing -- otherwise the
+        # operator sees an unrelated configuration error first.
+        result = self._run("u" * 200, config=self.root / "does-not-exist.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("200 bytes", result.stdout + result.stderr)
+
     def test_citus_username_is_rejected(self):
         # The exact issue #650 reproduction.
         result = self._run("citus", config=self.config)
