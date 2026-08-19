@@ -13,6 +13,9 @@
 #      SetupConfiguration.json (so the emulator's policy always matches the
 #      gateway's, including entries like documentdb / citus / pg / internal_role).
 #
+# It additionally rejects PostgreSQL's own reserved identifiers, which the two
+# gateway-derived mechanisms above do not cover.
+#
 # Usage:
 #   documentdb_validate_username.sh <username> [setup_configuration_json]
 #
@@ -53,6 +56,31 @@ source "$reserved_roles_file"
 for reserved_role_name in "${DOCUMENTDB_RESERVED_ROLE_NAMES[@]}"; do
     if [ "$username" = "$reserved_role_name" ]; then
         echo "Error: username '$username' is reserved for an internal DocumentDB role." >&2
+        exit 1
+    fi
+done
+
+# PostgreSQL's own reserved identifiers, checked separately from the list above.
+# DOCUMENTDB_RESERVED_ROLE_NAMES mirrors the gateway's RESERVED_ROLE_NAMES
+# registry and must stay in sync with it, so PostgreSQL-level names do not
+# belong there.
+#
+# The BlockedRolePrefixes check below covers the "pg" prefix, which catches
+# pg_catalog, pg_toast, pg_test and friends. It does NOT catch "postgres",
+# because that string does not begin with "pg" followed by a separator in the
+# way the prefix list intends -- and yet "postgres" is the single most
+# collision-prone identifier in PostgreSQL: it is the conventional superuser
+# name and the default database name. On the packaged (DEB/RPM) install path
+# the cluster superuser really is "postgres", so allowing an operator to create
+# a DocumentDB user by that name invites a confusing collision.
+POSTGRES_RESERVED_IDENTIFIERS=(
+    "postgres"
+)
+username_lower_exact=$(printf '%s' "$username" | tr '[:upper:]' '[:lower:]')
+for postgres_reserved_name in "${POSTGRES_RESERVED_IDENTIFIERS[@]}"; do
+    if [ "$username_lower_exact" = "$postgres_reserved_name" ]; then
+        echo "Error: username '$username' is reserved by PostgreSQL." >&2
+        echo "'$postgres_reserved_name' is the conventional PostgreSQL superuser and default database name; using it for a DocumentDB user would collide with the server's own account. Choose a different username." >&2
         exit 1
     fi
 done

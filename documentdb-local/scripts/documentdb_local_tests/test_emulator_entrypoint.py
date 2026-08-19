@@ -2661,6 +2661,35 @@ raise SystemExit('Unsupported jq expression: ' + expr)
         result = self._run("docdb_admin", config=self.config)
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
+    def test_postgres_username_is_rejected(self):
+        # "postgres" does not begin with any configured BlockedRolePrefix, so
+        # before this check it was accepted -- even though "pg_test" was not.
+        result = self._run("postgres", config=self.config)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reserved by PostgreSQL", result.stdout + result.stderr)
+
+    def test_postgres_username_rejection_is_case_insensitive(self):
+        for variant in ("Postgres", "POSTGRES", "PostGreS"):
+            with self.subTest(username=variant):
+                result = self._run(variant, config=self.config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("reserved by PostgreSQL", result.stdout + result.stderr)
+
+    def test_postgres_reservation_does_not_block_similar_names(self):
+        # Only the exact identifier is reserved; these must still be usable.
+        for allowed in ("postgresql_user", "postgres_app", "my_postgres"):
+            with self.subTest(username=allowed):
+                result = self._run(allowed, config=self.config)
+                self.assertEqual(
+                    result.returncode, 0, msg=result.stdout + result.stderr
+                )
+
+    def test_postgres_is_not_added_to_the_gateway_synced_role_list(self):
+        # DOCUMENTDB_RESERVED_ROLE_NAMES mirrors the gateway's registry and must
+        # stay in sync with it, so the PostgreSQL-level reservation must be kept
+        # separate rather than appended there.
+        self.assertNotIn("postgres", self._reserved_role_names())
+
     def test_citus_username_is_rejected(self):
         # The exact issue #650 reproduction.
         result = self._run("citus", config=self.config)
