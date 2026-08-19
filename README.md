@@ -162,6 +162,72 @@ for eachDocument in results:
 
 ```
 
+### Vector search
+
+DocumentDB supports vector similarity search through a `cosmosSearch` index.
+
+> **Important:** a vector index must be created with the **raw `createIndexes` command**, not the
+> `createIndex()` shell/driver helper. `cosmosSearchOptions` is a DocumentDB-specific field, and the
+> helpers build the index specification from the options they know about, so `cosmosSearchOptions`
+> is dropped before the request is sent. The server then correctly rejects a `cosmosSearch` index
+> that carries no options:
+>
+> ```
+> MongoServerError[CannotCreateIndex]: Error in specification { "name": "v_cosmosSearch",
+> "key": { "v": "cosmosSearch" } }: Index type 'CosmosSearch' was requested, but the
+> 'cosmosSearch' options were not provided.
+> ```
+>
+> If you see that error, switch to the `createIndexes` form below — the options were stripped by the
+> client, not rejected by the server.
+
+In `mongosh`, create the index with `runCommand`:
+
+```javascript
+db.vecs.insertMany([
+  { _id: 1, text: 'cats are great', v: [1.0, 0.0, 0.0] },
+  { _id: 2, text: 'dogs are loyal', v: [0.0, 1.0, 0.0] },
+  { _id: 3, text: 'cats and dogs',  v: [0.7, 0.7, 0.0] }
+]);
+
+db.runCommand({
+  createIndexes: 'vecs',
+  indexes: [{
+    name: 'v_vec',
+    key: { v: 'cosmosSearch' },
+    cosmosSearchOptions: { kind: 'vector-ivf', numLists: 1, similarity: 'COS', dimensions: 3 }
+  }]
+});
+```
+
+The equivalent in PyMongo, using `command` rather than `create_index`:
+
+```python
+db.command({
+    'createIndexes': 'vecs',
+    'indexes': [{
+        'name': 'v_vec',
+        'key': {'v': 'cosmosSearch'},
+        'cosmosSearchOptions': {
+            'kind': 'vector-ivf', 'numLists': 1, 'similarity': 'COS', 'dimensions': 3
+        }
+    }]
+})
+```
+
+Then query it with `$search`:
+
+```javascript
+db.vecs.aggregate([
+  { $search: { cosmosSearch: { vector: [1.0, 0.0, 0.0], path: 'v', k: 3 } } },
+  { $project: { _id: 1, text: 1 } }
+]);
+```
+
+`similarity` accepts `COS` (cosine), `L2` (Euclidean), or `IP` (inner product), and `dimensions`
+must match the length of the vectors you store. `kind` accepts `vector-ivf` (tune with `numLists`)
+or `vector-hnsw` (tune with `m` and `efConstruction`).
+
 ### Helpful Links
 
 - Check out our [website](https://documentdb.io) to stay up to date with the latest on the project.
