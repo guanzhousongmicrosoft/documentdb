@@ -1,4 +1,10 @@
-### documentdb v0.116-0 (Unreleased) ###
+### documentdb v0.116-0 (August 19, 2026) ###
+* Note: version 0.115-0 was never published; its changes are included in this release.
+* Fix gateway connection pool eviction of in-use pools, and stop rebuilding warm data pools on every authentication. This resolves connections being dropped after the pool dispose interval elapsed. *[Bugfix]*
+* Fix a backend crash (segmentation fault) on insert into a sharded collection from a pooled/reused session when running on PostgreSQL 18.6 or newer. *[Bugfix]*
+* Default TOAST compression to `lz4`, with an administrator override. *[Perf]*
+* Redesigned Linux packaging: split `postgresql-tools` and appliance packages, reproducible RPM/DEB builds, a verified release bundle, Ubuntu 26.04 build support, and expanded package/systemd end-to-end test coverage. *[Feature]*
+* Stamp build provenance (`/version.txt` and OCI image labels) into the `documentdb-local` container image. *[Feature]*
 * Rename the `$sample` EXPLAIN metric `Sample Heap Skips` to `Sample Heap Fetches`. *[Refactor]*
 * Enable pushing suffix sort keys into the accumulator in `$sortGroup` when group-by keys form a non-dotted prefix of the sort keys by default (`enableSortPushToAccumulatorWithPrefix`). *[Perf]*
 * Fix `$sample` size coercion and validation to be wire protocol compatible. *[Bugfix]*
@@ -9,8 +15,6 @@
 * Fix per-path multikey metadata so an array ancestor marks every indexed descendant, including fields absent from the document. *[Bugfix]*
 * Support the `enum` keyword in `$jsonSchema` validators, requiring a value to equal one of the listed allowed values, both at the top level and for individual properties. *[Feature]*
 * Support the `oneOf` keyword in `$jsonSchema` validators, matching the documented semantics where a value must validate against exactly one of the listed subschemas, both at the top level and for individual properties. *[Feature]*
-
-### documentdb v0.115-0 (Unreleased) ###
 * Fix `$min` and `$max` accumulators to skip null and missing values when non-null values are present, only returning null when all values are null or missing. Guarded by `enable_min_max_skip_null_values`, enabled by default. *[Bugfix]*
 * Optimize `$sample` over an Index Scan by avoiding heap reads for rows the reservoir discards (visible rows are counted via the visibility map). Applies to Index Scans without runtime filters over btree or regular RUM indexes. *[Perf]*
 * Fix `$exists` argument coercion so falsy non-boolean values (`null`, `undefined`, `0`) are treated as `$exists: false` and truthy non-boolean values as `$exists: true`, matching the documented truthiness semantics. Previously `$exists: null` behaved like `$exists: true`. *[Bugfix]*
