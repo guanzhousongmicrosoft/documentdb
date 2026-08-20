@@ -2789,18 +2789,15 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _functions(self):
-        """Extract the real function definitions from the entrypoint."""
+        """Extract the real function definition from the entrypoint."""
         text = ENTRYPOINT.read_text(encoding="utf-8")
-        block = ""
-        for name in ("postmaster_pid_is_live", "clear_stale_postmaster_pid"):
-            match = re.search(
-                r"^%s\(\) \{\n.*?^\}$" % re.escape(name),
-                text,
-                flags=re.DOTALL | re.MULTILINE,
-            )
-            self.assertIsNotNone(match, "could not locate %s() in the entrypoint" % name)
-            block += match.group(0) + "\n"
-        return block
+        match = re.search(
+            r"^clear_stale_postmaster_pid\(\) \{\n.*?^\}$",
+            text,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "could not locate clear_stale_postmaster_pid()")
+        return match.group(0) + "\n"
 
     def _spawn_named(self, name):
         """Start a long-lived process whose /proc/<pid>/comm is exactly `name`.
@@ -2921,11 +2918,14 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("Removing stale", result.stdout)
 
-    def test_readiness_loop_tests_liveness_not_file_existence(self):
-        # Defect 2: existence alone made the loop pass after PostgreSQL had FATAL'd.
+    def test_stale_lock_is_cleared_before_the_readiness_loop(self):
+        # Defect 2: a leftover pid file made this loop report success instantly.
         text = ENTRYPOINT.read_text(encoding="utf-8")
-        self.assertIn('while ! postmaster_pid_is_live "$DATA_PATH"; do', text)
-        self.assertNotIn('while [ ! -f "$DATA_PATH/postmaster.pid" ]', text)
+        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
+        wait_at = text.find('while [ ! -f "$DATA_PATH/postmaster.pid" ]')
+        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
+        self.assertNotEqual(wait_at, -1, "readiness loop not found")
+        self.assertLess(clear_at, wait_at)
 
     def test_start_failure_names_the_lock_file_cause(self):
         # Defect 3: the failure surfaced as an unrelated getParameter stub error.

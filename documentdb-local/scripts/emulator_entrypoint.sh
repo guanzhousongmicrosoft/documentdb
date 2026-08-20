@@ -224,26 +224,20 @@ sanitize_uint() {
     esac
 }
 
-# A stale postmaster.pid names a PID that the new container's fresh PID namespace
-# has usually re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the
-# process instead; assume live when we cannot, so a real lock is never deleted.
-postmaster_pid_is_live() {
+# A stale postmaster.pid names a PID the new container's PID namespace has often
+# re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the process
+# instead; keep the file when we cannot, so a live server's lock is never lost.
+clear_stale_postmaster_pid() {
     local pidfile="$1/postmaster.pid" pid dir
-    [ -f "$pidfile" ] || return 1
+    [ -f "$pidfile" ] || return 0
     pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
     dir="$(sed -n 2p "$pidfile" 2>/dev/null)"               # line 2: data directory
-    { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || return 1
-    [ -r "/proc/$pid/comm" ] || return 0                    # cannot identify it
-    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
-        postgres|postmaster) [ "${dir:-$1}" = "$1" ] ;;     # ours?
-        *) false ;;                                         # PID reused
-    esac
-}
-
-# Remove a lock file left by an uncleanly stopped container.
-clear_stale_postmaster_pid() {
-    local pidfile="$1/postmaster.pid"
-    { [ -f "$pidfile" ] && ! postmaster_pid_is_live "$1"; } || return 0
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        [ -r "/proc/$pid/comm" ] || return 0                # cannot identify it
+        case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+            postgres|postmaster) [ "${dir:-$1}" = "$1" ] && return 0 ;;
+        esac
+    fi
     echo "Removing stale $pidfile: the previous container was stopped uncleanly."
     rm -f "$pidfile" || echo "Warning: could not remove $pidfile; PostgreSQL may refuse to start." >&2
 }
@@ -968,8 +962,8 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    # Liveness, not existence: a leftover pid file used to pass this instantly.
-    while ! postmaster_pid_is_live "$DATA_PATH"; do
+    # Trustworthy only because any stale lock was cleared before the start.
+    while [ ! -f "$DATA_PATH/postmaster.pid" ]; do
         sleep 1
         if [ $i -ge 60 ]; then
             echo "PostgreSQL failed to start within 60 seconds."
