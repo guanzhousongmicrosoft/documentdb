@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -2764,6 +2765,231 @@ class EntrypointUxTextTests(unittest.TestCase):
             "the ready banner must print a working mongosh connection string",
         )
 
+
+@unittest.skipUnless(shutil.which("flock"), "claim_data_directory needs flock(1)")
+class ClaimDataDirectoryTests(unittest.TestCase):
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.pidfile = self.data / "postmaster.pid"
+        self._helpers = []
+
+    def tearDown(self):
+        for proc in self._helpers:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+        self.temp_dir.cleanup()
+
+    def _function(self):
+        match = re.search(
+            r"^claim_data_directory\(\) \{\n.*?^\}$",
+            ENTRYPOINT.read_text(encoding="utf-8"),
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "could not locate claim_data_directory()")
+        return match.group(0) + "\n"
+
+    def _claim(self, data_dir=None, prefix=""):
+        target = self.data if data_dir is None else data_dir
+        return subprocess.run(
+            ["bash", "-c", self._function() + prefix + 'claim_data_directory "%s"\necho claimed\n' % target],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _write_pidfile(self, pid):
+        self.pidfile.write_text(
+            "%s\n%s\n1700000000\n9712\n/var/run/postgresql\n" % (pid, self.data),
+            encoding="utf-8",
+        )
+
+    def _spawn_named(self, name):
+        source = Path("/bin/sleep")
+        if not source.exists():
+            source = Path("/usr/bin/sleep")
+        exe = self.root / name
+        shutil.copy2(source, exe)
+        exe.chmod(0o755)
+        proc = subprocess.Popen(
+            [str(exe), "300"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        self._helpers.append(proc)
+        deadline = time.time() + 10
+        comm = Path("/proc") / str(proc.pid) / "comm"
+        while time.time() < deadline:
+            try:
+                if comm.read_text().strip() == name[:15]:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        return proc.pid
+
+    def _spawn_holder(self):
+        out = self.root / "holder.log"
+        with out.open("w") as sink:
+            proc = subprocess.Popen(
+                ["bash", "-c", self._function() + 'claim_data_directory "%s"\necho held\nexec sleep 300\n' % self.data],
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        self._helpers.append(proc)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if "held" in out.read_text(errors="replace"):
+                return proc
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.fail("holder never claimed: %s" % out.read_text(errors="replace"))
+
+    def test_a_second_container_on_an_in_use_volume_is_refused(self):
+        holder = self._spawn_holder()
+        self._write_pidfile(999999)
+
+        result = self._claim()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("already using the data directory", result.stderr)
+        self.assertNotIn("claimed", result.stdout)
+        self.assertTrue(
+            self.pidfile.exists(),
+            "the running container's lock file must survive a refused start",
+        )
+        self.assertIsNone(holder.poll(), "the running container must be unaffected")
+
+    def test_a_crashed_holder_releases_the_directory_for_the_next_start(self):
+        holder = self._spawn_holder()
+        holder.kill()
+        holder.wait(timeout=10)
+        self._write_pidfile(999999)
+
+        result = self._claim()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(
+            self.pidfile.exists(), "a crashed container's lock file must be removed"
+        )
+
+    def test_claiming_leaves_a_fresh_data_directory_empty(self):
+        result = self._claim()
+
+        self.assertIn("claimed", result.stdout, result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in self.data.iterdir()),
+            [],
+            "claiming must not create anything start_oss_server.sh would trip on",
+        )
+
+    def test_an_unopenable_data_directory_is_refused(self):
+        result = self._claim(data_dir=self.root / "missing")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("claimed", result.stdout)
+
+    def test_pid_reused_by_an_unrelated_process_is_removed(self):
+        self._write_pidfile(self._spawn_named("not_a_postmastr"))
+
+        result = self._claim()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.pidfile.exists(), result.stderr)
+        self.assertIn("Removing stale", result.stdout)
+
+    def test_stale_pid_from_a_dead_process_is_removed(self):
+        dead = self._spawn_named("postgres")
+        self._helpers[-1].terminate()
+        self._helpers[-1].wait(timeout=10)
+        self._write_pidfile(dead)
+
+        self._claim()
+
+        self.assertFalse(self.pidfile.exists())
+
+    def test_truncated_pid_file_is_removed(self):
+        self.pidfile.write_text("", encoding="utf-8")
+
+        self._claim()
+
+        self.assertFalse(self.pidfile.exists())
+
+    def test_missing_pid_file_is_a_noop(self):
+        result = self._claim()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("Removing stale", result.stdout)
+
+    def test_a_visible_running_postgres_is_never_taken_over(self):
+        self._write_pidfile(self._spawn_named("postgres"))
+
+        result = self._claim()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(
+            self.pidfile.exists(),
+            "the lock file of a running postmaster must never be removed",
+        )
+
+    def test_trailing_slash_data_path_still_respects_a_live_lock(self):
+        self._write_pidfile(self._spawn_named("postgres"))
+
+        self._claim(data_dir="%s/" % self.data)
+
+        self.assertTrue(self.pidfile.exists())
+
+    def test_unremovable_stale_lock_fails_loudly(self):
+        self._write_pidfile(999999)
+
+        result = self._claim(prefix="rm() { return 1; }\n")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot remove stale", result.stderr)
+        self.assertNotIn("claimed", result.stdout)
+
+    def test_the_directory_is_claimed_before_anything_touches_the_volume(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        offsets = {
+            "claim_data_directory call": text.find('claim_data_directory "$DATA_PATH"'),
+            "chown of the data directory": text.find(
+                'sudo chown -R "${DOCUMENTDB_RUNTIME_USER}:'
+                '${DOCUMENTDB_RUNTIME_GROUP}" "$DATA_PATH"'
+            ),
+            "start_oss_server.sh invocation": text.find(
+                '"$SCRIPT_DIR/start_oss_server.sh"'
+            ),
+            "readiness loop": text.find('while [ ! -f "$DATA_PATH/postmaster.pid" ]'),
+        }
+        for label, offset in offsets.items():
+            self.assertNotEqual(offset, -1, "%s not found" % label)
+        ordered = list(offsets)
+        self.assertEqual(
+            sorted(ordered, key=offsets.get),
+            ordered,
+            "boot steps are out of order: %s" % offsets,
+        )
+        self.assertNotIn("clear_stale_postmaster_pid", text)
+        self.assertNotIn("PRESERVED_POSTMASTER_PID", text)
+
+    def test_the_directory_is_only_claimed_when_this_container_starts_postgresql(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        block_at = text.find('if [ "$START_POSTGRESQL" = "true" ]; then')
+        self.assertNotEqual(block_at, -1, "START_POSTGRESQL block not found")
+        self.assertLess(block_at, text.find('claim_data_directory "$DATA_PATH"'))
+        self.assertEqual(text.count('claim_data_directory "'), 1)
 
 if __name__ == "__main__":
     unittest.main()

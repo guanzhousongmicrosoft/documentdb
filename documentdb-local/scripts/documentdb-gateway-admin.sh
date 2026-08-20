@@ -800,6 +800,19 @@ cmd_check() {
     fi
     log "PostgreSQL connectivity: OK"
 
+    # The config may pin an alternate index access method, satisfied only by a
+    # per-database extension. Resolved from the live GUC, falling back to disk
+    # pre-restart so the advice never degrades to the single-statement recipe.
+    local pg_major required_ext handler_name
+    pg_major="$(documentdb_read_pg_major "${psql_bin}" "${SOCKET_DIR}" \
+        "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}")"
+    required_ext="$(documentdb_required_index_extension "${psql_bin}" "${SOCKET_DIR}" \
+        "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}" "${pg_major}")"
+    handler_name="$(documentdb_index_handler_for_extension "${required_ext}")"
+
+    # Name the cluster we probed, so a pasted remedy cannot land elsewhere.
+    local conn_spec="-h ${SOCKET_DIR} -p ${PG_PORT}"
+
     log "Checking DocumentDB extension..."
     ext_check="$(run_as_user "${PG_OWNER}" "${psql_bin}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
         -d "${TARGET_DB}" -X -tA -c "SELECT 1 FROM pg_extension WHERE extname = 'documentdb';" 2>/dev/null || true)"
@@ -807,7 +820,35 @@ cmd_check() {
     if [[ "${ext_check}" == "1" ]]; then
         log "DocumentDB extension: loaded"
     else
-        log "DocumentDB extension: NOT loaded (run CREATE EXTENSION documentdb CASCADE;)"
+        log "DocumentDB extension: NOT loaded"
+        log "  Run: $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}" "${conn_spec}")"
+    fi
+
+    # Reported separately: 'documentdb' being present says nothing about whether
+    # indexes work, and a database missing this extension fails every
+    # createIndexes.
+    if [[ -n "${required_ext}" ]]; then
+        local am_ext_check am_err_file
+        am_err_file="$(mktemp)"
+        _TEMP_FILES+=("${am_err_file}")
+        # Fail closed: with 2>/dev/null || true a permission error or dropped
+        # connection is indistinguishable from a missing extension, and we would
+        # print "Index creation will fail" about a healthy database. Same
+        # reasoning as the users_info pre-check in cmd_reset_password.
+        if ! am_ext_check="$(run_as_user "${PG_OWNER}" "${psql_bin}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
+                -d "${TARGET_DB}" -X -tA -v ON_ERROR_STOP=1 \
+                -c "SELECT 1 FROM pg_extension WHERE extname = '${required_ext}';" 2>"${am_err_file}")"; then
+            die "Cannot probe for the '${required_ext}' extension in database '${TARGET_DB}': $(cat "${am_err_file}")"
+        fi
+        if [[ "${am_ext_check}" == "1" ]]; then
+            log "Index access method '${handler_name}' (${required_ext}): available"
+        elif [[ "${ext_check}" == "1" ]]; then
+            log "Index access method '${handler_name}' (${required_ext}): MISSING"
+            log "  This cluster pins documentdb.alternate_index_handler_name = '${handler_name}',"
+            log "  but '${required_ext}' is not created in database '${TARGET_DB}'."
+            log "  Index creation will fail with \"Index access method ${handler_name} is not available\"."
+            log "  Run: $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}" "${conn_spec}")"
+        fi
     fi
 }
 

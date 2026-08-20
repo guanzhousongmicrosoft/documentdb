@@ -224,6 +224,24 @@ sanitize_uint() {
     esac
 }
 
+claim_data_directory() {
+    local pidfile="$1/postmaster.pid" pid
+    exec 200<"$1" || exit 1
+    flock -n 200 || {
+        echo "Error: another DocumentDB container is already using the data directory $1. Refusing to start: two PostgreSQL instances on one data directory would corrupt it, and taking it over would shut the running container's database down too. Give this container its own volume, or stop the container already serving $1." >&2
+        exit 1
+    }
+    [ -f "$pidfile" ] || return 0
+    pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"
+    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+        postgres|postmaster)
+            echo "Error: PID $pid recorded in $pidfile is a PostgreSQL process visible to this container. Refusing to start rather than take over a data directory another server is using." >&2
+            exit 1 ;;
+    esac
+    echo "Removing stale $pidfile: the previous container was stopped uncleanly."
+    rm -f "$pidfile" || { echo "Error: cannot remove stale $pidfile." >&2; exit 1; }
+}
+
 if [[ -f "/version.txt" ]]; then
   DocumentDB_RELEASE_VERSION=$(cat /version.txt)
   echo "Release Version: $DocumentDB_RELEASE_VERSION"
@@ -344,6 +362,9 @@ do
     -*)
         echo "Unknown option $1"
         exit 1;; 
+    *)
+        echo "Unexpected argument $1" >&2
+        exit 1;;
   esac
 done
 
@@ -604,7 +625,9 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         echo "Creating data directory: $DATA_PATH"
         sudo mkdir -p "$DATA_PATH"
     fi
-    
+
+    claim_data_directory "$DATA_PATH"
+
     # Change ownership to the runtime user to ensure we can write/delete files
     echo "Setting ownership of $DATA_PATH to ${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}"
     sudo chown -R "${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}" "$DATA_PATH"
