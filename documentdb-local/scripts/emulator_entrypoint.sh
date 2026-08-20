@@ -350,16 +350,21 @@ done
 # Set default values if not provided.
 #
 # Track whether USERNAME / PASSWORD came from the operator (CLI flag or
-# explicit env var) vs. Fell back to the built-in default. The built-in
-# defaults exist for legacy / evaluation use, but a loud warning is
-# printed when they apply because anyone reachable on the published port
-# can authenticate with default_user / Admin100. A future major version
-# will refuse to start without --password / PASSWORD set explicitly.
-# A single flag suffices: the warning below fires when EITHER the username or
-# the password fell back to the built-in default, and the warning text is
-# static (it does not distinguish which one defaulted).
+# explicit env var) vs. fell back to the built-in default.
+#
+# These are tracked SEPARATELY because they carry different risk. A defaulted
+# username is a cosmetic default; a defaulted password means anyone who can
+# reach the published port authenticates as the admin user with a password
+# that is publicly documented in this source file. Only the password is a
+# security boundary, so only the password is enforced below -- conflating the
+# two would reject the common and perfectly safe case of an explicit strong
+# password with the stock username.
+USING_DEFAULT_USERNAME=false
+USING_DEFAULT_PASSWORD=false
+[ -z "${USERNAME:-}" ] && USING_DEFAULT_USERNAME=true
+[ -z "${PASSWORD:-}" ] && USING_DEFAULT_PASSWORD=true
 USING_DEFAULT_CREDS=false
-if [ -z "${USERNAME:-}" ] || [ -z "${PASSWORD:-}" ]; then
+if [ "$USING_DEFAULT_USERNAME" = "true" ] || [ "$USING_DEFAULT_PASSWORD" = "true" ]; then
     USING_DEFAULT_CREDS=true
 fi
 export OWNER=${OWNER:-$(whoami)}
@@ -432,40 +437,85 @@ if [ -z "${PASSWORD:-}" ]; then
     exit 1
 fi
 
-# Loud, unmissable warning when the operator did NOT supply an explicit
-# username / password and we fell back to the built-in defaults. These
-# defaults are well-known, public, and not safe outside short-lived
-# evaluation. Refusing to start by default is the eventual goal; for now
-# we keep the legacy compatibility but make the noise hard to miss.
-# Operators who knowingly want the defaults (for example CI smoke tests
-# that depend on the historical defaults) can suppress with
-# DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true.
-if [ "${USING_DEFAULT_CREDS}" = "true" ]; then
-    if [ "${DOCUMENTDB_ALLOW_DEFAULT_PASSWORD:-false}" != "true" ]; then
-        cat >&2 <<'WARN'
+# Refuse to start on the built-in default PASSWORD.
+#
+# The default is publicly documented in this file, so a container started
+# without --password accepted the admin user from anyone who could reach the
+# published port -- and the README quickstart tells users to publish it. The
+# check a few lines above ("PASSWORD is required") could never fire, because
+# the default had already been substituted. This restores the intent the
+# README always advertised and matches the official postgres image, which
+# refuses to start without POSTGRES_PASSWORD.
+#
+# Scoped to the PASSWORD only. A defaulted USERNAME with an explicit strong
+# password is safe and common (several of this repo's own test harnesses do
+# exactly that), so it warns rather than refuses.
+#
+# DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true remains the documented escape hatch
+# for evaluation flows that deliberately depend on the historical default.
+if [ "${USING_DEFAULT_PASSWORD}" = "true" ] \
+        && [ "${DOCUMENTDB_ALLOW_DEFAULT_PASSWORD:-false}" != "true" ]; then
+    cat >&2 <<'REFUSE'
 ========================================================================
-WARNING: DocumentDB is starting with the BUILT-IN DEFAULT CREDENTIALS.
+ERROR: refusing to start with the BUILT-IN DEFAULT PASSWORD.
 ========================================================================
 
-  Username: default_user   (because --username / USERNAME was not set)
-  Password: Admin100       (because --password / PASSWORD was not set)
+No password was provided, and the built-in default is PUBLIC and
+well-known, so any client that can reach the published gateway port
+would be able to authenticate as the admin user.
 
-These credentials are PUBLIC and well-known. Any client that can reach
-the gateway port can authenticate as the admin user. Do NOT use this
+Set a password:
+
+  docker run ... -e PASSWORD=<your-password> ...
+  or
+  documentdb-local --password <your-password>
+
+For short-lived local evaluation you can deliberately opt in to the
+built-in default instead:
+
+  docker run ... -e DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true ...
+========================================================================
+REFUSE
+    exit 1
+fi
+
+# Report the built-in defaults that are actually in effect.
+#
+# Reaching here means one of two things, and they need different messages:
+#   1. The operator opted in to the default PASSWORD. That is the dangerous
+#      case, and it must still be reported loudly -- opting in silences the
+#      refusal, not the risk. Previously the opt-in suppressed the warning
+#      too, so the riskiest configuration was also the quietest.
+#   2. Only the USERNAME defaulted, with an explicit password. That is safe,
+#      so it gets a one-line note.
+#
+# The message names only what actually defaulted. The previous static text
+# always claimed both had defaulted, so a container started with an explicit
+# --username but a defaulted password advertised "Username: default_user"
+# while the very next log line printed the real username.
+if [ "${USING_DEFAULT_PASSWORD}" = "true" ]; then
+    cat >&2 <<WARN
+========================================================================
+WARNING: DocumentDB is using the BUILT-IN DEFAULT PASSWORD.
+========================================================================
+
+  Username: ${USERNAME}
+  Password: the built-in default, allowed by
+            DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true
+
+This password is PUBLIC and well-known. Any client that can reach the
+gateway port can authenticate as the admin user. Do NOT use this
 configuration outside short-lived local evaluation.
 
-To suppress this warning intentionally (for example in evaluation
-scripts), set DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true. To fix:
+To fix, provide a password and drop the opt-in:
 
-  docker run ... --env USERNAME=<your-user> --env PASSWORD=<your-pw> ...
+  docker run ... -e PASSWORD=<your-password> ...
   or
-  documentdb-local --username <your-user> --password <your-pw>
-
-In a future release the emulator will REFUSE to start when --password
-and --username are not provided, so please migrate now.
+  documentdb-local --password <your-password>
 ========================================================================
 WARN
-    fi
+elif [ "${USING_DEFAULT_USERNAME}" = "true" ]; then
+    echo "Note: no username was provided; using the built-in default username '${USERNAME}' with the password you supplied." >&2
 fi
 
 echo "Using username: $USERNAME"

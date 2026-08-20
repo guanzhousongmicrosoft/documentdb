@@ -1,5 +1,6 @@
 ### documentdb v0.116-0 (August 19, 2026) ###
 * Note: version 0.115-0 was never published; its changes are included in this release.
+* **Breaking:** the `documentdb-local` container now refuses to start when no password is supplied, instead of silently provisioning the admin account with the well-known built-in default. Pass `--password` / `-e PASSWORD=`, or set `DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true` to opt in to the old behaviour for short-lived local evaluation (which now always warns). A defaulted *username* is unaffected. *[Breaking/Security]*
 * Fix gateway connection pool eviction of in-use pools, and stop rebuilding warm data pools on every authentication. This resolves connections being dropped after the pool dispose interval elapsed. *[Bugfix]*
 * Fix a backend crash (segmentation fault) on insert into a sharded collection from a pooled/reused session when running on PostgreSQL 18.6 or newer. *[Bugfix]*
 * Default TOAST compression to `lz4`, with an administrator override. *[Perf]*

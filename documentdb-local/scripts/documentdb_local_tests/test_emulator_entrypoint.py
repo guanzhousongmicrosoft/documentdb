@@ -2765,5 +2765,107 @@ class EntrypointUxTextTests(unittest.TestCase):
         )
 
 
+class DefaultPasswordRefusalTests(unittest.TestCase):
+    """The container must not start on the built-in default password.
+
+    Starting without --password silently provisioned a working admin account
+    with a password that is public in this source tree, while the README
+    promised the opposite ("You must set these when creating the container").
+    The quickstart also tells users to publish the port.
+
+    Scoped to the PASSWORD deliberately: a defaulted USERNAME with an explicit
+    strong password is safe, and several of this repo's own harnesses rely on
+    it (test_init_data.sh, run_documentdb_local_tls_tests.sh, ...).
+    """
+
+    def _credentials_block(self):
+        """The real refusal + reporting logic, with its inputs."""
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        match = re.search(
+            r"^# Refuse to start on the built-in default PASSWORD\.\n.*?"
+            r"^elif \[ \"\$\{USING_DEFAULT_USERNAME\}\" = \"true\" \]; then\n.*?^fi$",
+            text,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "could not locate the default-password block")
+        return match.group(0)
+
+    def _run(self, username_supplied, password_supplied, opt_in=None):
+        env_lines = [
+            "USERNAME=%s" % ("myuser" if username_supplied else "default_user"),
+            "USING_DEFAULT_USERNAME=%s" % ("false" if username_supplied else "true"),
+            "USING_DEFAULT_PASSWORD=%s" % ("false" if password_supplied else "true"),
+        ]
+        if opt_in is not None:
+            env_lines.append("DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=%s" % opt_in)
+        script = "\n".join(env_lines) + "\n" + self._credentials_block() + "\n"
+        return subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_missing_password_refuses_to_start(self):
+        result = self._run(username_supplied=True, password_supplied=False)
+
+        self.assertEqual(result.returncode, 1, "a defaulted password must be fatal")
+        self.assertIn("refusing to start with the BUILT-IN DEFAULT PASSWORD", result.stderr)
+        # The message must say how to fix it, both ways.
+        self.assertIn("-e PASSWORD=", result.stderr)
+        self.assertIn("DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true", result.stderr)
+
+    def test_explicit_password_starts_normally(self):
+        result = self._run(username_supplied=True, password_supplied=True)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual("", result.stderr.strip(), "no warning is due for explicit credentials")
+
+    def test_default_username_with_explicit_password_is_allowed(self):
+        # The compatibility case: several of this repo's harnesses pass
+        # --password but not --username. They must keep working.
+        result = self._run(username_supplied=False, password_supplied=True)
+
+        self.assertEqual(result.returncode, 0, "a defaulted username must not be fatal")
+        self.assertIn("built-in default username", result.stderr)
+
+    def test_opt_in_starts_but_still_warns(self):
+        # Opting in silences the refusal, not the risk. Previously the opt-in
+        # suppressed the warning entirely, making the riskiest configuration
+        # also the quietest.
+        result = self._run(username_supplied=True, password_supplied=False, opt_in="true")
+
+        self.assertEqual(result.returncode, 0, "the documented opt-in must still start")
+        self.assertIn("BUILT-IN DEFAULT PASSWORD", result.stderr)
+        self.assertIn("PUBLIC and well-known", result.stderr)
+
+    def test_warning_names_the_username_actually_in_effect(self):
+        # Regression: the old static banner always claimed the username had
+        # defaulted too, so it advertised "default_user" while the next log
+        # line printed the real username.
+        result = self._run(username_supplied=True, password_supplied=False, opt_in="true")
+
+        self.assertIn("myuser", result.stderr)
+        self.assertNotIn("default_user", result.stderr)
+
+    def test_opt_in_must_be_exactly_true(self):
+        for value in ("false", "1", "yes", "TRUE", ""):
+            with self.subTest(value=value):
+                result = self._run(
+                    username_supplied=True, password_supplied=False, opt_in=value
+                )
+                self.assertEqual(
+                    result.returncode, 1, "only the literal 'true' may opt in"
+                )
+
+    def test_dead_password_check_is_still_present_for_defence_in_depth(self):
+        # The pre-existing "PASSWORD is required" check could never fire because
+        # the default had already been substituted. It stays as a guard for a
+        # future refactor that stops defaulting.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        self.assertIn("Error: PASSWORD is required.", text)
+
+
 if __name__ == "__main__":
     unittest.main()
