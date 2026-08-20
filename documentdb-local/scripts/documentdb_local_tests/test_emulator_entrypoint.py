@@ -2821,7 +2821,8 @@ class StalePostmasterPidTests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self._helpers.append(proc)
-        # Wait for the kernel to publish comm for the exec'd image.        deadline = time.time() + 10
+        # Wait for the kernel to publish comm for the exec'd image.
+        deadline = time.time() + 10
         comm_path = Path("/proc") / str(proc.pid) / "comm"
         while time.time() < deadline:
             try:
