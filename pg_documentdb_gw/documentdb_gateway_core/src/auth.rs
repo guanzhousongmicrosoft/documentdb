@@ -34,7 +34,11 @@ use crate::{
     processor,
     protocol::OK_SUCCEEDED,
     requests::{RequestType, WireRequest},
-    responses::{self, constant::generic_internal_error_message, RawResponse, Response},
+    responses::{
+        self,
+        constant::{authentication_failed_message, generic_internal_error_message},
+        RawResponse, Response,
+    },
     security::principal::Principal,
 };
 
@@ -733,8 +737,12 @@ async fn handle_sasl_continue(
             .map_err(DocumentDBError::pg_response_invalid)?
             != 1
         {
+            // Wrong password: the backend rejected the client proof. Reported
+            // with the same message as an unknown user (see
+            // authentication_failed_message) so the response cannot be used to
+            // enumerate valid usernames.
             return Err(DocumentDBError::authentication_failed(
-                "Invalid key".to_owned(),
+                authentication_failed_message().to_owned(),
             ));
         }
 
@@ -879,9 +887,13 @@ async fn get_salt_and_iteration(
         .map_err(|e| DocumentDBError::internal_error(e.to_string()))?
         != 1
     {
+        // Unknown user: no salt/iterations could be fetched. Reported with the
+        // same message as a bad password (see authentication_failed_message)
+        // so an unauthenticated caller cannot tell the two apart and probe for
+        // valid usernames.
         return Err(DocumentDBError::documentdb_error(
             ErrorCode::AuthenticationFailed,
-            "Invalid account: User details not found in the database".to_owned(),
+            authentication_failed_message().to_owned(),
         ));
     }
 

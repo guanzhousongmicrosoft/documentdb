@@ -31,3 +31,16 @@ pub const fn duplicate_key_violation_message() -> &'static str {
 pub const fn generic_internal_error_message() -> &'static str {
     "An unexpected internal error has occurred."
 }
+
+/// The single message returned for every failed authentication attempt.
+///
+/// Matches `MongoDB`'s wording so that existing client code, tutorials, and
+/// troubleshooting guides apply unchanged. It is deliberately identical for a
+/// bad password and for an unknown user: distinguishing them turns the
+/// endpoint into a username-enumeration oracle for an unauthenticated caller.
+/// Keep the specific cause in the internal/log-side message, never in the
+/// wire response.
+#[must_use]
+pub const fn authentication_failed_message() -> &'static str {
+    "Authentication failed."
+}
