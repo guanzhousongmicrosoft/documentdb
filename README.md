@@ -65,20 +65,17 @@ Step 3. Setup DocumentDB using Docker
    # Tag the image for convenience
    docker tag ghcr.io/documentdb/documentdb/documentdb-local:latest documentdb
 
-   # Run the container with your chosen username and password.
-   # -v documentdb-data:/data keeps your data when the container is recreated.
+   # Run the container with your chosen username and password
    docker run -dt -p 10260:10260 -v documentdb-data:/data --name documentdb-container documentdb --username <YOUR_USERNAME> --password <YOUR_PASSWORD>
 
-   # First boot initializes the database. Wait until the container reports it is ready:
-   docker logs -f documentdb-container   # look for "=== DocumentDB is ready ===", then press Ctrl+C
+   # Wait for first boot to finish, then press Ctrl+C
+   docker logs -f documentdb-container   # wait for "=== DocumentDB is ready ==="
 
 ```
 
-   > **Note:** Replace `<YOUR_USERNAME>` and `<YOUR_PASSWORD>` with your desired credentials. You must set these when creating the container for authentication to work.
+   > **Note:** Replace `<YOUR_USERNAME>` and `<YOUR_PASSWORD>` with your desired credentials. You must set these when creating the container for authentication to work. They are provisioned on first boot only — changing them later means resetting the volume (below).
    >
-   > **Data Persistence Note:** `-v documentdb-data:/data` stores your data in a Docker volume named `documentdb-data` instead of the container's writable layer. Without it, everything you insert is **lost as soon as the container is removed** — including when you upgrade the image or re-run `docker run` after a failure (`docker restart` alone is safe either way). The volume outlives `docker rm`, so recreating the container keeps your data. To start over from scratch, remove the volume too: `docker rm -f documentdb-container && docker volume rm documentdb-data`.
-   >
-   > **Readiness Note:** `docker run -dt` returns immediately, while first boot is still initializing the database, creating the extension, and provisioning your user. Most drivers hide this behind their connection retry (typically ready within a few seconds), but first boot can take substantially longer on slow Docker Desktop filesystems. If your first connection times out, wait for the `=== DocumentDB is ready ===` line in `docker logs` before connecting.
+   > **Data Note:** `-v documentdb-data:/data` keeps your data across `docker rm`. Without it every `docker run` gets a fresh empty volume, so a recreated container starts blank and the old data is stranded. To reset: `docker rm -f documentdb-container && docker volume rm documentdb-data`.
    >
    > **Port Note:** Port `10260` is used by default in these instructions to avoid conflicts with other local database services. You can use port `27017` (the standard MongoDB port) or any other available port if you prefer. If you do, be sure to update the port number in both your `docker run` command and your connection string accordingly.
 
