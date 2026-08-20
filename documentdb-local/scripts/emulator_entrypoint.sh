@@ -363,6 +363,9 @@ do
     -*)
         echo "Unknown option $1"
         exit 1;; 
+    *)
+        echo "Unexpected argument $1" >&2
+        exit 1;;
   esac
 done
 
