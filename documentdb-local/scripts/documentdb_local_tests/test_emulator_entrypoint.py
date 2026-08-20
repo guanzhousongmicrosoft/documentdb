@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -2762,6 +2763,218 @@ class EntrypointUxTextTests(unittest.TestCase):
             "mongosh 'mongodb://${USERNAME}:<password>@localhost:${DOCUMENTDB_PORT}",
             text,
             "the ready banner must print a working mongosh connection string",
+        )
+
+
+class StalePostmasterPidTests(unittest.TestCase):
+    """A postmaster.pid left by an uncleanly stopped container must not block startup.
+
+    Each container gets a fresh PID namespace, so the PID recorded in a stale
+    postmaster.pid is frequently alive again as an unrelated process. PostgreSQL's
+    own check is kill(pid, 0), which then succeeds, and it refuses to start with
+    'lock file "postmaster.pid" already exists'. Measured at ~2 in 10 unclean
+    restarts.
+
+    These tests extract the real functions from emulator_entrypoint.sh and execute
+    them, rather than asserting on source text, so what is tested is the behaviour
+    an operator actually gets.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.pidfile = self.data / "postmaster.pid"
+        self._helpers = []
+
+    def tearDown(self):
+        for proc in self._helpers:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self.temp_dir.cleanup()
+
+    def _functions(self):
+        """The real postmaster_pid_is_live + clear_stale_postmaster_pid definitions."""
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        block = ""
+        for name in ("postmaster_pid_is_live", "clear_stale_postmaster_pid"):
+            match = re.search(
+                r"^%s\(\) \{\n.*?^\}$" % re.escape(name),
+                text,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+            self.assertIsNotNone(match, "could not locate %s() in the entrypoint" % name)
+            block += match.group(0) + "\n"
+        return block
+
+    def _spawn_named(self, name):
+        """Start a long-lived process whose /proc/<pid>/comm is exactly `name`.
+
+        comm comes from the executable's own name, so a *copy of a real binary*
+        is required: a shell script would report the interpreter ("sh"), and a
+        script that exec'd sleep would report "sleep". Copy /bin/sleep to the
+        desired name instead. (comm is truncated to 15 characters, so keep
+        names short.)
+        """
+        source = Path("/bin/sleep")
+        if not source.exists():
+            source = Path("/usr/bin/sleep")
+        exe = self.root / name
+        shutil.copy2(source, exe)
+        exe.chmod(0o755)
+        proc = subprocess.Popen(
+            [str(exe), "300"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        self._helpers.append(proc)
+        # Wait for the kernel to publish comm for the exec'd image.
+        deadline = time.time() + 10
+        comm_path = Path("/proc") / str(proc.pid) / "comm"
+        while time.time() < deadline:
+            try:
+                if comm_path.read_text().strip() == name[:15]:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        return proc.pid
+
+    def _clear(self):
+        script = self._functions() + '\nclear_stale_postmaster_pid "$DATA_DIR"\n'
+        env = os.environ.copy()
+        env["DATA_DIR"] = str(self.data)
+        return subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _write_pidfile(self, pid, data_dir=None):
+        # Real format: line 1 PID, line 2 data directory, then start time, port, socket dir.
+        self.pidfile.write_text(
+            "%s\n%s\n1700000000\n9712\n/var/run/postgresql\n"
+            % (pid, data_dir if data_dir is not None else self.data),
+            encoding="utf-8",
+        )
+
+    def test_stale_pid_from_dead_process_is_removed(self):
+        # A PID that no longer exists at all.
+        dead = self._spawn_named("postgres")
+        self._helpers[-1].terminate()
+        self._helpers[-1].wait(timeout=10)
+        self._write_pidfile(dead)
+
+        result = self._clear()
+
+        self.assertFalse(
+            self.pidfile.exists(),
+            "a pid file naming a dead process must be removed, got: %s" % result.stderr,
+        )
+
+    def test_pid_reused_by_unrelated_process_is_removed(self):
+        # The actual bug: the PID is alive, but in this fresh PID namespace it
+        # belongs to something that is not PostgreSQL. kill(pid, 0) succeeds, so
+        # PostgreSQL (and pg_ctl status) wrongly conclude a postmaster is running.
+        pid = self._spawn_named("not_a_postmastr")
+        self._write_pidfile(pid)
+
+        result = self._clear()
+
+        self.assertFalse(
+            self.pidfile.exists(),
+            "a pid file whose PID was reused by a non-postgres process must be "
+            "removed, got: %s" % result.stderr,
+        )
+        self.assertIn("Removing stale postmaster.pid", result.stdout)
+
+    def test_live_postmaster_pid_is_preserved(self):
+        # The safety property: never delete the lock of a running postmaster.
+        pid = self._spawn_named("postgres")
+        self._write_pidfile(pid)
+
+        self._clear()
+
+        self.assertTrue(
+            self.pidfile.exists(),
+            "the lock file of a genuinely running postmaster must be preserved",
+        )
+
+    def test_pid_for_a_different_data_directory_is_removed(self):
+        # A postmaster, but serving another cluster: it does not lock this one.
+        pid = self._spawn_named("postgres")
+        self._write_pidfile(pid, data_dir="/some/other/cluster")
+
+        self._clear()
+
+        self.assertFalse(
+            self.pidfile.exists(),
+            "a postmaster.pid recorded against a different data directory must be removed",
+        )
+
+    def test_truncated_pid_file_is_removed(self):
+        self.pidfile.write_text("", encoding="utf-8")
+
+        self._clear()
+
+        self.assertFalse(
+            self.pidfile.exists(), "a truncated/garbled pid file must be removed"
+        )
+
+    def test_missing_pid_file_is_a_noop(self):
+        result = self._clear()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("Removing stale postmaster.pid", result.stdout)
+
+    def test_readiness_check_is_only_safe_because_the_stale_lock_was_cleared(self):
+        # The false positive came from a pre-existing postmaster.pid on a reused
+        # volume: the readiness loop saw it on the first iteration and reported
+        # success while the postmaster had just died on that same file. The
+        # file-existence test is retained (the 2-stage gate below it depends on
+        # it), so what makes it correct is that the stale lock is cleared BEFORE
+        # the server starts. Pin that relationship.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
+        wait_at = text.find('while [ ! -f "$DATA_PATH/postmaster.pid" ]')
+        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
+        self.assertNotEqual(wait_at, -1, "readiness loop not found")
+        self.assertLess(
+            clear_at,
+            wait_at,
+            "the stale lock must be cleared before the readiness loop can treat "
+            "the presence of postmaster.pid as evidence that our postmaster started",
+        )
+
+    def test_start_failure_names_the_lock_file_cause(self):
+        # The original failure surfaced as an unrelated getParameter stub error,
+        # which sent readers to the wrong place entirely.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        self.assertIn(
+            'lock file "postmaster.pid" already exists',
+            text,
+            "a start failure caused by the lock file must say so explicitly",
+        )
+
+    def test_stale_pid_is_cleared_before_the_server_is_started(self):
+        # Ordering matters: clearing after the start attempt would be useless.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
+        start_at = text.find('"$SCRIPT_DIR/start_oss_server.sh"')
+        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
+        self.assertNotEqual(start_at, -1, "start_oss_server.sh invocation not found")
+        self.assertLess(
+            clear_at,
+            start_at,
+            "the stale lock must be cleared BEFORE start_oss_server.sh runs",
         )
 
 
