@@ -224,25 +224,30 @@ sanitize_uint() {
     esac
 }
 
-# An uncleanly stopped container leaves postmaster.pid behind, and the next
-# container gets a fresh PID namespace where that PID is often alive again as an
-# unrelated process. PostgreSQL only tests kill(pid, 0), so it wrongly refuses to
-# start. Identify the process instead, and keep the file whenever we cannot:
-# deleting a live postmaster's lock is worse than failing to start.
-clear_stale_postmaster_pid() {
-    local pidfile="$1/postmaster.pid" pid dir comm
-    [ -f "$pidfile" ] || return 0
-
+# A postmaster.pid left by an uncleanly stopped container names a PID that the
+# next container's fresh PID namespace has usually re-assigned to something
+# unrelated. PostgreSQL only tests kill(pid, 0), so it wrongly refuses to start;
+# identify the process instead. True only for a postmaster serving this data
+# directory, and true when we cannot tell -- deleting a live server's lock is
+# worse than failing to start.
+postmaster_pid_is_live() {
+    local pidfile="$1/postmaster.pid" pid dir
+    [ -f "$pidfile" ] || return 1
     pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
     dir="$(sed -n 2p "$pidfile" 2>/dev/null)"               # line 2: data directory
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        comm="$(cat "/proc/$pid/comm" 2>/dev/null)" || return 0
-        case "$comm" in
-            postgres|postmaster) [ "${dir:-$1}" = "$1" ] && return 0 ;;
-        esac
-    fi
+    { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || return 1
+    [ -r "/proc/$pid/comm" ] || return 0                    # cannot identify it
+    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+        postgres|postmaster) [ "${dir:-$1}" = "$1" ] ;;     # ours, or another cluster's?
+        *) false ;;                                         # PID reused by something else
+    esac
+}
 
-    echo "Removing stale $pidfile (PID ${pid:-unknown} is not a running postmaster for $1; the previous container was stopped uncleanly)."
+# Drop a lock file left behind by an uncleanly stopped container.
+clear_stale_postmaster_pid() {
+    local pidfile="$1/postmaster.pid"
+    { [ -f "$pidfile" ] && ! postmaster_pid_is_live "$1"; } || return 0
+    echo "Removing stale $pidfile: the previous container was stopped uncleanly."
     rm -f "$pidfile" || echo "Warning: could not remove $pidfile; PostgreSQL may refuse to start." >&2
 }
 
@@ -899,8 +904,6 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
-    # A stale lock from an uncleanly stopped container blocks the start, and would
-    # also make the readiness check below pass against a file we did not write.
     clear_stale_postmaster_pid "$DATA_PATH"
     EXTENDED_RUM_FLAG="-r"
     if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
@@ -968,16 +971,14 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    # Safe to test for existence only because any stale postmaster.pid was
-    # cleared above, so the file appearing here is one our postmaster wrote.
-    while [ ! -f "$DATA_PATH/postmaster.pid" ]; do
+    # Liveness, not mere existence: a leftover postmaster.pid on a reused volume
+    # made this exit immediately and report success after PostgreSQL had FATAL'd.
+    while ! postmaster_pid_is_live "$DATA_PATH"; do
         sleep 1
         if [ $i -ge 60 ]; then
-            echo "Error: PostgreSQL failed to start within 60 seconds; refusing to continue." >&2
-            if grep -q 'lock file "postmaster.pid" already exists' "$OSS_SERVER_LOG" 2>/dev/null \
-                    || grep -q 'lock file "postmaster.pid" already exists' "$DATA_PATH/pglog.log" 2>/dev/null; then
-                echo "Error: PostgreSQL refused to start because ${DATA_PATH}/postmaster.pid is held by another process. If this container was stopped uncleanly, remove that file and start again." >&2
-            fi
+            echo "PostgreSQL failed to start within 60 seconds."
+            grep -qs 'lock file "postmaster.pid" already exists' "$OSS_SERVER_LOG" "$DATA_PATH/pglog.log" &&
+                echo "Hint: $DATA_PATH/postmaster.pid is held by another process; remove it and start again." >&2
             cat "$OSS_SERVER_LOG"
             exit 1
         fi

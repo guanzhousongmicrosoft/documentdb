@@ -2888,7 +2888,7 @@ class StalePostmasterPidTests(unittest.TestCase):
             "a pid file whose PID was reused by a non-postgres process must be "
             "removed, got: %s" % result.stderr,
         )
-        self.assertIn("Removing stale postmaster.pid", result.stdout)
+        self.assertIn("Removing stale", result.stdout)
 
     def test_live_postmaster_pid_is_preserved(self):
         # The safety property: never delete the lock of a running postmaster.
@@ -2927,31 +2927,35 @@ class StalePostmasterPidTests(unittest.TestCase):
         result = self._clear()
 
         self.assertEqual(result.returncode, 0)
-        self.assertNotIn("Removing stale postmaster.pid", result.stdout)
+        self.assertNotIn("Removing stale", result.stdout)
 
-    def test_readiness_check_is_only_safe_because_the_stale_lock_was_cleared(self):
-        # The readiness loop only tests for file existence, so a pre-existing
-        # postmaster.pid made it report success immediately. What makes it correct
-        # is clearing the stale lock first; pin that ordering.
+    def test_readiness_loop_tests_liveness_not_file_existence(self):
+        # Defect 2: the loop tested only for the file, so a leftover postmaster.pid
+        # on a reused volume made it report success after PostgreSQL had FATAL'd.
         text = ENTRYPOINT.read_text(encoding="utf-8")
-        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
-        wait_at = text.find('while [ ! -f "$DATA_PATH/postmaster.pid" ]')
-        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
-        self.assertNotEqual(wait_at, -1, "readiness loop not found")
-        self.assertLess(
-            clear_at,
-            wait_at,
-            "the stale lock must be cleared before the readiness loop can treat "
-            "the presence of postmaster.pid as evidence that our postmaster started",
-        )
+        self.assertIn('while ! postmaster_pid_is_live "$DATA_PATH"; do', text)
+        self.assertNotIn('while [ ! -f "$DATA_PATH/postmaster.pid" ]', text)
 
     def test_start_failure_names_the_lock_file_cause(self):
-        # The original failure surfaced as an unrelated getParameter stub error.
+        # Defect 3: the failure surfaced as an unrelated getParameter stub error.
         text = ENTRYPOINT.read_text(encoding="utf-8")
         self.assertIn(
             'lock file "postmaster.pid" already exists',
             text,
             "a start failure caused by the lock file must say so explicitly",
+        )
+
+    def test_stale_pid_is_cleared_before_the_server_is_started(self):
+        # Ordering matters: clearing after the start attempt would be useless.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
+        start_at = text.find('"$SCRIPT_DIR/start_oss_server.sh"')
+        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
+        self.assertNotEqual(start_at, -1, "start_oss_server.sh invocation not found")
+        self.assertLess(
+            clear_at,
+            start_at,
+            "the stale lock must be cleared BEFORE start_oss_server.sh runs",
         )
 
     def test_stale_pid_is_cleared_before_the_server_is_started(self):
