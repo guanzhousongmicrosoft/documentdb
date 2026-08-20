@@ -2769,15 +2769,12 @@ class EntrypointUxTextTests(unittest.TestCase):
 class StalePostmasterPidTests(unittest.TestCase):
     """A postmaster.pid left by an uncleanly stopped container must not block startup.
 
-    Each container gets a fresh PID namespace, so the PID recorded in a stale
-    postmaster.pid is frequently alive again as an unrelated process. PostgreSQL's
-    own check is kill(pid, 0), which then succeeds, and it refuses to start with
-    'lock file "postmaster.pid" already exists'. Measured at ~2 in 10 unclean
-    restarts.
+    Each container gets a fresh PID namespace, so the recorded PID is often alive
+    again as an unrelated process, and PostgreSQL's kill(pid, 0) check wrongly
+    concludes a postmaster is running.
 
-    These tests extract the real functions from emulator_entrypoint.sh and execute
-    them, rather than asserting on source text, so what is tested is the behaviour
-    an operator actually gets.
+    These tests extract the real shell functions and run them, so they exercise
+    actual behaviour rather than source text.
     """
 
     def setUp(self):
@@ -2814,11 +2811,9 @@ class StalePostmasterPidTests(unittest.TestCase):
     def _spawn_named(self, name):
         """Start a long-lived process whose /proc/<pid>/comm is exactly `name`.
 
-        comm comes from the executable's own name, so a *copy of a real binary*
-        is required: a shell script would report the interpreter ("sh"), and a
-        script that exec'd sleep would report "sleep". Copy /bin/sleep to the
-        desired name instead. (comm is truncated to 15 characters, so keep
-        names short.)
+        comm comes from the executable's name, so a copy of a real binary is
+        needed: a shell script would report "sh" or "sleep". comm is truncated to
+        15 characters, so keep names short.
         """
         source = Path("/bin/sleep")
         if not source.exists():
@@ -2859,7 +2854,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def _write_pidfile(self, pid, data_dir=None):
-        # Real format: line 1 PID, line 2 data directory, then start time, port, socket dir.
+        # Real format: PID, data directory, start time, port, socket dir.
         self.pidfile.write_text(
             "%s\n%s\n1700000000\n9712\n/var/run/postgresql\n"
             % (pid, data_dir if data_dir is not None else self.data),
@@ -2881,9 +2876,8 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def test_pid_reused_by_unrelated_process_is_removed(self):
-        # The actual bug: the PID is alive, but in this fresh PID namespace it
-        # belongs to something that is not PostgreSQL. kill(pid, 0) succeeds, so
-        # PostgreSQL (and pg_ctl status) wrongly conclude a postmaster is running.
+        # The actual bug: the PID is alive but belongs to something that is not
+        # PostgreSQL, so kill(pid, 0) succeeds and PostgreSQL refuses to start.
         pid = self._spawn_named("not_a_postmastr")
         self._write_pidfile(pid)
 
@@ -2936,12 +2930,9 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertNotIn("Removing stale postmaster.pid", result.stdout)
 
     def test_readiness_check_is_only_safe_because_the_stale_lock_was_cleared(self):
-        # The false positive came from a pre-existing postmaster.pid on a reused
-        # volume: the readiness loop saw it on the first iteration and reported
-        # success while the postmaster had just died on that same file. The
-        # file-existence test is retained (the 2-stage gate below it depends on
-        # it), so what makes it correct is that the stale lock is cleared BEFORE
-        # the server starts. Pin that relationship.
+        # The readiness loop only tests for file existence, so a pre-existing
+        # postmaster.pid made it report success immediately. What makes it correct
+        # is clearing the stale lock first; pin that ordering.
         text = ENTRYPOINT.read_text(encoding="utf-8")
         clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
         wait_at = text.find('while [ ! -f "$DATA_PATH/postmaster.pid" ]')
@@ -2955,8 +2946,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def test_start_failure_names_the_lock_file_cause(self):
-        # The original failure surfaced as an unrelated getParameter stub error,
-        # which sent readers to the wrong place entirely.
+        # The original failure surfaced as an unrelated getParameter stub error.
         text = ENTRYPOINT.read_text(encoding="utf-8")
         self.assertIn(
             'lock file "postmaster.pid" already exists',

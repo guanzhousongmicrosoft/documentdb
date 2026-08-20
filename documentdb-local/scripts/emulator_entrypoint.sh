@@ -224,56 +224,37 @@ sanitize_uint() {
     esac
 }
 
-# Is the PID recorded in $DATA_PATH/postmaster.pid a postmaster that is really
-# still running against THIS data directory?
+# Does postmaster.pid name a postmaster still running against this data directory?
 #
-# A container that was stopped uncleanly (docker rm -f, docker kill, an OOM
-# kill, a host crash) leaves postmaster.pid behind on the data volume. The next
-# container starts with a FRESH PID NAMESPACE, so the recorded PID -- typically
-# a low number like 83 or 84 -- is very often alive again as a completely
-# unrelated process (a log tailer, a shell). PostgreSQL's own staleness check
-# is `kill(pid, 0)`, which then succeeds, so it refuses to start with:
-#
-#   FATAL:  lock file "postmaster.pid" already exists
-#   HINT:   Is another postmaster (PID 84) running in data directory "/data"?
-#
-# Measured at roughly 1 in 5 unclean restarts. `pg_ctl status` is no help here:
-# it performs the same kill(pid, 0) test and reaches the same wrong conclusion.
-# So identify the process rather than merely counting its existence, and treat
-# anything that is not a postmaster for this data directory as stale.
-#
-# Deliberately conservative: any doubt (unreadable /proc, a mismatched data
-# directory line, a name we do not recognise) is resolved by leaving the file
-# in place and letting PostgreSQL make the final call, because deleting the
-# lock of a genuinely running postmaster is far worse than failing to start.
+# An uncleanly stopped container leaves postmaster.pid behind. The next container
+# gets a fresh PID namespace, so that PID is often alive again as something
+# unrelated. PostgreSQL only checks kill(pid, 0), so it wrongly refuses to start.
+# Identify the process instead. When in doubt, keep the file and let PostgreSQL
+# decide: deleting a live postmaster's lock is worse than failing to start.
 postmaster_pid_is_live() {
     local data_dir="$1" pidfile="$1/postmaster.pid"
     local pid recorded_dir comm
 
     [ -f "$pidfile" ] || return 1
 
-    # Line 1 is the PID; line 2 is the data directory it was started with.
+    # Line 1 is the PID, line 2 the data directory.
     pid="$(sed -n '1p' "$pidfile" 2>/dev/null | tr -dc '0-9')"
     recorded_dir="$(sed -n '2p' "$pidfile" 2>/dev/null)"
 
-    # Truncated or garbled file: nothing to protect.
+    # Truncated file, or no such process: stale.
     [ -n "$pid" ] || return 1
-
-    # No such process: unambiguously stale.
     kill -0 "$pid" 2>/dev/null || return 1
 
-    # A process exists. Without /proc we cannot identify it, so keep the file
-    # and let PostgreSQL decide (the conservative direction).
+    # No /proc: cannot identify it, so assume live.
     [ -r "/proc/$pid/comm" ] || return 0
 
     comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
     case "$comm" in
         postgres|postmaster) ;;
-        *) return 1 ;;   # PID reused by something else: stale
+        *) return 1 ;;   # PID reused by something else
     esac
 
-    # It is a postmaster. If the file records a different data directory it
-    # belongs to another cluster and does not lock this one.
+    # A postmaster, but for another cluster: it does not lock this one.
     if [ -n "$recorded_dir" ] && [ "$recorded_dir" != "$data_dir" ]; then
         return 1
     fi
@@ -281,16 +262,13 @@ postmaster_pid_is_live() {
     return 0
 }
 
-# Remove a postmaster.pid left behind by an uncleanly stopped container, so the
-# next start is not blocked by a PID that now belongs to an unrelated process.
+# Remove a postmaster.pid left behind by an uncleanly stopped container.
 clear_stale_postmaster_pid() {
     local data_dir="$1" pidfile="$1/postmaster.pid" pid
 
     [ -f "$pidfile" ] || return 0
 
     if postmaster_pid_is_live "$data_dir"; then
-        # Genuinely running (for example --start-pg false against an external
-        # server, or a re-entrant call). Leave it alone.
         return 0
     fi
 
@@ -954,10 +932,8 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
-    # A stale lock from an uncleanly stopped container makes PostgreSQL refuse
-    # to start on this volume (see clear_stale_postmaster_pid). Clear it here,
-    # before the start, so the readiness check below can once again treat the
-    # appearance of postmaster.pid as evidence that OUR postmaster wrote it.
+    # A stale lock from an uncleanly stopped container blocks the start, and would
+    # also make the readiness check below pass against a file we did not write.
     clear_stale_postmaster_pid "$DATA_PATH"
     EXTENDED_RUM_FLAG="-r"
     if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
@@ -1025,20 +1001,12 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    # Existence of postmaster.pid is only meaningful because
-    # clear_stale_postmaster_pid removed any lock left by an uncleanly stopped
-    # container before start_oss_server.sh ran, so the file that appears here
-    # can only have been written by the postmaster we just started. Without
-    # that clear, a stale file was already present on the first iteration: this
-    # loop exited immediately and printed "PostgreSQL is running." while the
-    # postmaster had in fact just died on that very file, and the failure
-    # surfaced much later, and misleadingly, as a getParameter stub error.
+    # Safe to test for existence only because any stale postmaster.pid was
+    # cleared above, so the file appearing here is one our postmaster wrote.
     while [ ! -f "$DATA_PATH/postmaster.pid" ]; do
         sleep 1
         if [ $i -ge 60 ]; then
             echo "Error: PostgreSQL failed to start within 60 seconds; refusing to continue." >&2
-            # Name the real cause when PostgreSQL refused the data directory,
-            # instead of letting this surface later as an unrelated error.
             if grep -q 'lock file "postmaster.pid" already exists' "$OSS_SERVER_LOG" 2>/dev/null \
                     || grep -q 'lock file "postmaster.pid" already exists' "$DATA_PATH/pglog.log" 2>/dev/null; then
                 echo "Error: PostgreSQL refused to start because ${DATA_PATH}/postmaster.pid is held by another process. If this container was stopped uncleanly, remove that file and start again." >&2
