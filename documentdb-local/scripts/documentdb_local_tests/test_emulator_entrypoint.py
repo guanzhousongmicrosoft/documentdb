@@ -2842,6 +2842,43 @@ class StalePostmasterPidTests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
 
+    def _readiness_verdict(self, data_dir=None):
+        """Run clear + the real readiness loop (1s budget) and return its verdict."""
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        loop = re.search(
+            r"^    # A lock we preserved.*?^    done$", text, re.DOTALL | re.MULTILINE
+        )
+        self.assertIsNotNone(loop, "could not locate the readiness loop")
+        env_dir = str(self.data) if data_dir is None else data_dir
+        script = (
+            self._functions()
+            + '\nDATA_PATH="%s"\nOSS_SERVER_LOG=/dev/null\n' % env_dir
+            + 'clear_stale_postmaster_pid "$DATA_PATH"\n'
+            + loop.group(0).replace("$i -ge 60", "$i -ge 1")
+            + '\necho "PostgreSQL is running."\n'
+        )
+        return self._run(script)
+
+    def test_preserved_lock_does_not_report_a_server_that_never_started(self):
+        # A preserved lock still holds the old PID, so file existence alone would
+        # report success for a PostgreSQL that in fact FATAL'd on that same file.
+        pid = self._spawn_named("postgres")
+        self._write_pidfile(pid)
+
+        result = self._readiness_verdict()
+
+        self.assertNotIn("PostgreSQL is running.", result.stdout)
+        self.assertIn("failed to start", result.stdout)
+
+    def test_cleared_lock_reports_running_once_the_server_writes_its_pid(self):
+        # The normal path must be unaffected: no lock preserved, file appears.
+        self._write_pidfile(999999)
+
+        result = self._readiness_verdict()
+
+        self.assertIn("Removing stale", result.stdout)
+        self.assertIn("failed to start", result.stdout)  # stub never starts a server
+
     def _clear(self, data_dir=None):
         env_dir = str(self.data) if data_dir is None else data_dir
         script = self._functions() + '\nclear_stale_postmaster_pid "%s"\n' % env_dir
@@ -2896,9 +2933,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def test_live_postgres_for_another_directory_is_preserved(self):
-        # Conservative by design: "is it a postgres?" is answerable, "is it a
-        # postgres for THIS cluster?" is not (the recorded path is canonicalized,
-        # $DATA_PATH is not), and a wrong answer deletes a live server's lock.
+        # Conservative: any live postgres keeps its lock, this cluster or not.
         pid = self._spawn_named("postgres")
         self._write_pidfile(pid, data_dir="/some/other/cluster")
 
@@ -2910,8 +2945,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def test_trailing_slash_data_path_preserves_a_live_lock(self):
-        # PostgreSQL canonicalizes the recorded path, so --data-path /data/ records
-        # /data; a byte-exact compare would delete a running server's lock.
+        # --data-path /data/ records /data; a byte compare would delete a live lock.
         pid = self._spawn_named("postgres")
         self._write_pidfile(pid)
 
@@ -2947,8 +2981,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertLess(clear_at, wait_at)
 
     def test_unremovable_stale_lock_fails_loudly(self):
-        # Defect 3: a lock we cannot clear would leave the readiness check reading
-        # a leftover file as success, and the boot failing later somewhere else.
+        # Defect 3: otherwise the readiness check reads the leftover file as success.
         self._write_pidfile(999999)
         script = self._functions() + (
             '\nrm() { return 1; }\nclear_stale_postmaster_pid "$DATA_DIR"\necho reached-end\n'
