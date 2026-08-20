@@ -7,6 +7,8 @@
 # blocks/sample data/day-2/erase; this covers what it does not, focusing on
 # the paths where RHEL genuinely differs from Debian:
 #
+#   RH-LIBBSON    the extension RPM co-installs with EPEL's libbson in
+#                 both transaction directions (it must vendor none)
 #   RH-TUNE       documentdb-tune writes its managed block INTO the data
 #                 dir's postgresql.conf (RHEL layout) rather than a
 #                 separate fragment + include line (Debian layout), and
@@ -99,6 +101,53 @@ snapshot_state() {
 reset_install_state() {
     documentdb-setup --restore --yes >/dev/null 2>&1 || true
     documentdb-local-reset --pg-version "${PG_MAJOR}" --confirm-destroy >/dev/null 2>&1 || true
+}
+
+# ── RH-LIBBSON: the extension RPM must co-install with EPEL's libbson ──
+#
+# libbson is linked statically, so the package must ship no libbson files and
+# Provide no libbson capability -- both own paths EPEL's libbson owns, and this
+# image enables EPEL, so the transactions below hit the real distro package.
+scenario_libbson_coinstall() {
+    local docdb_pkg="postgresql${PG_MAJOR}-documentdb"
+    local log=/tmp/e2e-rhel-libbson.log
+
+    if rpm -ql "${docdb_pkg}" 2>/dev/null | grep -qi libbson; then
+        fail "RH-LIBBSON: ${docdb_pkg} ships libbson files: $(rpm -ql "${docdb_pkg}" | grep -i libbson | tr '\n' ' ')"
+    else
+        pass "RH-LIBBSON: ${docdb_pkg} ships no libbson files"
+    fi
+
+    if rpm -q --provides "${docdb_pkg}" 2>/dev/null | grep -qi libbson; then
+        fail "RH-LIBBSON: ${docdb_pkg} Provides a libbson capability from a private build"
+    else
+        pass "RH-LIBBSON: ${docdb_pkg} advertises no libbson Provides"
+    fi
+
+    # Direction 1: DocumentDB is already installed in this image.
+    if dnf install -y libbson > "${log}" 2>&1; then
+        pass "RH-LIBBSON: EPEL libbson installs onto a host that already has ${docdb_pkg}"
+    else
+        tail -20 "${log}" >&2
+        fail "RH-LIBBSON: EPEL libbson cannot be installed alongside ${docdb_pkg}"
+        return
+    fi
+
+    # Direction 2. `reinstall` replays the transaction test, file conflicts
+    # included, without erasing the install later scenarios run against.
+    if [[ -r /tmp/documentdb.rpm ]]; then
+        if dnf reinstall -y /tmp/documentdb.rpm >> "${log}" 2>&1; then
+            pass "RH-LIBBSON: ${docdb_pkg} installs onto a host that already has EPEL libbson"
+        else
+            tail -20 "${log}" >&2
+            fail "RH-LIBBSON: ${docdb_pkg} cannot be installed over EPEL libbson"
+        fi
+    else
+        skip "RH-LIBBSON: /tmp/documentdb.rpm not staged; reverse direction not exercised"
+    fi
+
+    # Leave the host as found — RH-HYGIENE audits erase residue later.
+    dnf remove -y --noautoremove libbson >/dev/null 2>&1 || true
 }
 
 # ── RH-READONLY / RH-DRYRUN on a clean host ────────────────────────────
@@ -522,6 +571,7 @@ scenario_rpm_hygiene() {
         || fail "RH-HYGIENE: binaries survived the erase: ${residue[*]}"
 }
 
+scenario_libbson_coinstall
 scenario_readonly_dryrun
 scenario_conflicts
 scenario_tune_rhel_layout
