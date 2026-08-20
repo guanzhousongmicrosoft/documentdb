@@ -224,59 +224,26 @@ sanitize_uint() {
     esac
 }
 
-# Does postmaster.pid name a postmaster still running against this data directory?
-#
-# An uncleanly stopped container leaves postmaster.pid behind. The next container
-# gets a fresh PID namespace, so that PID is often alive again as something
-# unrelated. PostgreSQL only checks kill(pid, 0), so it wrongly refuses to start.
-# Identify the process instead. When in doubt, keep the file and let PostgreSQL
-# decide: deleting a live postmaster's lock is worse than failing to start.
-postmaster_pid_is_live() {
-    local data_dir="$1" pidfile="$1/postmaster.pid"
-    local pid recorded_dir comm
-
-    [ -f "$pidfile" ] || return 1
-
-    # Line 1 is the PID, line 2 the data directory.
-    pid="$(sed -n '1p' "$pidfile" 2>/dev/null | tr -dc '0-9')"
-    recorded_dir="$(sed -n '2p' "$pidfile" 2>/dev/null)"
-
-    # Truncated file, or no such process: stale.
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-
-    # No /proc: cannot identify it, so assume live.
-    [ -r "/proc/$pid/comm" ] || return 0
-
-    comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
-    case "$comm" in
-        postgres|postmaster) ;;
-        *) return 1 ;;   # PID reused by something else
-    esac
-
-    # A postmaster, but for another cluster: it does not lock this one.
-    if [ -n "$recorded_dir" ] && [ "$recorded_dir" != "$data_dir" ]; then
-        return 1
-    fi
-
-    return 0
-}
-
-# Remove a postmaster.pid left behind by an uncleanly stopped container.
+# An uncleanly stopped container leaves postmaster.pid behind, and the next
+# container gets a fresh PID namespace where that PID is often alive again as an
+# unrelated process. PostgreSQL only tests kill(pid, 0), so it wrongly refuses to
+# start. Identify the process instead, and keep the file whenever we cannot:
+# deleting a live postmaster's lock is worse than failing to start.
 clear_stale_postmaster_pid() {
-    local data_dir="$1" pidfile="$1/postmaster.pid" pid
-
+    local pidfile="$1/postmaster.pid" pid dir comm
     [ -f "$pidfile" ] || return 0
 
-    if postmaster_pid_is_live "$data_dir"; then
-        return 0
+    pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
+    dir="$(sed -n 2p "$pidfile" 2>/dev/null)"               # line 2: data directory
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        comm="$(cat "/proc/$pid/comm" 2>/dev/null)" || return 0
+        case "$comm" in
+            postgres|postmaster) [ "${dir:-$1}" = "$1" ] && return 0 ;;
+        esac
     fi
 
-    pid="$(sed -n '1p' "$pidfile" 2>/dev/null | tr -dc '0-9')"
-    echo "Removing stale postmaster.pid in ${data_dir} (recorded PID ${pid:-unknown} is not a running postmaster for this data directory; the previous container was stopped uncleanly)."
-    if ! rm -f "$pidfile"; then
-        echo "Warning: could not remove the stale lock file ${pidfile}; PostgreSQL may refuse to start with 'lock file \"postmaster.pid\" already exists'." >&2
-    fi
+    echo "Removing stale $pidfile (PID ${pid:-unknown} is not a running postmaster for $1; the previous container was stopped uncleanly)."
+    rm -f "$pidfile" || echo "Warning: could not remove $pidfile; PostgreSQL may refuse to start." >&2
 }
 
 if [[ -f "/version.txt" ]]; then
