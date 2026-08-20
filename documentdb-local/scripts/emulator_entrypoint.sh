@@ -224,6 +224,25 @@ sanitize_uint() {
     esac
 }
 
+# A stale postmaster.pid names a PID this container's namespace has often
+# re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the process.
+# Sets PRESERVED_POSTMASTER_PID when a pre-existing lock is left in place.
+clear_stale_postmaster_pid() {
+    local pidfile="$1/postmaster.pid" pid
+    PRESERVED_POSTMASTER_PID=
+    [ -f "$pidfile" ] || return 0
+    pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        # Unidentifiable, or a real server: leave it alone.
+        [ -r "/proc/$pid/comm" ] || { PRESERVED_POSTMASTER_PID=$pid; return 0; }
+        case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+            postgres|postmaster) PRESERVED_POSTMASTER_PID=$pid; return 0 ;;
+        esac
+    fi
+    echo "Removing stale $pidfile: the previous container was stopped uncleanly."
+    rm -f "$pidfile" || { echo "Error: cannot remove stale $pidfile." >&2; exit 1; }
+}
+
 if [[ -f "/version.txt" ]]; then
   DocumentDB_RELEASE_VERSION=$(cat /version.txt)
   echo "Release Version: $DocumentDB_RELEASE_VERSION"
@@ -877,6 +896,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
+    clear_stale_postmaster_pid "$DATA_PATH"
     EXTENDED_RUM_FLAG="-r"
     if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
         EXTENDED_RUM_FLAG=""
@@ -943,7 +963,10 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    while [ ! -f "$DATA_PATH/postmaster.pid" ]; do
+    # A lock we preserved above proves nothing until our postmaster rewrites it.
+    while [ ! -f "$DATA_PATH/postmaster.pid" ] ||
+        { [ -n "$PRESERVED_POSTMASTER_PID" ] &&
+            [ "$(sed -n 1p "$DATA_PATH/postmaster.pid" 2>/dev/null | tr -dc 0-9)" = "$PRESERVED_POSTMASTER_PID" ]; }; do
         sleep 1
         if [ $i -ge 60 ]; then
             echo "PostgreSQL failed to start within 60 seconds."
