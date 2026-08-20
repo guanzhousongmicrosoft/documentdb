@@ -237,7 +237,7 @@ jobs:
         DIGEST=$(docker buildx imagetools inspect ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.MANIFEST_TAG }} \
           | awk '/^Digest:/ { print $2 }')
         echo "Signing manifest-list@${DIGEST}"
-        cosign sign --new-bundle-format=false \
+        cosign sign --new-bundle-format=false --use-signing-config=false \
           ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}@${DIGEST} -y
     - name: Verify manifest signature (keyless)
       run: |
@@ -286,7 +286,7 @@ jobs:
         DIGEST=$(docker buildx imagetools inspect ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.MANIFEST_TAG }} \
           | awk '/^Digest:/ { print $2 }')
         echo "Signing manifest-list@${DIGEST}"
-        cosign sign --new-bundle-format=false \
+        cosign sign --new-bundle-format=false --use-signing-config=false \
           ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}@${DIGEST} -y
     - name: Verify manifest signature (keyless)
       run: |
