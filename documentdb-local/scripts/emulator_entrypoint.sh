@@ -226,20 +226,21 @@ sanitize_uint() {
 
 # A stale postmaster.pid names a PID the new container's PID namespace has often
 # re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the process
-# instead; keep the file when we cannot, so a live server's lock is never lost.
+# instead, and remove the file only when it is certainly not a running server.
 clear_stale_postmaster_pid() {
-    local pidfile="$1/postmaster.pid" pid dir
+    local pidfile="$1/postmaster.pid" pid
     [ -f "$pidfile" ] || return 0
     pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
-    dir="$(sed -n 2p "$pidfile" 2>/dev/null)"               # line 2: data directory
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         [ -r "/proc/$pid/comm" ] || return 0                # cannot identify it
         case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
-            postgres|postmaster) [ "${dir:-$1}" = "$1" ] && return 0 ;;
+            postgres|postmaster) return 0 ;;                # a real server: leave it
         esac
     fi
     echo "Removing stale $pidfile: the previous container was stopped uncleanly."
-    rm -f "$pidfile" || echo "Warning: could not remove $pidfile; PostgreSQL may refuse to start." >&2
+    # Left in place it would block the start, and the readiness check below would
+    # then mistake the leftover file for a server we started.
+    rm -f "$pidfile" || { echo "Error: cannot remove stale $pidfile." >&2; exit 1; }
 }
 
 if [[ -f "/version.txt" ]]; then
@@ -967,8 +968,6 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         sleep 1
         if [ $i -ge 60 ]; then
             echo "PostgreSQL failed to start within 60 seconds."
-            grep -qs 'lock file "postmaster.pid" already exists' "$OSS_SERVER_LOG" "$DATA_PATH/pglog.log" &&
-                echo "Hint: $DATA_PATH/postmaster.pid is held by another process; remove it and start again." >&2
             cat "$OSS_SERVER_LOG"
             exit 1
         fi

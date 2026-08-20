@@ -2830,8 +2830,7 @@ class StalePostmasterPidTests(unittest.TestCase):
             time.sleep(0.05)
         return proc.pid
 
-    def _clear(self):
-        script = self._functions() + '\nclear_stale_postmaster_pid "$DATA_DIR"\n'
+    def _run(self, script):
         env = os.environ.copy()
         env["DATA_DIR"] = str(self.data)
         return subprocess.run(
@@ -2842,6 +2841,11 @@ class StalePostmasterPidTests(unittest.TestCase):
             timeout=30,
             stdin=subprocess.DEVNULL,
         )
+
+    def _clear(self, data_dir=None):
+        env_dir = str(self.data) if data_dir is None else data_dir
+        script = self._functions() + '\nclear_stale_postmaster_pid "%s"\n' % env_dir
+        return self._run(script)
 
     def _write_pidfile(self, pid, data_dir=None):
         # Real format: PID, data directory, start time, port, socket dir.
@@ -2891,16 +2895,31 @@ class StalePostmasterPidTests(unittest.TestCase):
             "the lock file of a genuinely running postmaster must be preserved",
         )
 
-    def test_pid_for_a_different_data_directory_is_removed(self):
-        # A postmaster, but serving another cluster: it does not lock this one.
+    def test_live_postgres_for_another_directory_is_preserved(self):
+        # Conservative by design: "is it a postgres?" is answerable, "is it a
+        # postgres for THIS cluster?" is not (the recorded path is canonicalized,
+        # $DATA_PATH is not), and a wrong answer deletes a live server's lock.
         pid = self._spawn_named("postgres")
         self._write_pidfile(pid, data_dir="/some/other/cluster")
 
         self._clear()
 
-        self.assertFalse(
+        self.assertTrue(
             self.pidfile.exists(),
-            "a postmaster.pid recorded against a different data directory must be removed",
+            "any live postgres process must keep its lock file",
+        )
+
+    def test_trailing_slash_data_path_preserves_a_live_lock(self):
+        # PostgreSQL canonicalizes the recorded path, so --data-path /data/ records
+        # /data; a byte-exact compare would delete a running server's lock.
+        pid = self._spawn_named("postgres")
+        self._write_pidfile(pid)
+
+        self._clear(data_dir="%s/" % self.data)
+
+        self.assertTrue(
+            self.pidfile.exists(),
+            "a trailing slash in the data path must not delete a live lock",
         )
 
     def test_truncated_pid_file_is_removed(self):
@@ -2927,27 +2946,18 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertNotEqual(wait_at, -1, "readiness loop not found")
         self.assertLess(clear_at, wait_at)
 
-    def test_start_failure_names_the_lock_file_cause(self):
-        # Defect 3: the failure surfaced as an unrelated getParameter stub error.
-        text = ENTRYPOINT.read_text(encoding="utf-8")
-        self.assertIn(
-            'lock file "postmaster.pid" already exists',
-            text,
-            "a start failure caused by the lock file must say so explicitly",
+    def test_unremovable_stale_lock_fails_loudly(self):
+        # Defect 3: a lock we cannot clear would leave the readiness check reading
+        # a leftover file as success, and the boot failing later somewhere else.
+        self._write_pidfile(999999)
+        script = self._functions() + (
+            '\nrm() { return 1; }\nclear_stale_postmaster_pid "$DATA_DIR"\necho reached-end\n'
         )
+        result = self._run(script)
 
-    def test_stale_pid_is_cleared_before_the_server_is_started(self):
-        # Ordering matters: clearing after the start attempt would be useless.
-        text = ENTRYPOINT.read_text(encoding="utf-8")
-        clear_at = text.find('clear_stale_postmaster_pid "$DATA_PATH"')
-        start_at = text.find('"$SCRIPT_DIR/start_oss_server.sh"')
-        self.assertNotEqual(clear_at, -1, "clear_stale_postmaster_pid call not found")
-        self.assertNotEqual(start_at, -1, "start_oss_server.sh invocation not found")
-        self.assertLess(
-            clear_at,
-            start_at,
-            "the stale lock must be cleared BEFORE start_oss_server.sh runs",
-        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot remove stale", result.stderr)
+        self.assertNotIn("reached-end", result.stdout)
 
     def test_stale_pid_is_cleared_before_the_server_is_started(self):
         # Ordering matters: clearing after the start attempt would be useless.
