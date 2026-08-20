@@ -2767,14 +2767,8 @@ class EntrypointUxTextTests(unittest.TestCase):
 
 
 class StalePostmasterPidTests(unittest.TestCase):
-    """A postmaster.pid left by an uncleanly stopped container must not block startup.
-
-    Each container gets a fresh PID namespace, so the recorded PID is often alive
-    again as an unrelated process, and PostgreSQL's kill(pid, 0) check wrongly
-    concludes a postmaster is running.
-
-    These tests extract the real shell functions and run them, so they exercise
-    actual behaviour rather than source text.
+    """Issue #43: a postmaster.pid left by an uncleanly stopped container must not
+    block startup. Runs the real shell functions rather than asserting on source.
     """
 
     def setUp(self):
@@ -2795,7 +2789,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _functions(self):
-        """The real postmaster_pid_is_live + clear_stale_postmaster_pid definitions."""
+        """Extract the real function definitions from the entrypoint."""
         text = ENTRYPOINT.read_text(encoding="utf-8")
         block = ""
         for name in ("postmaster_pid_is_live", "clear_stale_postmaster_pid"):
@@ -2812,8 +2806,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         """Start a long-lived process whose /proc/<pid>/comm is exactly `name`.
 
         comm comes from the executable's name, so a copy of a real binary is
-        needed: a shell script would report "sh" or "sleep". comm is truncated to
-        15 characters, so keep names short.
+        needed; it is also truncated to 15 characters, so keep names short.
         """
         source = Path("/bin/sleep")
         if not source.exists():
@@ -2828,8 +2821,7 @@ class StalePostmasterPidTests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self._helpers.append(proc)
-        # Wait for the kernel to publish comm for the exec'd image.
-        deadline = time.time() + 10
+        # Wait for the kernel to publish comm for the exec'd image.        deadline = time.time() + 10
         comm_path = Path("/proc") / str(proc.pid) / "comm"
         while time.time() < deadline:
             try:
@@ -2876,8 +2868,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         )
 
     def test_pid_reused_by_unrelated_process_is_removed(self):
-        # The actual bug: the PID is alive but belongs to something that is not
-        # PostgreSQL, so kill(pid, 0) succeeds and PostgreSQL refuses to start.
+        # The actual bug: the PID is alive but is not PostgreSQL.
         pid = self._spawn_named("not_a_postmastr")
         self._write_pidfile(pid)
 
@@ -2891,7 +2882,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertIn("Removing stale", result.stdout)
 
     def test_live_postmaster_pid_is_preserved(self):
-        # The safety property: never delete the lock of a running postmaster.
+        # Safety property: never delete the lock of a running postmaster.
         pid = self._spawn_named("postgres")
         self._write_pidfile(pid)
 
@@ -2930,8 +2921,7 @@ class StalePostmasterPidTests(unittest.TestCase):
         self.assertNotIn("Removing stale", result.stdout)
 
     def test_readiness_loop_tests_liveness_not_file_existence(self):
-        # Defect 2: the loop tested only for the file, so a leftover postmaster.pid
-        # on a reused volume made it report success after PostgreSQL had FATAL'd.
+        # Defect 2: existence alone made the loop pass after PostgreSQL had FATAL'd.
         text = ENTRYPOINT.read_text(encoding="utf-8")
         self.assertIn('while ! postmaster_pid_is_live "$DATA_PATH"; do', text)
         self.assertNotIn('while [ ! -f "$DATA_PATH/postmaster.pid" ]', text)

@@ -224,12 +224,9 @@ sanitize_uint() {
     esac
 }
 
-# A postmaster.pid left by an uncleanly stopped container names a PID that the
-# next container's fresh PID namespace has usually re-assigned to something
-# unrelated. PostgreSQL only tests kill(pid, 0), so it wrongly refuses to start;
-# identify the process instead. True only for a postmaster serving this data
-# directory, and true when we cannot tell -- deleting a live server's lock is
-# worse than failing to start.
+# A stale postmaster.pid names a PID that the new container's fresh PID namespace
+# has usually re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the
+# process instead; assume live when we cannot, so a real lock is never deleted.
 postmaster_pid_is_live() {
     local pidfile="$1/postmaster.pid" pid dir
     [ -f "$pidfile" ] || return 1
@@ -238,12 +235,12 @@ postmaster_pid_is_live() {
     { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } || return 1
     [ -r "/proc/$pid/comm" ] || return 0                    # cannot identify it
     case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
-        postgres|postmaster) [ "${dir:-$1}" = "$1" ] ;;     # ours, or another cluster's?
-        *) false ;;                                         # PID reused by something else
+        postgres|postmaster) [ "${dir:-$1}" = "$1" ] ;;     # ours?
+        *) false ;;                                         # PID reused
     esac
 }
 
-# Drop a lock file left behind by an uncleanly stopped container.
+# Remove a lock file left by an uncleanly stopped container.
 clear_stale_postmaster_pid() {
     local pidfile="$1/postmaster.pid"
     { [ -f "$pidfile" ] && ! postmaster_pid_is_live "$1"; } || return 0
@@ -971,8 +968,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    # Liveness, not mere existence: a leftover postmaster.pid on a reused volume
-    # made this exit immediately and report success after PostgreSQL had FATAL'd.
+    # Liveness, not existence: a leftover pid file used to pass this instantly.
     while ! postmaster_pid_is_live "$DATA_PATH"; do
         sleep 1
         if [ $i -ge 60 ]; then
