@@ -203,6 +203,26 @@ Optional arguments:
                         disabled behaves the same as allowTLS; the gateway has no plain-only mode.
                         When set to requireTLS, plain (non-TLS) connections are rejected.
                         Overrides TLS_MODE environment variable.
+
+Environment variables (no flag equivalent):
+  DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL
+                        How often PostgreSQL checks whether a client that a
+                        backend is still working for has gone away, so an
+                        abandoned query is reclaimed instead of running to
+                        completion. Defaults to 10s. Set to 0 to disable, or
+                        to an empty value to leave the server default alone.
+  DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT
+                        Terminates a session left idle inside a transaction,
+                        which would otherwise pin the xmin horizon and block
+                        vacuum and concurrent index builds indefinitely.
+                        Defaults to 10min. Set to 0 to disable, or to an empty
+                        value to leave the server default alone.
+  DOCUMENTDB_STATEMENT_TIMEOUT
+                        Ceiling on the run time of a single statement. OFF by
+                        default, because a legitimate index build over a large
+                        collection can run for a long time and killing it would
+                        be worse than the runaway it guards against. Set for
+                        example to 30min to bound it.
 EOF
 }
 
@@ -1152,6 +1172,79 @@ if [ "$START_POSTGRESQL" = "true" ]; then
                 -c "SELECT pg_reload_conf()" < /dev/null >/dev/null 2>&1; then
             echo "Warning: could not reload PostgreSQL configuration; the TOAST compression setting takes effect at the next successful start." >&2
         fi
+    fi
+
+    # Reclaim runaway and orphaned backends.
+    #
+    # The image previously ran with every timeout disabled
+    # (statement_timeout, lock_timeout, idle_in_transaction_session_timeout,
+    # idle_session_timeout and client_connection_check_interval all 0), so
+    # nothing in the product could ever reclaim a backend that stopped making
+    # progress. Observed consequence: a client gave up and disconnected while
+    # its backend kept executing at ~100% CPU for 20+ minutes, pinning
+    # backend_xmin, which parked CREATE INDEX CONCURRENTLY behind it
+    # indefinitely and left pg_cron re-driving the half-built index jobs every
+    # two seconds. Only a restart recovered it.
+    #
+    # client_connection_check_interval is the targeted fix and the reason this
+    # block exists: it reclaims work whose client is already gone, so it cannot
+    # affect a query someone is still waiting on. idle_in_transaction_session_timeout
+    # bounds how long an abandoned transaction can pin the xmin horizon.
+    #
+    # statement_timeout is deliberately left OFF by default: this is a local
+    # emulator where a legitimate index build over a large collection can run
+    # for a long time, and silently killing it would be a worse failure than
+    # the one being prevented. Operators who want a ceiling set
+    # DOCUMENTDB_STATEMENT_TIMEOUT.
+    #
+    # Every value is operator-overridable, and an empty value means "leave the
+    # server default alone" so nothing here is imposed irreversibly.
+    if [ "$toast_pg_accepting" = "true" ]; then
+        documentdb_runtime_reload_needed=false
+
+        # These values are interpolated into ALTER SYSTEM SQL, so accept only a
+        # plain PostgreSQL time literal: digits with an optional unit. Anything
+        # else (quotes, spaces, semicolons, an uppercase unit) is rejected
+        # rather than quoted-and-hoped-for.
+        documentdb_apply_guc() {
+            local guc="$1" value="$2" source_var="$3"
+
+            [ -n "$value" ] || return 0
+
+            if [[ ! "$value" =~ ^[0-9]+(ms|s|min|h|d)?$ ]]; then
+                echo "Warning: ignoring ${source_var}='${value}'; expected a PostgreSQL time value such as 0, 250ms, 10s, 5min or 2h." >&2
+                return 0
+            fi
+
+            # Per-GUC failure is a warning, never fatal: an unsupported GUC on
+            # some build must not stop the container from serving.
+            if psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
+                    -c "ALTER SYSTEM SET ${guc} = '${value}'" < /dev/null >/dev/null 2>&1; then
+                documentdb_runtime_reload_needed=true
+                echo "Set ${guc} = ${value}."
+            else
+                echo "Warning: could not set ${guc}='${value}'; leaving the server default in effect." >&2
+            fi
+        }
+
+        documentdb_apply_guc client_connection_check_interval \
+            "${DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL-10s}" \
+            DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL
+        documentdb_apply_guc idle_in_transaction_session_timeout \
+            "${DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT-10min}" \
+            DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT
+        documentdb_apply_guc statement_timeout \
+            "${DOCUMENTDB_STATEMENT_TIMEOUT-}" \
+            DOCUMENTDB_STATEMENT_TIMEOUT
+
+        if [ "$documentdb_runtime_reload_needed" = "true" ]; then
+            if ! psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
+                    -c "SELECT pg_reload_conf()" < /dev/null >/dev/null 2>&1; then
+                echo "Warning: could not reload PostgreSQL configuration; the connection-reclaim settings take effect at the next successful start." >&2
+            fi
+        fi
+    else
+        echo "Warning: PostgreSQL was not confirmed to be accepting connections, so the connection-reclaim settings (client_connection_check_interval, idle_in_transaction_session_timeout) were not applied this boot; they are retried at the next start." >&2
     fi
 
     # Install the emulator-only getParameter rejection stub for the bundled

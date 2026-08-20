@@ -2765,5 +2765,153 @@ class EntrypointUxTextTests(unittest.TestCase):
         )
 
 
+class ConnectionReclaimSettingsTests(unittest.TestCase):
+    """documentdb-local must be able to reclaim runaway and orphaned backends.
+
+    The image shipped with statement_timeout, lock_timeout,
+    idle_in_transaction_session_timeout, idle_session_timeout and
+    client_connection_check_interval ALL zero, so nothing could ever reclaim a
+    backend that stopped making progress: an abandoned query was observed
+    running at ~100% CPU for 20+ minutes after its client had disconnected,
+    pinning backend_xmin and parking CREATE INDEX CONCURRENTLY behind it.
+
+    These tests extract the real documentdb_apply_guc definition and execute it
+    against a stub psql, so the SQL that would be issued is asserted directly.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.bin_dir = self.root / "bin"
+        self.bin_dir.mkdir()
+        self.calls = self.root / "psql_calls"
+        psql = self.bin_dir / "psql"
+        # Records the SQL of every invocation so a test can assert on it.
+        psql.write_text(
+            "#!/bin/sh\n"
+            "while [ $# -gt 0 ]; do\n"
+            '  if [ "$1" = "-c" ]; then shift; printf "%s\\n" "$1" >> "$PSQL_CALLS"; fi\n'
+            "  shift\n"
+            "done\n"
+            'if [ -n "$PSQL_FAIL" ]; then exit 1; fi\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        psql.chmod(0o755)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _function(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        match = re.search(
+            r"^        documentdb_apply_guc\(\) \{\n.*?^        \}$",
+            text,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "could not locate documentdb_apply_guc()")
+        return textwrap.dedent(match.group(0))
+
+    def _apply(self, guc, value, psql_fail=False):
+        script = (
+            "documentdb_runtime_reload_needed=false\n"
+            "POSTGRESQL_PORT=9712\n"
+            "OWNER=documentdb\n"
+            + self._function()
+            + "\ndocumentdb_apply_guc %s %s SOME_VAR\n"
+            % (guc, "'" + value.replace("'", "'\\''") + "'")
+            + 'echo "reload=$documentdb_runtime_reload_needed"\n'
+        )
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
+        env["PSQL_CALLS"] = str(self.calls)
+        if psql_fail:
+            env["PSQL_FAIL"] = "1"
+        return subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _sql(self):
+        if not self.calls.exists():
+            return []
+        return [
+            line
+            for line in self.calls.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_valid_value_is_applied(self):
+        result = self._apply("client_connection_check_interval", "10s")
+
+        self.assertIn(
+            "ALTER SYSTEM SET client_connection_check_interval = '10s'", self._sql()
+        )
+        self.assertIn("reload=true", result.stdout)
+
+    def test_units_and_bare_numbers_are_accepted(self):
+        for value in ("0", "250ms", "10s", "5min", "2h", "1d"):
+            with self.subTest(value=value):
+                self.calls.unlink(missing_ok=True)
+                self._apply("statement_timeout", value)
+                self.assertIn(
+                    "ALTER SYSTEM SET statement_timeout = '%s'" % value, self._sql()
+                )
+
+    def test_empty_value_leaves_the_server_default_alone(self):
+        result = self._apply("statement_timeout", "")
+
+        self.assertEqual([], self._sql(), "an empty value must issue no SQL")
+        self.assertIn("reload=false", result.stdout)
+
+    def test_injection_attempt_is_rejected_without_issuing_sql(self):
+        # The value is interpolated into ALTER SYSTEM SQL, so a value that could
+        # break out of the quoting must never reach psql.
+        for value in ("10s'; DROP TABLE x --", "10 s", "'", "abc", "s10", "10S"):
+            with self.subTest(value=value):
+                self.calls.unlink(missing_ok=True)
+                result = self._apply("statement_timeout", value)
+                self.assertEqual(
+                    [], self._sql(), "rejected value %r must issue no SQL" % value
+                )
+                self.assertIn("expected a PostgreSQL time value", result.stderr)
+
+    def test_psql_failure_warns_but_does_not_abort(self):
+        # An unsupported GUC on some build must not stop the container serving.
+        result = self._apply(
+            "client_connection_check_interval", "10s", psql_fail=True
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("could not set", result.stderr)
+        self.assertIn("reload=false", result.stdout)
+
+    def test_defaults_reclaim_orphans_but_do_not_cap_statements(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        # Orphan reclamation on by default: it can only affect work whose client
+        # is already gone.
+        self.assertIn('"${DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL-10s}"', text)
+        self.assertIn(
+            '"${DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT-10min}"', text
+        )
+        # statement_timeout stays off by default: a legitimate index build over a
+        # large collection can run for a long time.
+        self.assertIn('"${DOCUMENTDB_STATEMENT_TIMEOUT-}"', text)
+
+    def test_settings_are_applied_before_the_gateway_starts(self):
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        applied = text.find("documentdb_apply_guc client_connection_check_interval")
+        stub = text.find("documentdb_install_getparameter_stub.sh")
+        self.assertNotEqual(applied, -1)
+        self.assertNotEqual(stub, -1)
+        self.assertLess(
+            applied, stub, "reclaim settings must be applied during PostgreSQL setup"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
