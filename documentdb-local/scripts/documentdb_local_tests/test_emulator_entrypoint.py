@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -2805,26 +2806,33 @@ class ConnectionReclaimSettingsTests(unittest.TestCase):
     def _function(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
         match = re.search(
-            r"^        documentdb_apply_guc\(\) \{\n.*?^        \}$",
+            r"^    documentdb_apply_guc\(\) \{\n.*?^    \}$",
             text,
             flags=re.DOTALL | re.MULTILINE,
         )
         self.assertIsNotNone(match, "could not locate documentdb_apply_guc()")
         return textwrap.dedent(match.group(0))
 
-    def _apply(self, guc, value, psql_fail=False):
+    def _apply(self, guc, value=None, default="", psql_fail=False):
+        """Run the real function for GUC with SOME_VAR set to VALUE.
+
+        value=None leaves SOME_VAR unset, which is how an operator who never
+        touched the knob reaches the function.
+        """
         script = (
             "documentdb_runtime_reload_needed=false\n"
             "POSTGRESQL_PORT=9712\n"
             "OWNER=documentdb\n"
             + self._function()
-            + "\ndocumentdb_apply_guc %s %s SOME_VAR\n"
-            % (guc, "'" + value.replace("'", "'\\''") + "'")
+            + "\ndocumentdb_apply_guc %s SOME_VAR %s\n" % (guc, shlex.quote(default))
             + 'echo "reload=$documentdb_runtime_reload_needed"\n'
         )
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
         env["PSQL_CALLS"] = str(self.calls)
+        env.pop("SOME_VAR", None)
+        if value is not None:
+            env["SOME_VAR"] = value
         if psql_fail:
             env["PSQL_FAIL"] = "1"
         return subprocess.run(
@@ -2853,6 +2861,14 @@ class ConnectionReclaimSettingsTests(unittest.TestCase):
         )
         self.assertIn("reload=true", result.stdout)
 
+    def test_unset_variable_applies_the_builtin_default(self):
+        result = self._apply("client_connection_check_interval", default="10s")
+
+        self.assertIn(
+            "ALTER SYSTEM SET client_connection_check_interval = '10s'", self._sql()
+        )
+        self.assertIn("reload=true", result.stdout)
+
     def test_units_and_bare_numbers_are_accepted(self):
         for value in ("0", "250ms", "10s", "5min", "2h", "1d"):
             with self.subTest(value=value):
@@ -2862,23 +2878,60 @@ class ConnectionReclaimSettingsTests(unittest.TestCase):
                     "ALTER SYSTEM SET statement_timeout = '%s'" % value, self._sql()
                 )
 
-    def test_empty_value_leaves_the_server_default_alone(self):
+    def test_empty_value_resets_rather_than_issuing_nothing(self):
+        # ALTER SYSTEM writes postgresql.auto.conf, which lives in the mounted
+        # data volume. Issuing no SQL would leave a value applied by an earlier
+        # boot in force forever, so unsetting the variable could never undo it.
         result = self._apply("statement_timeout", "")
 
-        self.assertEqual([], self._sql(), "an empty value must issue no SQL")
-        self.assertIn("reload=false", result.stdout)
+        self.assertIn("ALTER SYSTEM RESET statement_timeout", self._sql())
+        self.assertNotIn(
+            "ALTER SYSTEM SET statement_timeout = ''",
+            self._sql(),
+            "an empty value must reset the GUC, never set it to the empty string",
+        )
+        self.assertIn("reload=true", result.stdout)
 
-    def test_injection_attempt_is_rejected_without_issuing_sql(self):
+    def test_statement_timeout_is_reset_when_the_operator_asks_for_nothing(self):
+        # Its built-in default is empty, so the no-variable case must still clear
+        # any ceiling a previous boot wrote into the volume.
+        result = self._apply("statement_timeout", default="")
+
+        self.assertEqual(["ALTER SYSTEM RESET statement_timeout"], self._sql())
+        self.assertIn("reload=true", result.stdout)
+
+    def test_injected_value_never_reaches_psql(self):
         # The value is interpolated into ALTER SYSTEM SQL, so a value that could
-        # break out of the quoting must never reach psql.
-        for value in ("10s'; DROP TABLE x --", "10 s", "'", "abc", "s10", "10S"):
+        # break out of the quoting must never appear in the SQL that is issued.
+        # A rejected value falls back to the built-in default rather than
+        # silently dropping the protection, the way sanitize_uint does.
+        for value in (
+            "10s'; DROP TABLE x --",
+            "10 s",
+            "'",
+            "abc",
+            "s10",
+            "10S",
+            "-10s",
+            "10s\nALTER SYSTEM SET statement_timeout = '1ms'",
+        ):
             with self.subTest(value=value):
                 self.calls.unlink(missing_ok=True)
-                result = self._apply("statement_timeout", value)
+                result = self._apply(
+                    "client_connection_check_interval", value, default="10s"
+                )
                 self.assertEqual(
-                    [], self._sql(), "rejected value %r must issue no SQL" % value
+                    ["ALTER SYSTEM SET client_connection_check_interval = '10s'"],
+                    self._sql(),
+                    "rejected value %r must fall back to the default only" % value,
                 )
                 self.assertIn("expected a PostgreSQL time value", result.stderr)
+
+    def test_rejected_value_with_no_default_resets(self):
+        result = self._apply("statement_timeout", "abc", default="")
+
+        self.assertEqual(["ALTER SYSTEM RESET statement_timeout"], self._sql())
+        self.assertIn("expected a PostgreSQL time value", result.stderr)
 
     def test_psql_failure_warns_but_does_not_abort(self):
         # An unsupported GUC on some build must not stop the container serving.
@@ -2887,20 +2940,47 @@ class ConnectionReclaimSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("could not set", result.stderr)
+        self.assertIn("could not apply", result.stderr)
         self.assertIn("reload=false", result.stdout)
 
     def test_defaults_reclaim_orphans_but_do_not_cap_statements(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")
         # Orphan reclamation on by default: it can only affect work whose client
         # is already gone.
-        self.assertIn('"${DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL-10s}"', text)
         self.assertIn(
-            '"${DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT-10min}"', text
+            "documentdb_apply_guc client_connection_check_interval \\\n"
+            "        DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL 10s\n",
+            text,
+        )
+        self.assertIn(
+            "documentdb_apply_guc idle_in_transaction_session_timeout \\\n"
+            "        DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT 10min\n",
+            text,
         )
         # statement_timeout stays off by default: a legitimate index build over a
         # large collection can run for a long time.
-        self.assertIn('"${DOCUMENTDB_STATEMENT_TIMEOUT-}"', text)
+        self.assertIn(
+            "documentdb_apply_guc statement_timeout \\\n"
+            '        DOCUMENTDB_STATEMENT_TIMEOUT ""\n',
+            text,
+        )
+
+    def test_settings_are_not_gated_on_the_advisory_readiness_verdict(self):
+        # toast_pg_accepting is "unknown" wherever pg_isready is missing and
+        # "false" on a volume merely slow to replay WAL -- exactly the case most
+        # likely to produce the runaway this block reclaims. Each ALTER SYSTEM
+        # already warns non-fatally, so gating could only turn a slow start into
+        # a silently unprotected one.
+        text = ENTRYPOINT.read_text(encoding="utf-8")
+        block_start = text.find("    documentdb_runtime_reload_needed=false")
+        applied = text.find("documentdb_apply_guc client_connection_check_interval")
+        self.assertNotEqual(block_start, -1)
+        self.assertNotEqual(applied, -1)
+        self.assertNotIn(
+            "toast_pg_accepting",
+            text[block_start:applied],
+            "the reclaim settings must not be gated on the advisory verdict",
+        )
 
     def test_settings_are_applied_before_the_gateway_starts(self):
         text = ENTRYPOINT.read_text(encoding="utf-8")

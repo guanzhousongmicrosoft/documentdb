@@ -209,20 +209,25 @@ Environment variables (no flag equivalent):
                         How often PostgreSQL checks whether a client that a
                         backend is still working for has gone away, so an
                         abandoned query is reclaimed instead of running to
-                        completion. Defaults to 10s. Set to 0 to disable, or
-                        to an empty value to leave the server default alone.
+                        completion. Defaults to 10s. Set to 0 to disable, or to
+                        an empty value to reset it to the server default. An
+                        unparseable value warns and falls back to the default.
   DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT
                         Terminates a session left idle inside a transaction,
                         which would otherwise pin the xmin horizon and block
                         vacuum and concurrent index builds indefinitely.
                         Defaults to 10min. Set to 0 to disable, or to an empty
-                        value to leave the server default alone.
+                        value to reset it to the server default. An unparseable
+                        value warns and falls back to the default.
   DOCUMENTDB_STATEMENT_TIMEOUT
                         Ceiling on the run time of a single statement. OFF by
                         default, because a legitimate index build over a large
                         collection can run for a long time and killing it would
                         be worse than the runaway it guards against. Set for
                         example to 30min to bound it.
+                        All three settings are reapplied on every start, so
+                        removing a variable undoes it on the next start rather
+                        than leaving the previous value in the data volume.
 EOF
 }
 
@@ -1197,54 +1202,72 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     # the one being prevented. Operators who want a ceiling set
     # DOCUMENTDB_STATEMENT_TIMEOUT.
     #
-    # Every value is operator-overridable, and an empty value means "leave the
-    # server default alone" so nothing here is imposed irreversibly.
-    if [ "$toast_pg_accepting" = "true" ]; then
-        documentdb_runtime_reload_needed=false
+    # Every value is operator-overridable, and an empty value resets the GUC, so
+    # the effective configuration is a function of this boot's environment only.
+    #
+    # Deliberately NOT gated on toast_pg_accepting: that verdict is advisory (it
+    # is "unknown" wherever pg_isready is missing, and "false" on a volume merely
+    # slow to replay WAL, which is exactly the situation most likely to produce
+    # the runaway this block reclaims). Each ALTER SYSTEM already fails
+    # non-fatally with a warning, so the gate could only turn a slow start into a
+    # silently unprotected one.
+    documentdb_runtime_reload_needed=false
 
-        # These values are interpolated into ALTER SYSTEM SQL, so accept only a
-        # plain PostgreSQL time literal: digits with an optional unit. Anything
-        # else (quotes, spaces, semicolons, an uppercase unit) is rejected
-        # rather than quoted-and-hoped-for.
-        documentdb_apply_guc() {
-            local guc="$1" value="$2" source_var="$3"
+    # An operator-supplied value is interpolated into ALTER SYSTEM SQL, so accept
+    # only a plain PostgreSQL time literal: digits with an optional unit.
+    # Anything else (quotes, spaces, semicolons, an uppercase unit) is rejected
+    # rather than quoted-and-hoped-for, then falls back to the built-in default
+    # the way sanitize_uint does: dropping orphan reclamation because of a typo
+    # would reintroduce the very bug this block exists to fix.
+    #
+    # ALTER SYSTEM writes postgresql.auto.conf, which lives in the mounted data
+    # volume and outlives the container. An empty value must therefore RESET the
+    # GUC rather than issue nothing at all: without that, a value applied by one
+    # boot silently survives every later boot that no longer asks for it, and
+    # unsetting the variable would no longer undo it.
+    documentdb_apply_guc() {
+        local guc="$1" source_var="$2" default="$3"
+        local value="${!source_var-$default}" statement
 
-            [ -n "$value" ] || return 0
+        if [ -n "$value" ] && [[ ! "$value" =~ ^[0-9]+(ms|s|min|h|d)?$ ]]; then
+            echo "Warning: ignoring ${source_var}='${value}'; expected a PostgreSQL time value such as 0, 250ms, 10s, 5min or 2h. Falling back to ${default:-the server default}." >&2
+            value="$default"
+        fi
 
-            if [[ ! "$value" =~ ^[0-9]+(ms|s|min|h|d)?$ ]]; then
-                echo "Warning: ignoring ${source_var}='${value}'; expected a PostgreSQL time value such as 0, 250ms, 10s, 5min or 2h." >&2
-                return 0
-            fi
+        if [ -n "$value" ]; then
+            statement="ALTER SYSTEM SET ${guc} = '${value}'"
+        else
+            statement="ALTER SYSTEM RESET ${guc}"
+        fi
 
-            # Per-GUC failure is a warning, never fatal: an unsupported GUC on
-            # some build must not stop the container from serving.
-            if psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
-                    -c "ALTER SYSTEM SET ${guc} = '${value}'" < /dev/null >/dev/null 2>&1; then
-                documentdb_runtime_reload_needed=true
+        # Per-GUC failure is a warning, never fatal: an unsupported GUC on some
+        # build, or a server not yet accepting connections, must not stop the
+        # container from serving.
+        if psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
+                -c "$statement" < /dev/null >/dev/null 2>&1; then
+            documentdb_runtime_reload_needed=true
+            if [ -n "$value" ]; then
                 echo "Set ${guc} = ${value}."
             else
-                echo "Warning: could not set ${guc}='${value}'; leaving the server default in effect." >&2
+                echo "Reset ${guc} to the server default."
             fi
-        }
-
-        documentdb_apply_guc client_connection_check_interval \
-            "${DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL-10s}" \
-            DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL
-        documentdb_apply_guc idle_in_transaction_session_timeout \
-            "${DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT-10min}" \
-            DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT
-        documentdb_apply_guc statement_timeout \
-            "${DOCUMENTDB_STATEMENT_TIMEOUT-}" \
-            DOCUMENTDB_STATEMENT_TIMEOUT
-
-        if [ "$documentdb_runtime_reload_needed" = "true" ]; then
-            if ! psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
-                    -c "SELECT pg_reload_conf()" < /dev/null >/dev/null 2>&1; then
-                echo "Warning: could not reload PostgreSQL configuration; the connection-reclaim settings take effect at the next successful start." >&2
-            fi
+        else
+            echo "Warning: could not apply ${statement}; whatever ${guc} was already set to remains in effect." >&2
         fi
-    else
-        echo "Warning: PostgreSQL was not confirmed to be accepting connections, so the connection-reclaim settings (client_connection_check_interval, idle_in_transaction_session_timeout) were not applied this boot; they are retried at the next start." >&2
+    }
+
+    documentdb_apply_guc client_connection_check_interval \
+        DOCUMENTDB_CLIENT_CONNECTION_CHECK_INTERVAL 10s
+    documentdb_apply_guc idle_in_transaction_session_timeout \
+        DOCUMENTDB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT 10min
+    documentdb_apply_guc statement_timeout \
+        DOCUMENTDB_STATEMENT_TIMEOUT ""
+
+    if [ "$documentdb_runtime_reload_needed" = "true" ]; then
+        if ! psql -p "$POSTGRESQL_PORT" -U "$OWNER" -d postgres -X -tA \
+                -c "SELECT pg_reload_conf()" < /dev/null >/dev/null 2>&1; then
+            echo "Warning: could not reload PostgreSQL configuration; the connection-reclaim settings take effect at the next successful start." >&2
+        fi
     fi
 
     # Install the emulator-only getParameter rejection stub for the bundled
