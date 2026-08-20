@@ -224,21 +224,20 @@ sanitize_uint() {
     esac
 }
 
-# A stale postmaster.pid names a PID this container's namespace has often
-# re-assigned, and PostgreSQL only tests kill(pid, 0). Identify the process.
-# Sets PRESERVED_POSTMASTER_PID when a pre-existing lock is left in place.
-clear_stale_postmaster_pid() {
+claim_data_directory() {
     local pidfile="$1/postmaster.pid" pid
-    PRESERVED_POSTMASTER_PID=
+    exec 200<"$1" || exit 1
+    flock -n 200 || {
+        echo "Error: another DocumentDB container is already using the data directory $1. Refusing to start: two PostgreSQL instances on one data directory would corrupt it, and taking it over would shut the running container's database down too. Give this container its own volume, or stop the container already serving $1." >&2
+        exit 1
+    }
     [ -f "$pidfile" ] || return 0
-    pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"  # line 1: PID
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        # Unidentifiable, or a real server: leave it alone.
-        [ -r "/proc/$pid/comm" ] || { PRESERVED_POSTMASTER_PID=$pid; return 0; }
-        case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
-            postgres|postmaster) PRESERVED_POSTMASTER_PID=$pid; return 0 ;;
-        esac
-    fi
+    pid="$(sed -n 1p "$pidfile" 2>/dev/null | tr -dc 0-9)"
+    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+        postgres|postmaster)
+            echo "Error: PID $pid recorded in $pidfile is a PostgreSQL process visible to this container. Refusing to start rather than take over a data directory another server is using." >&2
+            exit 1 ;;
+    esac
     echo "Removing stale $pidfile: the previous container was stopped uncleanly."
     rm -f "$pidfile" || { echo "Error: cannot remove stale $pidfile." >&2; exit 1; }
 }
@@ -623,7 +622,9 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         echo "Creating data directory: $DATA_PATH"
         sudo mkdir -p "$DATA_PATH"
     fi
-    
+
+    claim_data_directory "$DATA_PATH"
+
     # Change ownership to the runtime user to ensure we can write/delete files
     echo "Setting ownership of $DATA_PATH to ${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}"
     sudo chown -R "${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}" "$DATA_PATH"
@@ -896,7 +897,6 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
-    clear_stale_postmaster_pid "$DATA_PATH"
     EXTENDED_RUM_FLAG="-r"
     if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
         EXTENDED_RUM_FLAG=""
@@ -963,10 +963,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
 
     echo "Checking if PostgreSQL is running..."
     i=0
-    # A lock we preserved above proves nothing until our postmaster rewrites it.
-    while [ ! -f "$DATA_PATH/postmaster.pid" ] ||
-        { [ -n "$PRESERVED_POSTMASTER_PID" ] &&
-            [ "$(sed -n 1p "$DATA_PATH/postmaster.pid" 2>/dev/null | tr -dc 0-9)" = "$PRESERVED_POSTMASTER_PID" ]; }; do
+    while [ ! -f "$DATA_PATH/postmaster.pid" ]; do
         sleep 1
         if [ $i -ge 60 ]; then
             echo "PostgreSQL failed to start within 60 seconds."
