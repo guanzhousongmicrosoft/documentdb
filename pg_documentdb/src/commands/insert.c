@@ -700,14 +700,14 @@ DoMultiInsertWithoutTransactionId(MongoCollection *collection, List *inserts, Oi
 			 * we can't deduce the mongo specific error code.
 			 */
 			elog_unredacted(
-				"Optimistic Batch Insert failed. Retrying with single insert. documentDB errorCode %d",
-				errorCode);
+				"Batch insert failed; retrying sub-batch individually. Batch size: %d, start index: %d, DocumentDB error code: %d",
+				list_length(inserts), insertIndex, errorCode);
 		}
 		else
 		{
 			elog_unredacted(
-				"Optimistic Batch Insert failed. Retrying with single insert. SQL Error %d",
-				errorCode);
+				"Batch insert failed; retrying sub-batch individually. Batch size: %d, start index: %d, SQL error code: %d",
+				list_length(inserts), insertIndex, errorCode);
 		}
 	}
 	PG_END_TRY();
@@ -912,6 +912,7 @@ DoBatchInsertNoTransactionId(MongoCollection *collection, BatchInsertionSpec *ba
 	bool isOrdered = batchSpec->isOrdered;
 
 	int insertIndex = 0;
+	int singleInsertFailureCount = 0;
 	int insertIncrIndex = -1;
 	bool hasBatchedInsertFailed = false;
 
@@ -969,18 +970,34 @@ DoBatchInsertNoTransactionId(MongoCollection *collection, BatchInsertionSpec *ba
 												  insertIndex, evalState);
 		insertIndex++;
 
-		if (!isSuccess && isOrdered)
+		if (!isSuccess)
 		{
-			/* stop trying insert operations after a failure if using ordered:true */
-			break;
+			singleInsertFailureCount++;
+			if (isOrdered)
+			{
+				/* stop trying insert operations after a failure if using ordered:true */
+				break;
+			}
 		}
 
 		if (EnableInsertDuplicateInlineHandling &&
-			hasBatchedInsertFailed && insertIndex > insertIncrIndex)
+			hasBatchedInsertFailed && insertIndex >= insertIncrIndex)
 		{
+			elog_unredacted(
+				"Single-insert retries for the current sub-batch encountered %d failures",
+				singleInsertFailureCount);
+
 			insertIncrIndex = -1;
 			hasBatchedInsertFailed = false;
+			singleInsertFailureCount = 0;
 		}
+	}
+
+	if (hasBatchedInsertFailed)
+	{
+		elog_unredacted(
+			"Single-insert retries for the current sub-batch encountered %d failures",
+			singleInsertFailureCount);
 	}
 }
 
