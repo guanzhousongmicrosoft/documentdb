@@ -6,6 +6,8 @@
  *-------------------------------------------------------------------------
  */
 
+#![recursion_limit = "256"]
+
 pub mod auth;
 pub mod bson;
 pub mod configuration;
@@ -37,9 +39,6 @@ use crate::{
 };
 
 /// Runs the `DocumentDB` gateway server.
-///
-/// The runtime flag is evaluated once here so a gateway process runs either the
-/// legacy gateway implementation or the nacelle runtime implementation.
 ///
 /// The startup duration is recorded via [`crate::time::STARTUP_INSTANT`] once
 /// the gateway is ready to accept connections.
