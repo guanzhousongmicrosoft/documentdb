@@ -994,10 +994,12 @@ GenerateIndexCreateSpecForUpdateOptions(IndexDetails *indexDef, bool
 	bson_iter_t indexSpecIter;
 	PgbsonInitIterator(indexSpecBson, &indexSpecIter);
 	bool ignoreUnknownIndexOptions = true;
+	const bool useTTLIndexInvalidOptionsError = false;
 	IndexDef *indexDefinition = ParseIndexDefDocumentInternal(&indexSpecIter,
 															  specJsonRepresentation,
 															  ignoreUnknownIndexOptions,
-															  buildAsUniqueForPrepareUnique);
+															  buildAsUniqueForPrepareUnique,
+															  useTTLIndexInvalidOptionsError);
 
 	bool isBackgroundBuild = true;
 	bool createIndexesConcurrently = true;
