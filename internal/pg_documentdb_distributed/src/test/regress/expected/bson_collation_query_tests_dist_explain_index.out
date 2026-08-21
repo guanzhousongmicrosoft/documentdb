@@ -96,7 +96,7 @@ $cmd$);
                ->  Function Scan on read_intermediate_result intermediate_result
                ->  Aggregate
                      ->  Function Scan on read_intermediate_result intermediate_result_1
-                           Filter: documentdb_api_internal.bson_dollar_lookup_join_filter(document, intermediate_result.lookup_filter, '_id'::text)
+                           Filter: documentdb_api_internal.bson_dollar_lookup_join_filter(document_1, intermediate_result.lookup_filter, '_id'::text)
 (34 rows)
 
 END;

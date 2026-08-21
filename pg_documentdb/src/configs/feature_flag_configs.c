@@ -495,6 +495,11 @@ bool EnableExistentialNullArrayMatch = DEFAULT_ENABLE_EXISTENTIAL_NULL_ARRAY_MAT
 bool ForceNestedLookupPipelineAfterJoin =
 	DEFAULT_FORCE_NESTED_LOOKUP_PIPELINE_AFTER_JOIN;
 
+/* Added on v0.118, enabled on v0.118, remove after v0.121 */
+#define DEFAULT_ENABLE_LOOKUP_JOIN_INDEX_WITH_LINEAR_PIPELINE true
+bool EnableLookupJoinIndexWithLinearPipeline =
+	DEFAULT_ENABLE_LOOKUP_JOIN_INDEX_WITH_LINEAR_PIPELINE;
+
 /*
  * SECTION: Collation feature flags
  */
@@ -718,6 +723,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether nested lookup stages are forced to run after the parent equality join. Unsupported query shapes may fail when this setting is enabled."),
 		NULL, &ForceNestedLookupPipelineAfterJoin,
 		DEFAULT_FORCE_NESTED_LOOKUP_PIPELINE_AFTER_JOIN,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_lookup_join_index_with_linear_pipeline", newGucPrefix),
+		gettext_noop(
+			"Whether lookup joins can use the foreign-field index through a linear inner pipeline."),
+		NULL, &EnableLookupJoinIndexWithLinearPipeline,
+		DEFAULT_ENABLE_LOOKUP_JOIN_INDEX_WITH_LINEAR_PIPELINE,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
