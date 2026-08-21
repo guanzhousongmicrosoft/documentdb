@@ -18,6 +18,19 @@ readonly PROG="documentdb-createcluster"
 
 die() { echo "${PROG}: error: $*" >&2; exit 1; }
 log() { echo "[${PROG}] $*"; }
+# stderr: resolve_extra_extension's stdout is captured by command substitution.
+warn() { echo "[${PROG}] WARNING: $*" >&2; }
+
+run_as_user() {
+    local target_user="$1"; shift
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "${target_user}" -- "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -u "${target_user}" "$@"
+    else
+        su -s /bin/bash "${target_user}" -c "$(printf '%q ' "$@")"
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -30,7 +43,8 @@ Arguments:
   CLUSTER    Cluster name (e.g., "main")
 
 Options:
-  --start    Start the cluster after creating and tuning it
+  --start    Start the cluster after creating and tuning it, then create the
+             DocumentDB extensions in the "postgres" database
   -h, --help Show this help message
 EOF
 }
@@ -59,6 +73,21 @@ fi
 if ! command -v documentdb-tune >/dev/null 2>&1; then
     die "documentdb-tune is not installed. Install the documentdb-postgresql-tools package first."
 fi
+
+# Sourced after the help handling and platform guards above so --help and the
+# "Debian/Ubuntu only" diagnostic still work when the library is absent.
+_DDB_TOOLS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _ddb_cand in "${_DDB_TOOLS_LIB_DIR}/documentdb-tools-lib.sh" \
+                 "/usr/share/documentdb/scripts/documentdb-tools-lib.sh"; do
+    if [[ -f "${_ddb_cand}" ]]; then
+        # shellcheck source=documentdb-tools-lib.sh
+        source "${_ddb_cand}"
+        _DDB_TOOLS_LIB_LOADED=1
+        break
+    fi
+done
+[[ "${_DDB_TOOLS_LIB_LOADED:-}" == "1" ]] \
+    || die "cannot locate documentdb-tools-lib.sh (looked beside ${BASH_SOURCE[0]} and in /usr/share/documentdb/scripts)."
 
 # ── Argument parsing ────────────────────────────────────────────────
 
@@ -102,7 +131,65 @@ if [[ "${START}" == "true" ]]; then
     pg_ctlcluster "${PG_VERSION}" "${CLUSTER_NAME}" start
 fi
 
+# documentdb-tune pins documentdb.alternate_index_handler_name='extended_rum'
+# whenever the extended-RUM extension is installed, but that access method only
+# exists where documentdb_extended_rum has been created, and
+# CREATE EXTENSION documentdb CASCADE does not create it. Without this a tuned,
+# started cluster cannot create an index of any kind.
+#
+# Echo the extra extension this host needs, or nothing, using the same probe
+# documentdb-tune used so the two cannot disagree.
+resolve_extra_extension() {
+    local bindir="" sharedir="" candidate=""
+
+    while IFS= read -r candidate; do
+        if [[ -x "${candidate}/pg_config" ]]; then
+            bindir="${candidate}"
+            break
+        fi
+    done < <(documentdb_pg_bindir_candidates "${PG_VERSION}")
+
+    if [[ -n "${bindir}" ]]; then
+        sharedir="$("${bindir}/pg_config" --sharedir 2>/dev/null)" || sharedir=""
+    fi
+
+    # Never fail over this, but never fail silently either: an undetected
+    # extended-RUM install is how a cluster ends up tuned for an access method
+    # that was never created.
+    if [[ -z "${sharedir}" ]]; then
+        warn "could not read the PostgreSQL ${PG_VERSION} share directory; assuming documentdb_extended_rum is not installed."
+        return 0
+    fi
+
+    documentdb_detect_extended_rum "${sharedir}"
+    if [[ "${HAS_EXTENDED_RUM}" == "true" ]]; then
+        printf 'documentdb_extended_rum'
+    fi
+    return 0
+}
+
+create_documentdb_extensions() {
+    local extra_extension="$1"
+
+    log "Creating DocumentDB extensions in the 'postgres' database."
+    # --cluster resolves this cluster's binary, socket, and port, so nothing has
+    # to be guessed (pg_createcluster does not always pick 5432).
+    if ! documentdb_create_extension_sql "${extra_extension}" \
+            | run_as_user postgres psql --cluster "${PG_VERSION}/${CLUSTER_NAME}" \
+                -d postgres -X -v ON_ERROR_STOP=1 -f -; then
+        die "failed to create the DocumentDB extensions in the 'postgres' database of cluster ${PG_VERSION}/${CLUSTER_NAME}."
+    fi
+}
+
+EXTRA_EXTENSION="$(resolve_extra_extension)"
+
+if [[ "${START}" == "true" ]]; then
+    create_documentdb_extensions "${EXTRA_EXTENSION}"
+fi
+
 log "Done. Cluster ${PG_VERSION}/${CLUSTER_NAME} is ready for DocumentDB."
 if [[ "${START}" != "true" ]]; then
     echo "Start with: sudo pg_ctlcluster ${PG_VERSION} ${CLUSTER_NAME} start"
+    echo "Then create the extensions (required before any index can be created):"
+    echo "  $(documentdb_create_extension_command postgres postgres "${EXTRA_EXTENSION}")"
 fi

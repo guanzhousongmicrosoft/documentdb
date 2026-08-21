@@ -1044,6 +1044,9 @@ do_apply() {
                 log_verbose "Fragment is current but the live postgresql.conf is missing the include line; applying to add it."
             else
                 log "Config is already up to date: ${CONFIG_TARGET}"
+                # Re-running tune is a common move when indexes fail, and the
+                # answer is usually the missing CREATE EXTENSION, not the config.
+                print_create_extension_next_step
                 return 0
             fi
         fi
@@ -1144,6 +1147,34 @@ do_apply() {
                 log "Restart PostgreSQL to apply the new settings (your distro's preferred command)."
             fi
         fi
+    fi
+
+    print_create_extension_next_step
+}
+
+# The config written above is only half of a working install: when
+# HAS_EXTENDED_RUM is true it pins
+# documentdb.alternate_index_handler_name='extended_rum', and that access method
+# does not exist until documentdb_extended_rum is created in the target
+# database. documentdb-tune cannot do that itself — the cluster may be stopped,
+# and the GUC is cluster-wide while the extension is per-database — so print the
+# exact command instead.
+print_create_extension_next_step() {
+    local extra_extension=""
+    if [[ "${HAS_EXTENDED_RUM}" == "true" ]]; then
+        extra_extension="documentdb_extended_rum"
+    fi
+
+    log "Then create the extensions in each database that will hold DocumentDB data:"
+    log "  $(documentdb_create_extension_command postgres postgres "${extra_extension}")"
+
+    if [[ -n "${extra_extension}" ]]; then
+        log "Both statements are required: this config sets"
+        log "documentdb.alternate_index_handler_name = 'extended_rum', which resolves only"
+        log "in databases where ${extra_extension} exists — without it every index"
+        log "creation fails with \"Index access method extended_rum is not available\"."
+        log "Run them after PostgreSQL restarts: ${extra_extension} loads only from"
+        log "shared_preload_libraries."
     fi
 }
 
