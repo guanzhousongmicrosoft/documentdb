@@ -10,8 +10,6 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
-#include "access/transam.h"
-#include "catalog/pg_authid.h"
 #include "common/saslprep.h"
 #include "common/scram-common.h"
 #include "commands/commands_common.h"
@@ -27,7 +25,6 @@
 #include "utils/query_utils.h"
 #include "utils/role_utils.h"
 #include "utils/string_view.h"
-#include "utils/syscache.h"
 #include "api_hooks.h"
 #include "api_hooks_def.h"
 
@@ -741,53 +738,35 @@ IsReservedInternalRoleName(const char *name)
 
 
 /*
- * IsCustomRole determines whether the given name identifies a custom role.
+ * IsCustomRole verifies that a given role has an entry in the roles table.
+ *
+ * The roles catalog table is only created at cluster version 0.116-0, so
+ * callers must gate this call behind an IsClusterVersionAtleast(DocDB_V0, 116,
+ * 0) check.
  */
 bool
 IsCustomRole(const char *roleName)
 {
-	/*
-	 * Apply the same naming restrictions create_role applies when choosing a
-	 * custom role name, so a name that could never have been created as a
-	 * custom role is never treated as one.
-	 */
-	if (roleName == NULL ||
-		ContainsReservedPgRoleNamePrefix(roleName) ||
-		IsReservedInternalRoleName(roleName) ||
-		IS_NATIVE_BUILTIN_ROLE(roleName))
+	Oid roleOid = get_role_oid(roleName, true);
+	if (!OidIsValid(roleOid))
 	{
 		return false;
 	}
 
-	/*
-	 * Roles below FirstNormalObjectId are created during cluster bootstrap:
-	 * the cluster superuser and the PostgreSQL predefined roles such as
-	 * pg_read_all_data. Several of those are NOLOGIN, so the oid bound is what
-	 * separates them from a genuine custom role.
-	 */
-	bool missingOk = true;
-	Oid roleOid = get_role_oid(roleName, missingOk);
-	if (!OidIsValid(roleOid) || roleOid < FirstNormalObjectId)
-	{
-		return false;
-	}
+	const char *query = FormatSqlQuery(
+		"SELECT 1 FROM %s.roles WHERE role_name = $1",
+		ApiCatalogSchemaName);
 
-	HeapTuple roleTuple = SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleOid));
-	if (!HeapTupleIsValid(roleTuple))
-	{
-		return false;
-	}
+	int nargs = 1;
+	Oid argTypes[1] = { TEXTOID };
+	Datum argValues[1] = { CStringGetTextDatum(roleName) };
 
-	/*
-	 * create_role creates roles without LOGIN while create_user creates login
-	 * roles, so a role that can log in is a user rather than a custom role.
-	 * Treating a user as a custom role would let one user be granted
-	 * membership in another and silently inherit that user's privileges.
-	 */
-	bool canLogin = ((Form_pg_authid) GETSTRUCT(roleTuple))->rolcanlogin;
-	ReleaseSysCache(roleTuple);
+	bool readOnly = true;
+	bool isNull = false;
+	ExtensionExecuteQueryWithArgsViaSPI(query, nargs, argTypes, argValues, NULL,
+										readOnly, SPI_OK_SELECT, &isNull);
 
-	return !canLogin;
+	return !isNull;
 }
 
 
