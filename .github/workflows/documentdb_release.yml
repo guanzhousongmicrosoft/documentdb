@@ -190,9 +190,23 @@ jobs:
           cat changelog_excerpt.md
           echo "========================"
 
+      # The prerequisite commands are generated from the BEGIN/END:el-prereqs
+      # block in packaging/README.md rather than restated here, so the release
+      # body cannot drift from the commands nightly CI proves actually work
+      # (GitHub issue #75).
       - name: Append release footer (install, verify, support tier)
         run: |
           VERSION_DASH="${{ env.VERSION_DASH }}"
+
+          # Resolve BEFORE the heredoc and fail loudly. A failing command
+          # substitution INSIDE a heredoc does not trip `set -e` -- it silently
+          # expands to nothing, which would publish a release body with an empty
+          # prerequisite code block and no signal that anything went wrong.
+          EL_PREREQS="$(./packaging/extract-el-prereqs.sh)" || {
+            echo "::error::could not generate the RHEL prerequisite block from packaging/README.md"
+            exit 1
+          }
+
           cat >> changelog_excerpt.md <<EOF
 
           ---
@@ -206,6 +220,16 @@ jobs:
           \`\`\`
 
           **Repository-backed install (recommended):** see <https://documentdb.io> → Package Installation. Repository publication follows shortly after this release.
+
+          ### ⚠️ RHEL / Rocky / AlmaLinux: enable PGDG + EPEL + CRB first
+
+          The RPMs depend on PGDG's \`pgvector_N\`, \`pg_cron_N\` and \`postgis36_N\`. **CRB (CodeReady Builder) is disabled by default and is required** — \`postgis36_N\` pulls in \`gdal*-libs\`, which needs \`libqhull_r.so.7\`, and that library ships only in CRB. Without it \`dnf install\` fails dependency resolution with a wall of GDAL candidate lines that never mention the missing repository:
+
+          \`\`\`sh
+          ${EL_PREREQS}
+          \`\`\`
+
+          On EL8 replace \`EL-9\` with \`EL-8\` in the PGDG URL and use \`--set-enabled powertools\`; on arm64 replace \`x86_64\` with \`aarch64\`. See \`packaging/README.md\` for the full prerequisite and troubleshooting notes.
 
           ### First-party (Tier 1) targets
 

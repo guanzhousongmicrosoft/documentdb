@@ -473,6 +473,13 @@ jobs:
           ARTIFACT_NAME: documentdb-packages-${{ steps.version.outputs.version }}
         run: |
           short_sha="${GITHUB_SHA:0:7}"
+
+          # Resolve before the summary block so a docs regression fails the step
+          # loudly instead of publishing an empty prerequisite listing.
+          EL_PREREQS="$(./packaging/extract-el-prereqs.sh)" || {
+            echo "::error::could not generate the RHEL prerequisite block from packaging/README.md"
+            exit 1
+          }
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           {
             echo "## 📦 DocumentDB packages — \`${VERSION}\`"
@@ -495,6 +502,24 @@ jobs:
             echo '```'
             echo
             echo "> Retained 90 days as a GitHub Actions artifact. **To publish on GitHub Pages:** download and unzip the bundle, run \`sha256sum -c SHA256SUMS\` to verify, then lay the \`.deb\`/\`.rpm\` files into your Pages site — either a plain downloads directory or a signed \`apt/\` + \`yum/\` repository tree."
+            echo
+            # RHEL prerequisites belong HERE, next to the download link: this
+            # summary is how people get the .rpm files, and installing them on
+            # a stock Rocky/RHEL 9 host fails on a transitive
+            # postgis36_N -> gdal*-libs -> libqhull_r.so.7 dependency unless CRB
+            # is enabled first (GitHub issue #75).
+            echo "### ⚠️ Installing the \`.rpm\` files on RHEL / Rocky / AlmaLinux"
+            echo
+            echo "Enable **PGDG + EPEL + CRB** before \`dnf install\`. CRB is disabled by default and is required: \`postgis36_N\` pulls in \`gdal*-libs\`, which needs \`libqhull_r.so.7\`, and only CRB ships it."
+            echo
+            echo '```sh'
+            # Generated from the BEGIN/END:el-prereqs block in
+            # packaging/README.md rather than restated, so the commands handed
+            # to downloaders cannot drift from the ones nightly CI proves work.
+            echo "${EL_PREREQS}"
+            echo '```'
+            echo
+            echo "On EL8 use \`EL-8\` in the PGDG URL and \`--set-enabled powertools\`; on arm64 use \`aarch64\`. Full notes and troubleshooting: \`packaging/README.md\`."
             echo
             cat "${RUNNER_TEMP}/summary_body.md"
           } >> "$GITHUB_STEP_SUMMARY"
