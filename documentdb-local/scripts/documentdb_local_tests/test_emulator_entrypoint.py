@@ -234,6 +234,11 @@ json.dump(data, sys.stdout)
                 "DOCUMENTDB_CONFIG_FILE": str(
                     self.gateway_target_dir / "test_config.json"
                 ),
+                # Per-test path so runs never touch (or race over) the
+                # runner's real /tmp/documentdb-local-runtime.env default.
+                "DOCUMENTDB_RUNTIME_STATE_FILE": str(
+                    self.root / "runtime-state.env"
+                ),
             }
         )
         if extra_env:
@@ -1812,6 +1817,79 @@ exit 1
         self.assertEqual(config["GatewayListenPort"], 10260)
         self.assertEqual(config["PostgresPort"], 9712)
 
+    def test_runtime_state_file_written_with_resolved_settings(self):
+        # healthcheck.sh keys off this file: it must appear only after startup
+        # completes and must carry the resolved values (CLI flags included,
+        # since health probes never see them in their exec environment).
+        state_file = self.root / "runtime-state.env"
+        result = self._run_entrypoint(
+            "--password",
+            _TEST_PW,
+            "--documentdb-port",
+            "12345",
+            extra_env={"DOCUMENTDB_RUNTIME_STATE_FILE": str(state_file)},
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        state = state_file.read_text(encoding="utf-8")
+        self.assertIn("DOCUMENTDB_PORT=12345\n", state)
+        self.assertIn("POSTGRESQL_PORT=9712\n", state)
+        # Only what the probe reads: an unread key would be dead weight the
+        # probe's parser has to skip and this test would pin in place. The
+        # probe checks PostgreSQL unconditionally (the gateway always dials
+        # localhost), so START_POSTGRESQL is as unread as TLS_MODE.
+        self.assertNotIn("START_POSTGRESQL", state)
+        self.assertNotIn("TLS_MODE", state)
+
+    def test_unwritable_state_file_path_fails_fast(self):
+        # An unwritable path means the container could never turn healthy;
+        # that must fail at boot start, not after a multi-minute startup.
+        result = self._run_entrypoint(
+            "--password",
+            _TEST_PW,
+            extra_env={
+                "DOCUMENTDB_RUNTIME_STATE_FILE": str(
+                    self.root / "no-such-dir" / "runtime-state.env"
+                )
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "cannot reset or write the runtime state file",
+            result.stdout + result.stderr,
+        )
+
+    def test_oss_server_failure_aborts_startup(self):
+        # `start_oss_server.sh | tee` reports tee's status; the entrypoint
+        # must check the script's own, or a setup step failing after the
+        # postmaster daemonized would end in a healthy verdict.
+        self._write_exec(
+            self.gateway_scripts / "start_oss_server.sh",
+            "#!/bin/sh\necho oss-server-stub-failing\nexit 7\n",
+        )
+        result = self._run_entrypoint(
+            "--password", _TEST_PW, extra_env={"START_POSTGRESQL": "true"}
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "start_oss_server.sh failed with exit code 7",
+            result.stdout + result.stderr,
+        )
+
+    def test_stale_runtime_state_file_removed_when_startup_fails(self):
+        # A leftover file from a previous boot (docker restart) must not let
+        # the healthcheck report healthy while this boot is failing.
+        state_file = self.root / "runtime-state.env"
+        state_file.write_text("DOCUMENTDB_PORT=10260\n", encoding="utf-8")
+        result = self._run_entrypoint(
+            "--password",
+            _TEST_PW,
+            "--documentdb-port",
+            "banana",
+            extra_env={"DOCUMENTDB_RUNTIME_STATE_FILE": str(state_file)},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(state_file.exists())
+
     def test_default_mode_sets_allowTLS_in_config(self):
         result = self._run_entrypoint("--password", _TEST_PW)
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
@@ -2064,6 +2142,36 @@ json.dump(data, sys.stdout)
             f"exit 0\n",
         )
         return counter
+
+    def test_state_file_published_only_after_data_initialization(self):
+        # The probe's whole contract is "state file present => fully
+        # initialized"; publishing before seeding would let service_healthy
+        # dependents start against a database still being seeded.
+        (self.sample_data_dir / "01-sample.js").write_text(
+            "// sample\n", encoding="utf-8"
+        )
+        state_file = self.root / "runtime-state.env"
+        seen = self.root / "state-file-seen-by-seeder"
+        self._write_exec(
+            self.gateway_scripts / "init_documentdb_data.sh",
+            f'#!/bin/sh\nif [ -e "{state_file}" ]; then touch "{seen}"; fi\n'
+            f"exit 0\n",
+        )
+
+        result = self._run_entrypoint(
+            extra_env={
+                "INIT_DATA": "true",
+                "SKIP_INIT_DATA": "",
+                "DOCUMENTDB_RUNTIME_STATE_FILE": str(state_file),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertTrue(state_file.exists())
+        self.assertFalse(
+            seen.exists(),
+            "runtime state file was published before data seeding completed",
+        )
 
     def test_sample_data_is_seeded_once_and_skipped_on_restart(self):
         # Make the sample-data dir resemble the real layout.
