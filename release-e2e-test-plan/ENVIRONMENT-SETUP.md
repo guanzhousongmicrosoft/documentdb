@@ -7,6 +7,90 @@ disagreement is itself a finding.**
 
 ---
 
+## 0. Before you start (read this first)
+
+You were handed three files: **this one** (ground truth), one
+`prompts/track-NN-*.md` (your assignment), and `REPORT-TEMPLATE.md` (your output
+format). That is everything you need to know *what* to do. This section is how you
+get into a position to actually do it. Work through it before touching your track.
+
+### 0.1 Get the source at the release tag
+
+Several tracks read files out of the DocumentDB repository itself — the
+functional-test runner and its baselines, the in-tree contract tests, the regress
+suites, the shipped docs. Clone it and check out **the tag**, not `main`:
+
+```bash
+git clone https://github.com/documentdb/documentdb.git
+cd documentdb
+git checkout v0.116-0     # tag commit 66e9e118...; NOT an ancestor of main
+```
+
+Tracks that need the source: 01 (`test_image.py`), 03 (entrypoint tests), 04
+(functional suite + contract tests), 06 (TLS test script), 07 (crash list), 08/09
+(regress suites), 10 (setup tests), 12 (shipped docs), 15, 16. If you skip this,
+those checks are not merely harder — they are impossible, and you will report a
+gap that is really a missing checkout.
+
+### 0.2 Tooling
+
+**Every track:** `docker` (or `podman`), `mongosh`, `openssl`, `git`, `python3`,
+`jq`, and an authenticated `gh` for artifact download.
+
+| Track | Also needs |
+|-------|-----------|
+| 01 | `cosign`; `trivy` or `grype`; `syft`; optionally `crane`/`skopeo` |
+| 06 | `nmap` (with `ssl-enum-ciphers`) or `testssl.sh` |
+| 07 | `tcpdump`; a runtime you can constrain (`--memory`/`--cpus`/`--cap-drop`) |
+| 08 | clean **Ubuntu 24.04** (VM or container), amd64 **and** arm64 |
+| 09 | clean **Rocky/RHEL/Alma 9**, x86_64 **and** aarch64, one with SELinux **enforcing** |
+| 10 | a real **systemd** host — a plain docker container will not do |
+| 11 | a driver-based load harness and a fixed, recorded host |
+| 13 | `pymongo`, Node `mongodb`, optionally Go/Java/C# drivers; MongoDB Database Tools; Compass |
+| 14 | prior-release artifacts — run that track's Step 0 first (see also §10) |
+| 15 | a package-installed host from Track 08 or 09, in addition to the image |
+| 16 | `psql` (available via `docker exec`), optionally `amcheck` |
+
+**If a tool or a host is unavailable, do not silently skip the check.** Mark it
+⛔ blocked in your checklist with the reason. An unrun check that reads as a pass
+is worse than a gap you declared.
+
+### 0.3 Getting the artifacts
+
+**Image** — anonymous `docker pull` works; no credentials needed:
+```bash
+docker pull ghcr.io/documentdb/documentdb/documentdb-local:pg17-0.116.0
+```
+
+**Packages** — `gh run download` (see §3) needs an authenticated `gh` with read
+access to that repository's Actions artifacts. If you do not have it, or the
+artifacts have aged out, fall back to (a) the downstream `documentdb.io` apt/yum
+repositories, or (b) building from the tag. **Record which source you used**: a
+locally built package is not the package that shipped, and for a release gate that
+difference is the whole point.
+
+### 0.4 Where your report goes
+
+Write `reports/track-NN-<slug>.md` **inside this bundle directory** — the same
+directory this file came from — and put captured evidence under
+`reports/artifacts/track-NN-*`. Use exactly the filename your track prompt states;
+the rollup matches on those names. If you have no write access to the bundle,
+return the report as your final output and say where the artifacts live.
+
+Alongside the file, send the coordinator one status line:
+
+```
+TRACK NN — PASS | PASS-WITH-FINDINGS | FAIL | BLOCKED — S1:_ S2:_ S3:_ S4:_
+```
+
+### 0.5 If your track cannot run at all
+
+Report **BLOCKED** with exactly what was missing, and tell the coordinator
+**early** rather than at report time. Do not substitute a different, easier test
+and report it as the track.
+
+---
+
 ## 1. Release identity & build provenance
 
 | Fact | Value |
@@ -30,7 +114,7 @@ The tag commit `66e9e118` is **not** an ancestor of `main` (main advanced on a
 different line). Treat the tag — not `main` — as the source of truth for what
 shipped. To read shipped source:
 ```bash
-git fetch <upstream> v0.116-0
+git fetch https://github.com/documentdb/documentdb.git v0.116-0
 git show v0.116-0:documentdb-local/scripts/emulator_entrypoint.sh   # etc.
 ```
 
@@ -55,6 +139,11 @@ git show v0.116-0:documentdb-local/scripts/emulator_entrypoint.sh   # etc.
 - manifest-list `pg17-0.116.0` → `sha256:4396b86015b723781c33d56e8b7046c8b27d90f5de6161ad808db7449bc11b5f`
 - amd64 image → `sha256:374f2057f2198936b0c1a50b17089ef79e9b92bf10a88dfc5cce663403230573`
 - amd64 config blob → `sha256:c00d2b94dd1ac9a24de72e6e8b93531e64f1840762003b5269c12fbabbcec84d`
+
+Only **pg17** is pinned here. If your track touches pg15/pg16/pg18 or arm64,
+resolve those digests yourself (`docker buildx imagetools inspect`, `crane
+digest`, or `docker inspect`) and record them — worker rule 3 applies to whatever
+you actually tested, not to what this file happens to list.
 
 **Image config (verified, amd64/pg17):**
 - **User:** `documentdb` (non-root). **WorkingDir:** `/home/documentdb/gateway/scripts`.

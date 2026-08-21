@@ -26,7 +26,9 @@ upgrade. The explicit goal is to **try to break the product** before users do.
 
 Exact artifact names, digests, ports, defaults, and provenance are in
 **[`ENVIRONMENT-SETUP.md`](ENVIRONMENT-SETUP.md)** — the single source of truth.
-**Read it before starting any track.** Do not hard-code values from memory; the
+**Read it before starting any track**, starting with its **§0 "Before you
+start"**: how to get the source at the release tag, which tools each track needs,
+how to obtain the artifacts, and where your report goes. Do not hard-code values from memory; the
 setup doc was regenerated from the actual build artifacts for this release.
 
 ---
@@ -77,11 +79,31 @@ runs [Track 04 §Smoke](prompts/track-04-protocol-crud-correctness.md) against
 `mongosh`. If this fails, **stop** and file an S1 — the release is dead on
 arrival and the other tracks would only produce noise.
 
-**Phase B — Fan-out (parallel).** Dispatch every track to its own worker agent.
-Each worker is given exactly its `prompts/track-NN-*.md` file plus
-`ENVIRONMENT-SETUP.md` and `REPORT-TEMPLATE.md`. Workers do **not** coordinate
-with each other; if a worker discovers something outside its track, it records a
-*cross-track note* in its report rather than chasing it.
+**Phase B — Fan-out (parallel, in waves).** Dispatch each track to its own worker
+agent with exactly its `prompts/track-NN-*.md` file plus `ENVIRONMENT-SETUP.md`
+and `REPORT-TEMPLATE.md`. Workers do **not** coordinate with each other — the
+**coordinator** owns the dependencies below and hands each worker an environment
+that is already prepared. If a worker discovers something outside its track, it
+records a *cross-track note* rather than chasing it.
+
+Not every track can start at once; these edges are real, and a coordinator who
+fans out all 16 at once will have several workers blocked on day one:
+
+| Wave | Tracks | Prerequisite |
+|------|--------|--------------|
+| **B1** | 01, 02, 03, 04, 05, 06, 11, 12, 13, 16 | a container runtime — start immediately |
+| **B2** | 08, 09 | Ubuntu 24.04 / Rocky 9 hosts **and** the package artifacts |
+| **B3** | 10, 15 | a host where B2 left the extension installed (Track 15's container-side checks can run in B1 if you split it) |
+| **B4** | 07, 14 | 07 wants the packaged gateway from Track 10; 14 needs a prior-release baseline, confirmed by its own Step 0 |
+
+Rough budget: B1 is about a day of parallel agent time and B2–B4 another day.
+Tracks 11 and 16 run longest — their sustained-load and churn windows are
+measured in hours, so start them early even though they do not block anything.
+
+**Reporting back.** Every worker returns its report file *and* one status line —
+`TRACK NN — PASS | PASS-WITH-FINDINGS | FAIL | BLOCKED — S1:_ S2:_ S3:_ S4:_`.
+The Phase-A smoke result comes back the same way, immediately, before that worker
+continues into the rest of Track 04.
 
 **Phase C — Rollup (serialize).** The coordinator collects all `reports/*.md`,
 de-duplicates findings, and fills in
