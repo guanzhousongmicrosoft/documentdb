@@ -57,7 +57,7 @@ bool EnableRoleCrud = DEFAULT_ENABLE_ROLE_CRUD;
 #define DEFAULT_ENABLE_USERS_ADMIN_DB_CHECK false
 bool EnableUsersAdminDBCheck = DEFAULT_ENABLE_USERS_ADMIN_DB_CHECK;
 
-/* Added in v0.116, Pending stabilization, enable in v0.117 */
+/* Added in v0.116, Pending stabilization, enable in v0.118 */
 #define DEFAULT_ENABLE_READWRITE_ANY_DATABASE_ROLE_ENFORCEMENT false
 bool EnableReadWriteAnyDatabaseRoleEnforcement =
 	DEFAULT_ENABLE_READWRITE_ANY_DATABASE_ROLE_ENFORCEMENT;
