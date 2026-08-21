@@ -157,6 +157,7 @@ COPY documentdb-local/scripts/emulator_entrypoint.sh /home/documentdb/gateway/sc
 COPY documentdb-local/scripts/documentdb_reserved_roles.sh /home/documentdb/gateway/scripts/documentdb_reserved_roles.sh
 COPY documentdb-local/scripts/documentdb_validate_username.sh /home/documentdb/gateway/scripts/documentdb_validate_username.sh
 COPY documentdb-local/scripts/documentdb_install_getparameter_stub.sh /home/documentdb/gateway/scripts/documentdb_install_getparameter_stub.sh
+COPY documentdb-local/scripts/healthcheck.sh /home/documentdb/gateway/scripts/healthcheck.sh
 COPY scripts/utils.sh /home/documentdb/gateway/scripts/utils.sh
 COPY scripts/preload_libraries.sh /home/documentdb/gateway/scripts/preload_libraries.sh
 COPY scripts/setup_psqlrc.sh /home/documentdb/gateway/scripts/setup_psqlrc.sh
@@ -174,6 +175,12 @@ RUN sudo chown -R documentdb:documentdb /home/documentdb/gateway
 
 # Make initialization script executable
 RUN sudo chmod +x /home/documentdb/gateway/scripts/init_documentdb_data.sh
+
+# Expose the health probe on a stable path that stays valid if the scripts
+# directory ever moves, so compose files can rely on
+# `test: ["CMD", "/usr/local/bin/documentdb-healthcheck"]` across releases.
+RUN sudo chmod +x /home/documentdb/gateway/scripts/healthcheck.sh && \
+    sudo ln -s /home/documentdb/gateway/scripts/healthcheck.sh /usr/local/bin/documentdb-healthcheck
 
 WORKDIR /home/documentdb/gateway/scripts
 # Declare /data as a volume mount point for the PostgreSQL data directory.
@@ -199,4 +206,20 @@ RUN v="$(dpkg-query -W -f='${Version}' "postgresql-${POSTGRES_VERSION}-documentd
         "$v" "${GIT_COMMIT}" "${BUILD_DATE:-unknown}" "${POSTGRES_VERSION}" \
     | sudo tee /version.txt >/dev/null
 
+# Built-in health probe: healthy once the entrypoint finished initialization,
+# PostgreSQL accepts connections, and the gateway answers a TLS handshake
+# (see healthcheck.sh). It tracks the configured DocumentDB port
+# automatically — including one set via the --documentdb-port CLI flag — so
+# `docker run` users and docker-compose `depends_on: condition:
+# service_healthy` need no extra configuration.
+# The 600s start period absorbs a slow first boot (initdb on a cold volume,
+# plus the entrypoint's own up-to-600s wait for PostgreSQL): failing probes
+# during it do not count toward `retries`, and a probe that succeeds during it
+# marks the container healthy without waiting it out. It is a budget, not a
+# guarantee — a boot that takes longer (very large custom seed scripts, or a
+# DOCUMENTDB_PG_READY_TIMEOUT raised past 600s, which this build-time value
+# cannot track) can outrun it; such workloads should override the timings at
+# the `docker run` / compose level.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
+    CMD ["/usr/local/bin/documentdb-healthcheck"]
 ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/gateway/scripts/emulator_entrypoint.sh \"$@\"", "--"]

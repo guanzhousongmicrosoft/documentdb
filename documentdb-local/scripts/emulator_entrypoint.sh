@@ -382,6 +382,23 @@ export SYSTEM_POSTGRES_LOG=${SYSTEM_POSTGRES_LOG:-/var/log/postgresql/postgresql
 export DOCUMENTDB_RUNTIME_USER=${DOCUMENTDB_RUNTIME_USER:-documentdb}
 export DOCUMENTDB_RUNTIME_GROUP=${DOCUMENTDB_RUNTIME_GROUP:-$DOCUMENTDB_RUNTIME_USER}
 
+# Runtime state file consumed by healthcheck.sh. Written only once startup
+# completes (see the ready banner below), so its presence doubles as the
+# readiness marker. Remove any leftover from a previous boot of this
+# container (e.g. `docker restart`) so the healthcheck cannot report healthy
+# while this boot is still starting up — and verify both the removal and
+# that the path is writable, failing NOW rather than at the publish: a
+# failure discovered there would surface only after the full (up to
+# multi-minute) boot, as a container that works but never reports healthy.
+export DOCUMENTDB_RUNTIME_STATE_FILE=${DOCUMENTDB_RUNTIME_STATE_FILE:-/tmp/documentdb-local-runtime.env}
+rm -f "$DOCUMENTDB_RUNTIME_STATE_FILE" "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" 2>/dev/null
+if [ -e "$DOCUMENTDB_RUNTIME_STATE_FILE" ] \
+        || ! : > "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" 2>/dev/null; then
+    echo "Error: cannot reset or write the runtime state file at $DOCUMENTDB_RUNTIME_STATE_FILE, which the container health check depends on. Set DOCUMENTDB_RUNTIME_STATE_FILE to a writable path." >&2
+    exit 1
+fi
+rm -f "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp"
+
 # Resolve script and data directories.
 # Package-installed paths take priority over the legacy Docker layout.
 # CONFIG_DIR can be overridden for testing.
@@ -897,6 +914,15 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     start_oss_server_args+=(-d "$DATA_PATH" -p "$POSTGRESQL_PORT")
 
     "$SCRIPT_DIR/start_oss_server.sh" "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
+    # $? is tee's; without checking the script's own status, a setup step
+    # failing after the postmaster daemonized (e.g. CREATE EXTENSION) would
+    # leave postmaster.pid in place and sail through every later gate into a
+    # healthy verdict on a half-configured server.
+    oss_server_rc=${PIPESTATUS[0]}
+    if [ "$oss_server_rc" -ne 0 ]; then
+        echo "Error: start_oss_server.sh failed with exit code $oss_server_rc (see $OSS_SERVER_LOG)." >&2
+        exit 1
+    fi
 
     echo "OSS server started."
     echo "[ENTRYPOINT] Setting up PostgreSQL log streaming..."
@@ -1488,6 +1514,24 @@ if [ -f "$GATEWAY_LOG" ]; then
 fi
 
 echo "Gateway started with PID: $gateway_pid"
+
+# Publish the resolved runtime settings for healthcheck.sh. This runs after
+# gateway readiness and data initialization so the healthcheck only reports
+# healthy on a fully initialized database, and it records the ports actually
+# in use — which may come from CLI flags that HEALTHCHECK / `docker exec`
+# sessions cannot see in their environment. Written via a temp file + mv so
+# the healthcheck never reads a partially written file. A write failure is
+# not fatal to the database, but the container will keep reporting unhealthy,
+# so warn loudly.
+if printf 'DOCUMENTDB_PORT=%s\nPOSTGRESQL_PORT=%s\n' \
+        "$DOCUMENTDB_PORT" "$POSTGRESQL_PORT" \
+        > "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" \
+        && mv "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" "$DOCUMENTDB_RUNTIME_STATE_FILE"; then
+    echo "Runtime state for the health check written to $DOCUMENTDB_RUNTIME_STATE_FILE"
+else
+    echo "Warning: could not write $DOCUMENTDB_RUNTIME_STATE_FILE; the container health check will keep reporting unhealthy." >&2
+fi
+
 echo ""
 echo "=== DocumentDB is ready ==="
 echo ""
