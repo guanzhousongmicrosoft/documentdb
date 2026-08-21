@@ -102,13 +102,19 @@ and report it as the track.
 | **Packages** build run | Actions run **32413347757** — "Build all packages", ref `v0.116-0`, head `66e9e118…`, success |
 | **Images** build run | Actions run **32408805324** — "Build and push gateway images", ref `v0.116-0`, head `810cf2ccf00fc5d089cb9d462ce61c556abbc394`, success |
 
-> ⚠️ **Provenance note to verify (finding-seed P1).** The two runs were built from
-> **different commits**. Packages came from the tag commit `66e9e118`; images
-> came from its parent-ish commit `810cf2cc` (they differ only in
-> `build_packages.sh` / `build_gateway_packages.sh`). The image's
-> `org.opencontainers.image.revision` label therefore reads `810cf2cc…`, **not**
-> the release-tag commit. Confirm this on the pulled image and judge whether a
-> release should ship an image whose revision label is not the tagged commit.
+> **Provenance seed P1 — RESOLVED in the rebuild (verified 2026-08-21).** The plan was
+> written against build runs whose packages (`66e9e118`) and images (`810cf2cc`) came
+> from *different* commits. The release was subsequently **rebuilt**: runs
+> **32438343434** (packages) and **32438357061** (images) are both from
+> `684ac1626249f0b394cfb5a1391c85a158876d36`, and the `v0.116-0` tag now points there
+> (annotated tag `b1107382`). The image's `org.opencontainers.image.revision` reads
+> `684ac162…` — equal to the build commit *and* the tag. The drift is gone. If you are
+> testing an older build, the original seed still applies.
+>
+> The only source delta from `66e9e118` to `684ac162` is **RPM packaging**:
+> `packaging/rpm/spec/documentdb.spec`, `packaging/rpm/packaging-entrypoint-rpm.sh`,
+> `packaging/test_packages/e2e-rhel-scenarios.sh`,
+> `packaging/test_packages/test-install-entrypoint-rpm.sh`. Weight Track 09 accordingly.
 
 The tag commit `66e9e118` is **not** an ancestor of `main` (main advanced on a
 different line). Treat the tag — not `main` — as the source of truth for what
@@ -300,7 +306,7 @@ reportable result too.
 
 | ID | Owner | Hypothesis |
 |----|-------|-----------|
-| P1 | T01 | Image `revision` label = `810cf2cc`, not the tag commit `66e9e118`. |
+| P1 | T01 | Image `revision` label = `810cf2cc`, not the tag commit `66e9e118`. **RESOLVED in the `684ac162` rebuild — see §1.** |
 | C1 | T01/T02 | Image has **no HEALTHCHECK** — orchestrators can't tell healthy from hung. |
 | C2 | T01/T03 | Image has **no EXPOSE** — port discovery relies on docs only. |
 | C3 | T03/T05 | Password: usage says REQUIRED, but the entrypoint also carries an `Admin100` default. What actually happens with no `--password`? |
@@ -345,51 +351,66 @@ The release-prep commit (`66e9e118`) hardens the container. Confirm these
 
 ---
 
-## 8. Known-failure baseline — the oracle every track must consult
+## 8. The functional gate — the oracle every track must consult
 
-**Read this before filing anything.** The repository already carries an
-authoritative list of what does not work, and the plan is worthless without it:
-workers who do not consult it will re-file known gaps as new findings and bury
-the rollup.
+**Read this before filing anything.** The repository carries an authoritative
+statement of what is expected to pass, and the plan is far weaker without it.
+
+> **Correction (verified 2026-08-21 against the shipped release).** Earlier revisions
+> of this section described a *known-failures xfail* model with 15,422 failing /
+> 1,898 flaky / 6 engine-crasher entries. **Those files do not exist at the release
+> commit.** At `684ac162` the config directory contains only `allowlist.yml` and
+> `image.yml`; the xfail lists are a downstream-fork construct on that fork's `main`.
+> What the release actually ships is the **allowlist** model below. Reality won.
 
 `documentdb-local/functional-tests/` runs the pinned upstream
-`documentdb/functional-tests` wire-protocol suite (**~50k tests**, pinned by
-digest in `config/image.yml`) under a **known-failures xfail model**. For the
-OSS gateway that this release ships, at the tag:
+`documentdb/functional-tests` wire-protocol suite under an **allowlist** model:
 
-| List | Entries | Applied as |
-|------|--------:|-----------|
-| `config/oss_ci_failing_tests.txt` | **15,422** | `xfail(strict=True)` — known-failing |
-| `config/oss_ci_flaky_tests.txt` | **1,898** | `xfail(strict=False)` — known-flaky |
-| `config/ci_crash_tests.txt` | **6** | `skip` — **engine crashers, never executed** |
+| Fact | Value |
+|------|-------|
+| Model | `allowlist.yml`, `schema_version: 2` — every listed test **must pass** |
+| Allowlisted tests | **10,481** |
+| Suite image (pinned by digest) | `ghcr.io/documentdb/functional-tests@sha256:79ed3d43…` (`source_sha df2623cd`) |
+| Excluded engine-crashers | `setUnion_core`, `setUnion_type_dedup`, `stages_window`, `planCacheStats_type_errors` |
+| Provenance of the list | intersection of passing tests across repeated scheduled full-suite runs (non-flaky passers only) |
 
-There is no allowlist: the full suite runs, the gate fails on any residual
-`failed`/`error` **and** on any `XPASS(strict)` (a listed expected-failure that
-started passing). Take the lists **from the release tag**, not from `main` —
-the baseline was refreshed after the tag.
+The allowlist is a **must-pass** contract, not a known-failure list: any failure is a
+regression, and the gate also fails if a listed test disappears.
 
-How to use it:
+### How to run it against the published image
 
-- **Tracks 04, 12, 13, 15:** before filing a missing/divergent feature, grep the
-  failing list. If it is listed, it is **known** — record it as
-  "known, on the baseline" and move on. Only unlisted behavior is reportable.
-- **Track 04** runs the suite itself against the published image (see that
-  prompt) and reports the **diff against the baseline**, which is the single
-  most informative protocol result this plan can produce.
-- **Track 07** treats `ci_crash_tests.txt` as a pre-existing crash surface: those
-  six tests crash the engine and are skipped rather than fixed.
-- **The rollup** must state explicitly whether shipping with 15,422 known
-  failures and 6 skipped engine-crashers is accepted for this release. That is a
-  release-owner decision, not a tester's.
+CI (`.github/workflows/functional_tests.yml`, job 3) does **not** use the runner's
+`allowlist` mode. It shards the allowlist into explicit pytest node IDs and passes
+them positionally — reproduce that:
 
-Run it against the **published** image (not a locally built one):
 ```bash
-documentdb-local/functional-tests/scripts/run-functional-tests.sh \
-  --use-existing-documentdb-image ghcr.io/documentdb/documentdb/documentdb-local:pg17-0.116.0 \
-  --engine-name oss --results-dir ./ft-results
+python3 documentdb-local/functional-tests/tools/functional_gate.py \
+  --image  documentdb-local/functional-tests/config/image.yml \
+  --allowlist documentdb-local/functional-tests/config/allowlist.yml \
+  --engine-name documentdb shard-allowlist \
+  --num-shards 8 --shard-id "$i" --prefix documentdb_tests/ --output ids_$i.txt
+
+docker run --rm --network host -v "$PWD:/results" --entrypoint sh \
+  ghcr.io/documentdb/functional-tests@sha256:79ed3d43… -c \
+  "cd /app && exec pytest --rootdir documentdb_tests \$(cat /results/ids_$i.txt) \
+     --engine-name documentdb --connection-string '<uri>' -n 12 \
+     --json-report --json-report-file=/results/report_$i.json -q"
 ```
-The runner also takes `--connection-string`, `--workers`, `--test`,
-`--documentdb-port/-user/-password`, `--pg-version` and `--keep-documentdb`.
+
+Three traps, all of which cost real time on the first run:
+
+- **`--engine-name` must be `documentdb`.** Any other value silently deselects every
+  test (`12518 deselected / 0 selected`) rather than erroring.
+- **`functional_gate.py` writes CRLF on Windows.** pytest folds the trailing `\r` into
+  the node ID and collects nothing. Normalise the ID files to LF.
+- **The runner's own `allowlist` mode is broken at this commit** — the shipped
+  allowlist contains a `no_parallel`-marked test and `tools/conftest_allowlist.py`
+  raises an unconditional `UsageError` before any test runs. Use the sharded path.
+
+`functional_tests.yml` also documents a **known RUM dynamic-cursor race that segfaults
+the engine under parallel workers**, and re-runs each shard's failures sequentially to
+absorb it. Treat an engine crash under `-n` as known-but-unfixed, and hand it to
+Track 16.
 
 ### Other automated gates already in the tree
 
@@ -406,7 +427,7 @@ These exist and are cheap; cite them rather than re-deriving their results:
 | `documentdb-local/scripts/run_documentdb_local_tls_tests.sh` | container TLS paths | T06 |
 | `documentdb-local/test-init-data/` | init-data hooks, incl. invalid data | T02 |
 | `pg_documentdb_gw/documentdb_tests/` | per-command gateway integration tests | T04/T15 |
-| `pg_documentdb/src/test/regress/` (134 suites) | extension SQL behavior | T08/T09/T15 |
+| `pg_documentdb/src/test/regress/` | extension SQL behavior | T08/T09/T15 |
 
 The regress suites are the highest-value **packaging** check available: run them
 against a **package-installed** extension, not the build tree.

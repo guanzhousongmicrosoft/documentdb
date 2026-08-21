@@ -161,12 +161,12 @@ Whatever you skip, say so in the rollup. A silently-unrun track reads as a pass.
 8. **Safety.** These tests target *your own* SUT instances. Do not attack
    infrastructure you were not handed. Adversarial tests (Track 07) are scoped to
    the container/host you spun up for the test.
-9. **Check the known-failure baseline first.** The release carries a curated list
-   of 15,422 known-failing and 1,898 known-flaky upstream functional tests
-   (`ENVIRONMENT-SETUP.md §8`). Before filing a missing or divergent feature,
-   grep it. If it is listed, it is **known** — write "known, on the baseline" and
-   move on. This is the data behind rule 7; without it every feature-facing track
-   re-files the same known gaps and the rollup becomes unreadable.
+9. **Check the functional gate first.** The release ships an **allowlist** of
+   **10,481 must-pass** upstream functional tests (`ENVIRONMENT-SETUP.md §8`), plus
+   four engine-crashing files it deliberately excludes. Before filing a missing or
+   divergent feature, check whether the behaviour is inside or outside that
+   contract — an excluded area is **known**, a failing allowlisted test is a
+   **regression**. This is the data behind rule 7.
 10. **Say what you did not test.** An unrun check is not a passing check. Mark it
     ⛔ blocked with the reason; the rollup depends on knowing the difference.
 
