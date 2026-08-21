@@ -113,20 +113,29 @@ each workflow.
 > is disabled by default and all three are required** — PGDG's `postgis36_N`
 > pulls in `gdal*-libs`, which needs `libqhull_r.so.7`, and that library ships
 > only in CRB (`powertools` on EL8). Enable them once (adjust the EL major/arch
-> for your host):
+> for your host). On Rocky/Alma/CentOS Stream the repo id is `crb`; on subscribed
+> Red Hat Enterprise Linux there is no such id and you enable CodeReady Builder
+> through `subscription-manager` instead:
 >
 > <!-- BEGIN:el-prereqs -- LOAD-BEARING, and the single source of truth for
 >      these commands. packaging/extract-el-prereqs.sh parses the fenced block
 >      below; test-documented-prereqs.sh runs it VERBATIM on a stock EL image
 >      before installing the real .rpm, the GitHub release body and the package
->      job summary are generated from it, and --check-specs asserts the RPM
+>      job summary are generated from it, and --check-copies asserts the RPM
 >      %description copies still match. This is executable documentation, not
->      prose: keep it one bash fence of plain "sudo dnf ..." lines. -->
+>      prose. Keep it ONE bash fence whose every line is either a "sudo dnf ..."
+>      command or a "#" comment, and keep the leading "> " on every line -- the
+>      block lives inside this blockquote and un-quoting it breaks the parser.
+>      Comment lines are inert when executed, so they carry guidance that
+>      cannot be a dnf command (see the subscription-manager line). -->
 > ```bash
 > sudo dnf install -y dnf-plugins-core
 > sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 > sudo dnf install -y epel-release
+> # Rocky Linux / AlmaLinux / CentOS Stream:
 > sudo dnf config-manager --set-enabled crb
+> # Subscribed Red Hat Enterprise Linux has no 'crb' repo id. Use instead:
+> #   sudo subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
 > sudo dnf -qy module disable postgresql
 > ```
 > <!-- END:el-prereqs -->

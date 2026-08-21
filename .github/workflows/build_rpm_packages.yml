@@ -112,7 +112,16 @@ jobs:
       # carry every documented prerequisite -- otherwise `dnf info` would hand
       # users a stale recipe that nightly CI never exercises (GitHub issue #75).
       # Network-free, runs in about a second.
+      # One cell only. The check is matrix-invariant and network-free, and the
+      # rpmlint step below is gated the same way to avoid a duplicate report
+      # four times per run.
+      #
+      # NOTE: this workflow's `push` trigger carries `paths-ignore: '**/*.md'`,
+      # so a README-only commit pushed straight to main/release never runs this.
+      # Pull requests are not path-filtered, so the PR path does gate it; the
+      # nightly suite is the backstop for direct pushes.
       - name: Check un-generatable prerequisite copies match packaging/README.md
+        if: matrix.arch == 'amd64' && matrix.pg_version == env.PAVED_PG_MAJOR
         run: ./packaging/extract-el-prereqs.sh --check-copies
 
       - name: Build RPM Package

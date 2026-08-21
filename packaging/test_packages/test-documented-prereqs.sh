@@ -27,9 +27,13 @@
 # day a base image starts shipping CRB enabled — passing while proving nothing.
 #
 # Scope: this installs the extension RPM (the package in the issue #75 repro).
-# That transitively exercises the whole documented repo set — PGDG for the
-# extension packages, CRB for libqhull_r, and EPEL for postgis36_N's hdf5 and
-# xerces-c — so dropping any one line from the block turns DOC-SUFFICIENT red.
+# That transitively exercises most of the documented repo set — PGDG for the
+# extension packages, CRB for libqhull_r, EPEL for postgis36_N's hdf5 and
+# xerces-c. It does NOT backstop every line: `module disable postgresql` can be
+# dropped with this suite staying green, because the RPM Requires the versioned
+# postgresql%{N} names the AppStream module never shadows. Per-line deletions
+# are caught by the tripwires in extract-el-prereqs.sh instead — that is where
+# the coverage for a shrinking block lives, not here.
 #
 # Usage:
 #   ./packaging/test_packages/test-documented-prereqs.sh [--pg N] [--el 9|8]
@@ -87,13 +91,28 @@ CRB_REPO=crb
 # ── 1. Locate the extension RPM ────────────────────────────────────────────
 # Done BEFORE extracting the commands: the package's architecture selects the
 # PGDG repo RPM the documented block installs (EL-N-x86_64 vs EL-N-aarch64).
+# Exclude debug siblings explicitly. They are suppressed today only by
+# `%define debug_package %{nil}` in the spec; if that is ever dropped, a
+# dependency-free ...-debuginfo-....rpm would match this glob with a near
+# identical mtime, DOC-SUFFICIENT would pass vacuously and NEGATIVE-CONTROL
+# would report "install SUCCEEDED without crb".
 RPM_PATH="$(find "${PACKAGES_DIR}" -maxdepth 1 \
     -name "rhel${EL_MAJOR}-postgresql${PG_MAJOR}-documentdb-*.rpm" \
+    ! -name '*debuginfo*' ! -name '*debugsource*' ! -name '*dbgsym*' \
     -printf '%T@ %p\n' 2>/dev/null | LC_ALL=C sort -rn | head -n 1 | cut -d' ' -f2-)"
 
 # BSD find (macOS) has no -printf; fall back to a plain newest-by-mtime pick.
 if [[ -z "${RPM_PATH}" ]]; then
-    RPM_PATH="$(ls -t "${PACKAGES_DIR}"/rhel${EL_MAJOR}-postgresql${PG_MAJOR}-documentdb-*.rpm 2>/dev/null | head -n 1)"
+    RPM_PATH="$(ls -t "${PACKAGES_DIR}"/rhel${EL_MAJOR}-postgresql${PG_MAJOR}-documentdb-*.rpm 2>/dev/null \
+                | grep -vE 'debuginfo|debugsource|dbgsym' | head -n 1)"
+fi
+
+# Absolutise BEFORE docker sees it: a relative path (e.g. --packages-dir
+# packaging, the natural invocation from the repo root) is interpreted by
+# docker as a NAMED VOLUME, which fails with "invalid characters for a local
+# volume name" and gets misreported as an infrastructure failure.
+if [[ -n "${RPM_PATH}" && "${RPM_PATH}" != /* ]]; then
+    RPM_PATH="$(cd "$(dirname "${RPM_PATH}")" && pwd)/$(basename "${RPM_PATH}")"
 fi
 
 [[ -n "${RPM_PATH}" && -r "${RPM_PATH}" ]] || \
@@ -136,7 +155,16 @@ run_install_once() {
     TMP_FILES+=("${runner}" "${runner}.log")
     {
         echo 'set -x'
+        # Stop at the FIRST failing prerequisite command. Without this, a 5xx
+        # or DNS failure on the single-origin PGDG repo RPM just continues, and
+        # the final install then dies with `nothing provides pg_cron_N` — a
+        # textbook depsolve signature, which the classifier below deliberately
+        # does NOT retry and would report as "the docs are insufficient".
+        echo 'set -e'
+        echo "trap 'st=\$?; echo \"PREREQ_EXIT=\${st}\"; exit \${st}' ERR"
         echo "${cmds}"
+        echo 'trap - ERR'
+        echo 'set +e'
         echo 'set +x'
         echo 'echo "===== dnf install (documented path) ====="'
         echo 'dnf install -y /tmp/documentdb.rpm'
@@ -149,8 +177,16 @@ run_install_once() {
         "${BASE_IMAGE}" bash /runner.sh 2>&1 | tee "${runner}.log"
 
     local status
-    status="$(grep -oE 'INSTALL_EXIT=[0-9]+' "${runner}.log" | tail -n 1 | cut -d= -f2)"
     LAST_LOG="${runner}.log"
+    # 91 = a prerequisite command itself failed. Distinct from 90 so the report
+    # can name what actually broke instead of blaming the dependency tree.
+    #
+    # ANCHOR both greps at column 0. `set -x` echoes the trap DEFINITION, whose
+    # text contains the literal "PREREQ_EXIT=", so an unanchored match fired on
+    # every single run and reported a prerequisite failure that never happened.
+    # Real markers are printed by echo at column 0; xtrace lines start with "+".
+    grep -qE '^PREREQ_EXIT=' "${runner}.log" 2>/dev/null && return 91
+    status="$(grep -oE '^INSTALL_EXIT=[0-9]+' "${runner}.log" | tail -n 1 | cut -d= -f2)"
     [[ -n "${status}" ]] || return 90   # container never reached the install
     return "${status}"
 }
@@ -162,7 +198,7 @@ run_install() {
     local label="$1" cmds="$2" status
     run_install_once "${label}" "${cmds}"
     status=$?
-    if (( status != 0 )) && ! grep -qE "${RESOLUTION_SIGNATURE}" "${LAST_LOG}" 2>/dev/null; then
+    if (( status != 0 )) && { (( status == 91 )) || ! grep -qE "${RESOLUTION_SIGNATURE}" "${LAST_LOG}" 2>/dev/null; }; then
         log "no depsolve signature in the failure — retrying once in case it was a transient mirror/registry error"
         run_install_once "${label}-retry" "${cmds}"
         status=$?
@@ -177,6 +213,8 @@ report_failure() {
     local id="$1" status="$2" doc_msg="$3"
     if (( status == 90 )); then
         fail "${id}" "the container never reached the install step (docker or network failure) — this run proves nothing either way"
+    elif (( status == 91 )); then
+        fail "${id}" "a prerequisite command from the README block failed before the install (see the failing command above) — mirror/registry trouble or a bad command in the block, NOT evidence about the dependency tree"
     elif grep -qE "${RESOLUTION_SIGNATURE}" "${LAST_LOG}" 2>/dev/null; then
         fail "${id}" "${doc_msg}"
     else
@@ -209,16 +247,23 @@ if (( RUN_NEGATIVE )); then
     elif (( neg_status == 90 )); then
         fail "NEGATIVE-CONTROL" "the container never reached the install step (docker or network failure) — this run proves nothing either way"
         tail_log
-    elif grep -q "libqhull_r" "${LAST_LOG}"; then
+    elif (( neg_status == 91 )); then
+        fail "NEGATIVE-CONTROL" "a prerequisite command failed before the install — this run proves nothing either way"
+        tail_log
+    elif ! grep -qE "${RESOLUTION_SIGNATURE}" "${LAST_LOG}" 2>/dev/null; then
+        # MUST precede the libqhull check. A download-phase failure prints the
+        # resolved transaction table, which itself lists libqhull_r from crb —
+        # so matching libqhull_r first would certify a non-depsolve failure as
+        # "issue #75 reproduces" and vouch for a suite that proved nothing.
+        fail "NEGATIVE-CONTROL" "install failed with no depsolve signature, twice — treat as infrastructure (mirror/registry), NOT as a documentation bug"
+        tail_log
+    elif grep -q "libqhull_r" "${LAST_LOG}" 2>/dev/null; then
         pass "NEGATIVE-CONTROL: without ${CRB_REPO} the install still fails on libqhull_r (issue #75 reproduces)"
-    elif grep -qE "${RESOLUTION_SIGNATURE}" "${LAST_LOG}"; then
+    else
         # It failed to resolve, but not on qhull. The suite is still meaningful,
         # yet the troubleshooting entry in packaging/README.md is now keyed on
         # the wrong error string.
-        fail "NEGATIVE-CONTROL" "install failed without ${CRB_REPO} but NOT on libqhull_r — update the troubleshooting entry in packaging/README.md to the current error"
-        tail_log
-    else
-        fail "NEGATIVE-CONTROL" "install failed with no depsolve signature, twice — treat as infrastructure (mirror/registry), NOT as a documentation bug"
+        fail "NEGATIVE-CONTROL" "install failed to resolve without ${CRB_REPO} but NOT on libqhull_r — update the troubleshooting entry in packaging/README.md to the current error"
         tail_log
     fi
 fi
