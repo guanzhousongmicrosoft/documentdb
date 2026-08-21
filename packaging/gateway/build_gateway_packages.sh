@@ -214,8 +214,10 @@ if [[ "$PACKAGE_TYPE" == "deb" ]]; then
     docker build -t "$TAG" -f "$DOCKERFILE" \
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
-    # Run the Docker container to build the packages
-    docker run --rm --env OS="$OS" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" -v "$abs_output_dir:/output" "$TAG"
+    # Run the Docker container to build the packages. SOURCE_DATE_EPOCH is
+    # forwarded so the shipped changelog.gz does not carry each build's wall
+    # clock; see the pin in .github/workflows/build_deb_packages.yml.
+    docker run --rm --env OS="$OS" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 elif [[ "$PACKAGE_TYPE" == "rpm" ]]; then
     # Build the gateway RPM via the rhel-8 / rhel-9 Dockerfile (builds the
     # Rust daemon, stages sources, runs rpmbuild, and copies the .rpm to
@@ -224,7 +226,7 @@ elif [[ "$PACKAGE_TYPE" == "rpm" ]]; then
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
     # Run the Docker container to build the packages
-    docker run --rm --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" -v "$abs_output_dir:/output" "$TAG"
+    docker run --rm --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 fi
 
 echo "Packages built successfully!!"

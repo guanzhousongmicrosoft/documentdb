@@ -8,6 +8,10 @@
 #       PG 18). Identical to the per-PR/push E2E, but on a schedule: package
 #       installs resolve live PGDG/EPEL/CRB dependencies, so this catches
 #       external repository drift that breaks users *between* our commits.
+#     - On RHEL, test-documented-prereqs.sh additionally runs the
+#       packaging/README.md prerequisite block verbatim on a STOCK EL image.
+#       The test images enable CRB themselves, so only this step can catch the
+#       documented list going insufficient (GitHub issue #75).
 #     - systemd-as-PID-1 lifecycle suite (run-systemd-e2e.sh): unit hardening,
 #       enable/start/stop of documentdb-local.target, and the container
 #       restart that stands in for a host reboot — the one surface the
@@ -107,6 +111,21 @@ jobs:
       - name: Gateway build + clean-install E2E (live dependency resolution)
         run: ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
 
+      # The paved RHEL images enable CRB in their own Dockerfiles, so they can
+      # never catch the documented prerequisite list going stale. This runs the
+      # packaging/README.md block VERBATIM on a stock EL image and then installs
+      # the .rpm just built above, with a negative control that requires the
+      # install to still fail without CRB (GitHub issue #75).
+      - name: Documented RHEL prerequisites are sufficient (stock EL host)
+        if: startsWith(matrix.os, 'rhel')
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          ./packaging/test_packages/test-documented-prereqs.sh \
+            --pg ${{ matrix.pg_version }} \
+            --el "${OS#rhel}" \
+            --packages-dir "$(pwd)/packaging"
+
   systemd-lifecycle:
     name: systemd lifecycle E2E (ubuntu24.04-pg18)
     if: github.event.schedule != '0 4 * * 0'
@@ -184,6 +203,21 @@ jobs:
 
       - name: Gateway build + clean-install E2E
         run: ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
+
+      # The paved RHEL images enable CRB in their own Dockerfiles, so they can
+      # never catch the documented prerequisite list going stale. This runs the
+      # packaging/README.md block VERBATIM on a stock EL image and then installs
+      # the .rpm just built above, with a negative control that requires the
+      # install to still fail without CRB (GitHub issue #75).
+      - name: Documented RHEL prerequisites are sufficient (stock EL host)
+        if: startsWith(matrix.os, 'rhel')
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          ./packaging/test_packages/test-documented-prereqs.sh \
+            --pg ${{ matrix.pg_version }} \
+            --el "${OS#rhel}" \
+            --packages-dir "$(pwd)/packaging"
 
   scenario-suites-deb:
     name: Scenario suites (DEB, ubuntu24.04)

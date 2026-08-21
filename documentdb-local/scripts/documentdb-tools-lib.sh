@@ -401,6 +401,195 @@ documentdb_detect_extended_rum() {
     fi
 }
 
+# ── Extension-creation guidance (shared) ────────────────────────────
+#
+# documentdb-tune pins documentdb.alternate_index_handler_name (cluster-wide)
+# from a control-file probe, but the access method it names needs per-database
+# state that only CREATE EXTENSION documentdb_extended_rum supplies — and
+# CASCADE does not pull it in. When the two disagree every index creation fails
+# with "Index access method extended_rum is not available", so any tool telling
+# an operator how to create the extension must name the extended-RUM one too.
+#
+# Single-sourced here. The gateway package banners (maintainer-scripts/gateway/
+# postinst, packaging/rpm/spec/documentdb-gateway.spec) are static duplicates —
+# they run before documentdb-postgresql-tools is necessarily installed — and
+# verify_install_banner_extension_hint in the packaged-install E2E suites fails
+# the build if they drift from this recipe.
+
+# documentdb_alternate_index_handler_extension <handler_name>: echo the
+# extension <handler_name> needs, or nothing (the built-in documentdb_rum
+# handler ships in pg_documentdb itself).
+documentdb_alternate_index_handler_extension() {
+    case "$(trim_whitespace "${1:-}")" in
+        extended_rum) printf 'documentdb_extended_rum' ;;
+        *)            printf '' ;;
+    esac
+}
+
+# documentdb_index_handler_for_extension <extension>: the reverse — echo the
+# access-method name <extension> provides, for diagnostics that name the
+# handler when it was resolved from disk. Paired with the forward direction
+# above so the mapping cannot drift.
+documentdb_index_handler_for_extension() {
+    case "$(trim_whitespace "${1:-}")" in
+        documentdb_extended_rum) printf 'extended_rum' ;;
+        *)                       printf '' ;;
+    esac
+}
+
+# documentdb_create_extension_sql [extra_extension]: the CREATE EXTENSION
+# statements, one per line, for feeding to psql. IF NOT EXISTS keeps them safe
+# to re-run on a partially created database.
+documentdb_create_extension_sql() {
+    printf 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;\n'
+    if [[ -n "${1:-}" ]]; then
+        printf 'CREATE EXTENSION IF NOT EXISTS %s CASCADE;\n' "$1"
+    fi
+    return 0
+}
+
+# documentdb_create_extension_command <pg_owner> <target_db> [extra_extension]
+# [conn_spec]: the copy-pasteable psql command. Separate -c args keep each
+# statement in its own transaction.
+#
+# conn_spec goes verbatim after "psql" — "--cluster N/name" on Debian, or
+# "-h DIR -p PORT" anywhere. Pass it whenever you have it: without it psql
+# follows the default socket and port, which on a multi-cluster host (or the
+# stand-alone instance on port 9700+major) is a different cluster than the
+# caller meant.
+#
+# pg_documentdb_extended_rum errors out of _PG_init unless already in
+# shared_preload_libraries, so print this only AFTER the restart instruction.
+documentdb_create_extension_command() {
+    local owner="${1:-postgres}"
+    local target_db="${2:-postgres}"
+    local extra="${3:-}"
+    local conn_spec="${4:-}"
+    local cmd
+    cmd="sudo -u ${owner} psql"
+    [[ -n "${conn_spec}" ]] && cmd+=" ${conn_spec}"
+    cmd+=" -d ${target_db} -v ON_ERROR_STOP=1"
+    cmd+=' -c "CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;"'
+    if [[ -n "${extra}" ]]; then
+        cmd+=" -c \"CREATE EXTENSION IF NOT EXISTS ${extra} CASCADE;\""
+    fi
+    printf '%s' "${cmd}"
+}
+
+# documentdb_pg_sharedir <major>: echo the PostgreSQL share directory, or
+# return non-zero.
+#
+# Callers decide what a failure means, and both answers are defensible:
+# documentdb-tune's resolve_pg_sharedir swallows the same failure and so does
+# NOT pin the handler, meaning a caller that reads the failure as "no extended
+# RUM" stays consistent with the config tune wrote. What must not happen is the
+# two sides disagreeing in either direction.
+documentdb_pg_sharedir() {
+    local major="$1" candidate="" sharedir=""
+    while IFS= read -r candidate; do
+        if [[ -x "${candidate}/pg_config" ]]; then
+            sharedir="$("${candidate}/pg_config" --sharedir 2>/dev/null)" || sharedir=""
+            break
+        fi
+    done < <(documentdb_pg_bindir_candidates "${major}")
+    [[ -n "${sharedir}" ]] || return 1
+    printf '%s' "${sharedir}"
+}
+
+# documentdb_read_alternate_index_handler <psql> <socket_dir> <port> <db>
+# [run_as_user]: echo the live documentdb.alternate_index_handler_name.
+# Returns 0 if the GUC exists (an empty value is legitimate — that is its
+# default), 2 if it does not exist, 1 if it could not be read.
+#
+# The 0-with-empty vs 2 split is the point and is easy to lose:
+# current_setting(..., true) yields NULL for an unknown GUC and '' for a known
+# one at its default, and psql -tA renders both as an empty line — hence the
+# sentinel. Unknown means pg_documentdb is not preloaded yet, i.e. after
+# documentdb-tune wrote the config and before PostgreSQL restarted. Merging the
+# two states breaks both ways: as "no handler" the advice silently drops back
+# to the single-statement recipe exactly when it is needed, and as "handler
+# pinned" it tells an operator on an untuned cluster to create an extension
+# whose library is not preloaded.
+#
+# Prefer documentdb_required_index_extension unless you want the raw GUC.
+documentdb_read_alternate_index_handler() {
+    local psql_bin="$1" socket_dir="$2" port="$3" target_db="$4" as_user="${5:-}"
+    # Function-local, not a readonly global: re-sourcing this library would
+    # abort on a readonly reassignment under set -e.
+    local absent_sentinel='__documentdb_guc_absent__'
+    local sql="SELECT coalesce(current_setting('documentdb.alternate_index_handler_name', true), '${absent_sentinel}');"
+    local out=""
+    if [[ -n "${as_user}" ]] && declare -F run_as_user >/dev/null 2>&1; then
+        out="$(run_as_user "${as_user}" "${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -v ON_ERROR_STOP=1 -c "${sql}" 2>/dev/null)" || return 1
+    else
+        out="$("${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -v ON_ERROR_STOP=1 -c "${sql}" 2>/dev/null)" || return 1
+    fi
+    out="$(trim_whitespace "${out}")"
+    [[ "${out}" == "${absent_sentinel}" ]] && return 2
+    printf '%s' "${out}"
+    return 0
+}
+
+# documentdb_read_pg_major <psql> <socket_dir> <port> <db> [run_as_user]: echo
+# the connected server's major version, or nothing. For tools that hold a
+# working connection but no configured major (documentdb-gateway-admin resolves
+# socket and port from state files) and need it to locate the share directory.
+documentdb_read_pg_major() {
+    local psql_bin="$1" socket_dir="$2" port="$3" target_db="$4" as_user="${5:-}"
+    local sql="SELECT current_setting('server_version_num')::int / 10000;"
+    local out=""
+    if [[ -n "${as_user}" ]] && declare -F run_as_user >/dev/null 2>&1; then
+        out="$(run_as_user "${as_user}" "${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -v ON_ERROR_STOP=1 -c "${sql}" 2>/dev/null)" || return 0
+    else
+        out="$("${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -v ON_ERROR_STOP=1 -c "${sql}" 2>/dev/null)" || return 0
+    fi
+    out="$(trim_whitespace "${out}")"
+    [[ "${out}" =~ ^[0-9]+$ ]] && printf '%s' "${out}"
+    return 0
+}
+
+# documentdb_required_index_extension <psql> <socket_dir> <port> <db>
+# [run_as_user] [pg_major]: echo the extension <db> needs for index creation to
+# work, or nothing.
+#
+# Prefers the live GUC — what the running cluster actually demands — and falls
+# back to the on-disk probe when it is unreadable or not loaded yet. The
+# fallback is the same probe documentdb-tune used to pin the handler, so the
+# two agree.
+#
+# The fallback assigns HAS_EXTENDED_RUM via documentdb_detect_extended_rum. No
+# caller reads it afterwards today, but a tool with its own HAS_EXTENDED_RUM
+# state (documentdb-tune, documentdb-setup) must re-derive it after calling.
+documentdb_required_index_extension() {
+    local psql_bin="$1" socket_dir="$2" port="$3" target_db="$4"
+    local as_user="${5:-}" major="${6:-}"
+    local handler="" rc=0 sharedir=""
+
+    handler="$(documentdb_read_alternate_index_handler "${psql_bin}" "${socket_dir}" \
+        "${port}" "${target_db}" "${as_user}")" || rc=$?
+
+    if (( rc == 0 )); then
+        # GUC exists, so the running cluster is authoritative — including when
+        # it is empty, which means no alternate handler.
+        documentdb_alternate_index_handler_extension "${handler}"
+        return 0
+    fi
+
+    # rc 1 (unreadable) or 2 (absent — not preloaded yet). The control file is
+    # what this cluster will demand after its next restart.
+    if [[ -n "${major}" ]] && sharedir="$(documentdb_pg_sharedir "${major}")"; then
+        documentdb_detect_extended_rum "${sharedir}"
+        if [[ "${HAS_EXTENDED_RUM}" == "true" ]]; then
+            printf 'documentdb_extended_rum'
+        fi
+    fi
+    return 0
+}
+
 # documentdb_tune_fragment_path <major> <cluster>: echo the per-cluster
 # fragment documentdb-tune writes on Debian split layouts (picked up by the
 # createcluster.d hook's include_if_exists). Shared so documentdb-setup can

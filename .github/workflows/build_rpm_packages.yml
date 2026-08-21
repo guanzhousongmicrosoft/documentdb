@@ -105,6 +105,25 @@ jobs:
           echo "DOCUMENTDB_VERSION=${{ steps.version.outputs.version }}" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # Most copies of the RHEL prerequisite commands are now generated from the
+      # BEGIN/END:el-prereqs block in packaging/README.md, but three cannot be:
+      # the two RPM %description blocks are baked in at package build time, and
+      # packaging-design.md is prose-of-record. Assert here that those still
+      # carry every documented prerequisite -- otherwise `dnf info` would hand
+      # users a stale recipe that nightly CI never exercises (GitHub issue #75).
+      # Network-free, runs in about a second.
+      # One cell only. The check is matrix-invariant and network-free, and the
+      # rpmlint step below is gated the same way to avoid a duplicate report
+      # four times per run.
+      #
+      # NOTE: this workflow's `push` trigger carries `paths-ignore: '**/*.md'`,
+      # so a README-only commit pushed straight to main/release never runs this.
+      # Pull requests are not path-filtered, so the PR path does gate it; the
+      # nightly suite is the backstop for direct pushes.
+      - name: Check un-generatable prerequisite copies match packaging/README.md
+        if: matrix.arch == 'amd64' && matrix.pg_version == env.PAVED_PG_MAJOR
+        run: ./packaging/extract-el-prereqs.sh --check-copies
+
       - name: Build RPM Package
         run: |
           # Build the extension .rpm only. `build_packages.sh

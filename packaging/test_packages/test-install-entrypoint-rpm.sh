@@ -34,6 +34,51 @@ for f in /usr/pgsql-${POSTGRES_VERSION}/lib/pg_documentdb.so \
 done
 echo "✓ packaged extension artifacts present"
 
+# ── libbson co-installability ─────────────────────────────────────────────
+# libbson is linked statically, so the package must ship no libbson files and
+# Provide no libbson capability: both collide with EPEL's libbson, which this
+# image enables and packaging/README.md tells users to enable.
+echo "=== libbson co-installability ==="
+DOCDB_PKG="postgresql${POSTGRES_VERSION}-documentdb"
+
+if rpm -ql "${DOCDB_PKG}" | grep -i 'libbson'; then
+    echo "✗ package ships the libbson files above; they collide with EPEL's"
+    exit 1
+fi
+echo "✓ package ships no libbson files"
+
+if rpm -q --provides "${DOCDB_PKG}" | grep -i 'libbson'; then
+    echo "✗ package Provides the libbson capability above, from a private build"
+    exit 1
+fi
+echo "✓ package advertises no libbson Provides"
+
+# No libbson is installed yet, so a dynamic dependency shows up here either as
+# a resolved EPEL path or as "not found" -- one grep catches both.
+for so in $(rpm -ql "${DOCDB_PKG}" | grep '\.so$'); do
+    if ldd "${so}" 2>&1 | grep -i 'libbson'; then
+        echo "✗ ${so} links libbson dynamically but none is packaged"
+        exit 1
+    fi
+done
+echo "✓ no packaged .so needs a shared libbson"
+
+# Both transaction directions against the real EPEL package.
+if ! dnf install -y libbson; then
+    echo "✗ 'dnf install libbson' failed with ${DOCDB_PKG} installed"
+    exit 1
+fi
+echo "✓ EPEL libbson installs onto a host that already has ${DOCDB_PKG}"
+
+# --noautoremove so dnf collects nothing while the extension is briefly gone.
+dnf remove -y --noautoremove "${DOCDB_PKG}"
+if ! dnf install -y /tmp/documentdb.rpm; then
+    echo "✗ installing ${DOCDB_PKG} over an existing libbson failed"
+    exit 1
+fi
+echo "✓ ${DOCDB_PKG} installs onto a host that already has EPEL libbson"
+echo "=================================="
+
 # The RPM no longer ships a source tree (see the note in the spec's %install).
 # `make check` below therefore runs against the REPO COPY this test image was
 # built from — /usr/src/documentdb comes from the test Dockerfile's
@@ -75,15 +120,10 @@ else
     exit 1
 fi
 
-# Test libbson pkg-config
-if pkg-config --exists libbson-static-1.0; then
-    echo "✓ libbson-static-1.0 pkg-config available"
-else
-    echo "✗ libbson-static-1.0 pkg-config not found"
-    echo "Available pkg-config packages with 'bson':"
-    pkg-config --list-all | grep -i bson || echo "None found"
-    exit 1
-fi
+# The `pkg-config --exists libbson-static-1.0` check that used to sit here is
+# gone with the .pc that satisfied it. It guarded nothing: both component
+# Makefiles override the PGXS `check` target to run against the already-installed
+# extension, so nothing below recompiles C.
 
 # Test pg_regress
 PGXS=$($PG_CONFIG --pgxs)
