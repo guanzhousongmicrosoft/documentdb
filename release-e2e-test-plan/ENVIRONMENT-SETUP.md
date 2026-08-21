@@ -84,6 +84,7 @@ git show v0.116-0:documentdb-local/scripts/emulator_entrypoint.sh   # etc.
 | `PG_VERSION_USED` | `17` | Per-tag. |
 | `ALLOW_EXTERNAL_CONNECTIONS` | `false` | Exposes the internal PG port directly when `true`. |
 | `INIT_DATA` / `INIT_DATA_PATH` | *(unset)* / `/init_doc_db.d` | Sample-data / custom-init hooks. |
+| `PGOPTIONS` | *(unset)* | **Not in `--help`.** Read from the environment and word-split into the backend server-start argv; the entrypoint sets `-e` here itself for `--allow-external-connections`. See finding-seed C9. |
 
 **Entrypoint flags** (each overrides the matching env var): `--cert-path`,
 `--key-file`, `--data-path`, `--documentdb-port`, `--enable-telemetry`,
@@ -223,6 +224,9 @@ reportable result too.
 | PK1 | T09 | RPM PostGIS dep is `postgis36_N` (vs DEB `postgis-3`) — both must resolve from PGDG. |
 | PK2 | T10/T12 | Packaged gateway supports **local peer/trust PG only**; remote/TCP-password PG unsupported this release. |
 | U1 | T12 | `--enable-telemetry` help says "Azure Application Insights", but telemetry is provider-neutral **OTLP/OpenTelemetry**. |
+| C9 | T03/T07 | `PGOPTIONS` is read from the environment and word-split into the server-start argv (that is how `--allow-external-connections` passes `-e`). Can a user set it on `docker run` to inject backend server arguments **behind** the validated flag surface? |
+| C10 | T16 | `--disable-extended-rum` drops `-r` from the server start, so extended RUM is on by default. Does the flag observably change the installed AM, and is toggling it on an existing volume safe in both directions? |
+| FG1 | T16 | Do the real GUC defaults match what the CHANGELOG claims for the 0.116 (on) and 0.115 (off) feature flags? |
 
 ---
 
@@ -243,3 +247,139 @@ The release-prep commit (`66e9e118`) hardens the container. Confirm these
   tag must be present.
 - **Backend-contract gate #650 (T04).** The gateway must not emit disallowed
   backend-contract SQLSTATEs on the `getParameter` discovery path.
+- **RUM vacuum page-pruning race (T16).** `documentdb_rum.prune_rum_empty_pages`
+  now revalidates that the left/right siblings still bracket the target after
+  re-locking (a concurrent left-sibling split could otherwise drop pages from the
+  leaf chain), zeroes the retained high-key tuple's posting-tree pointer, and
+  takes posting-tree root cleanup locks conditionally up front. This is the
+  riskiest change in the release: verify it under concurrent vacuum + churn.
+
+---
+
+## 8. Known-failure baseline — the oracle every track must consult
+
+**Read this before filing anything.** The repository already carries an
+authoritative list of what does not work, and the plan is worthless without it:
+workers who do not consult it will re-file known gaps as new findings and bury
+the rollup.
+
+`documentdb-local/functional-tests/` runs the pinned upstream
+`documentdb/functional-tests` wire-protocol suite (**~50k tests**, pinned by
+digest in `config/image.yml`) under a **known-failures xfail model**. For the
+OSS gateway that this release ships, at the tag:
+
+| List | Entries | Applied as |
+|------|--------:|-----------|
+| `config/oss_ci_failing_tests.txt` | **15,422** | `xfail(strict=True)` — known-failing |
+| `config/oss_ci_flaky_tests.txt` | **1,898** | `xfail(strict=False)` — known-flaky |
+| `config/ci_crash_tests.txt` | **6** | `skip` — **engine crashers, never executed** |
+
+There is no allowlist: the full suite runs, the gate fails on any residual
+`failed`/`error` **and** on any `XPASS(strict)` (a listed expected-failure that
+started passing). Take the lists **from the release tag**, not from `main` —
+the baseline was refreshed after the tag.
+
+How to use it:
+
+- **Tracks 04, 12, 13, 15:** before filing a missing/divergent feature, grep the
+  failing list. If it is listed, it is **known** — record it as
+  "known, on the baseline" and move on. Only unlisted behavior is reportable.
+- **Track 04** runs the suite itself against the published image (see that
+  prompt) and reports the **diff against the baseline**, which is the single
+  most informative protocol result this plan can produce.
+- **Track 07** treats `ci_crash_tests.txt` as a pre-existing crash surface: those
+  six tests crash the engine and are skipped rather than fixed.
+- **The rollup** must state explicitly whether shipping with 15,422 known
+  failures and 6 skipped engine-crashers is accepted for this release. That is a
+  release-owner decision, not a tester's.
+
+Run it against the **published** image (not a locally built one):
+```bash
+documentdb-local/functional-tests/scripts/run-functional-tests.sh \
+  --use-existing-documentdb-image ghcr.io/documentdb/documentdb/documentdb-local:pg17-0.116.0 \
+  --engine-name oss --results-dir ./ft-results
+```
+The runner also takes `--connection-string`, `--workers`, `--test`,
+`--documentdb-port/-user/-password`, `--pg-version` and `--keep-documentdb`.
+
+### Other automated gates already in the tree
+
+These exist and are cheap; cite them rather than re-deriving their results:
+
+| Asset | Covers | Track |
+|-------|--------|-------|
+| `documentdb-local/scripts/documentdb_local_tests/test_image.py` | image-level assertions | T01 |
+| `.../backend_contract.py` + `test_backend_contract.py` | the #650 SQLSTATE deny-list | T04 |
+| `.../catalog_contract.py` + `test_catalog_contract.py` | catalog contract | T04/T16 |
+| `.../test_emulator_entrypoint.py` | entrypoint flag/env handling | T03 |
+| `.../test_documentdb_setup.py` | `documentdb-setup` standalone wizard | T10 |
+| `.../test_gateway_wrapper.py` | gateway wrapper | T10 |
+| `documentdb-local/scripts/run_documentdb_local_tls_tests.sh` | container TLS paths | T06 |
+| `documentdb-local/test-init-data/` | init-data hooks, incl. invalid data | T02 |
+| `pg_documentdb_gw/documentdb_tests/` | per-command gateway integration tests | T04/T15 |
+| `pg_documentdb/src/test/regress/` (134 suites) | extension SQL behavior | T08/T09/T15 |
+
+The regress suites are the highest-value **packaging** check available: run them
+against a **package-installed** extension, not the build tree.
+
+---
+
+## 9. Feature flags / GUCs — how to read and set them
+
+The 0.116 change set is overwhelmingly **feature-flagged**, and several flags
+ship *enabled by default while pending stabilization*. Nothing in this plan is
+meaningful without knowing which state you tested. There is **no entrypoint flag
+for GUCs** — go to the backend PostgreSQL:
+
+```bash
+# read
+docker exec ddb psql -p 9712 -U documentdb -d postgres -X -tA \
+  -c "SELECT name, setting, boot_val FROM pg_settings WHERE name LIKE 'documentdb%' ORDER BY 1;"
+# set + reload
+docker exec ddb psql -p 9712 -U documentdb -d postgres -X \
+  -c "ALTER SYSTEM SET documentdb.enable_group_by_dynamic_streaming = off;" \
+  -c "SELECT pg_reload_conf();"
+```
+(`9712` is `POSTGRESQL_PORT`; `documentdb` is `OWNER`. With
+`--allow-external-connections true` and `-p 9712:9712` you can do this from the
+host instead. Confirm which database holds the DocumentDB catalog before
+assuming `postgres`.)
+
+Flags this release turns **on** by default (verify — seed FG1):
+`documentdb.enable_group_by_dynamic_streaming`,
+`enableSortPushToAccumulatorWithPrefix`,
+`documentdb.enable_composite_reduced_correlated_bounds_planning`,
+`documentdb.enable_failure_on_parallel_index_arrays_for_metadata_tracking`,
+`enable_min_max_skip_null_values`,
+`documentdb.enableNonBlockingUniqueIndexBuild`, schema validation.
+
+Flags shipped **off** (opt-in; a failure behind one is not a default-config
+blocker, but say so): `enableProjectPushUpBeforeUnwindWithGroup`,
+`enable_single_pass_posting_tree_vacuum`, `enable_targeted_posting_tree_pruning`,
+`documentdb_rum.enable_emit_reuse_page_on_recycle`.
+
+Track 16 owns the full inventory and the flag-off correctness matrix.
+
+---
+
+## 10. Known plan risks and accepted gaps
+
+State these in the rollup rather than discovering them mid-run:
+
+- **arm64 execution.** Tracks 01/08/09/15 claim both architectures. Decide up
+  front whether arm64 runs on **native hardware** or under **QEMU emulation** and
+  record which — emulated arm64 packaging and performance results degrade
+  silently and are not evidence. If no arm64 host is available, mark arm64
+  **untested** rather than implying coverage.
+- **Runtime depth on PG 15/16.** The image ships pg15–pg18 but only Track 13 §6
+  and a Track 04 slice touch 15/16. Durability, auth, and TLS are validated on
+  PG17 (+PG18) only. That is a deliberate risk-based cut — record it as an
+  accepted gap, not as coverage.
+- **Track 14 baseline availability.** Every upgrade scenario needs a prior
+  release to upgrade *from*. GitHub Actions artifacts expire (~90 days) and older
+  `documentdb-local` tags may not exist under this repository path. **Confirm the
+  0.113/0.114 image tags and package artifacts are actually obtainable before
+  dispatching Track 14**; if they are not, the track is BLOCKED, not FAILED, and
+  the coordinator needs to know on day one.
+- **Tracks 08/09/10 need real hosts.** Ubuntu 24.04 and Rocky 9, both
+  architectures, plus one SELinux-enforcing host. Confirm they exist before fan-out.

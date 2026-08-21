@@ -2,7 +2,7 @@
 
 **Coordinator:** <who> · **Compiled:** <UTC> · **Status:** DRAFT (fill after Phase C)
 
-This is the consolidated verdict across all 14 tracks. Fill it in Phase C after the
+This is the consolidated verdict across all 16 tracks. Fill it in Phase C after the
 per-track reports land. De-duplicate findings (the same issue may surface in
 several tracks — record it once, list the tracks that hit it).
 
@@ -63,6 +63,9 @@ For every seed in `ENVIRONMENT-SETUP.md §6`, the verdict from the owning track:
 | PK1 | T09 | | |
 | PK2 | T10/T12 | | |
 | U1 | T12 | | |
+| C9 | T03/T07 | | |
+| C10 | T16 | | |
+| FG1 | T16 | | |
 
 ---
 
@@ -74,6 +77,7 @@ For every seed in `ENVIRONMENT-SETUP.md §6`, the verdict from the owning track:
 | #61 bare-positional spin | T03 | | |
 | cosign legacy `.sig` | T01 | | |
 | #650 backend-contract on getParameter | T04 | | |
+| RUM vacuum page-pruning race | T16 | | |
 
 ---
 
@@ -95,6 +99,43 @@ For every seed in `ENVIRONMENT-SETUP.md §6`, the verdict from the owning track:
 | 12 UX & docs | reports/track-12-*.md | | | | | |
 | 13 Compatibility | reports/track-13-*.md | | | | | |
 | 14 Upgrade & migration | reports/track-14-*.md | | | | | |
+| 15 Data-plane features | reports/track-15-*.md | | | | | |
+| 16 Index, storage & flags | reports/track-16-*.md | | | | | |
+
+---
+
+## Known-failure baseline (must be answered explicitly)
+
+Per `ENVIRONMENT-SETUP.md §8`, the release ships against a curated baseline. The
+release owner has to accept these knowingly — they are not test results:
+
+| Item | At tag | Accepted for release? |
+|------|-------:|----------------------|
+| `oss_ci_failing_tests.txt` (known-failing) | 15,422 | |
+| `oss_ci_flaky_tests.txt` (known-flaky) | 1,898 | |
+| `ci_crash_tests.txt` (engine crashers, skipped) | 6 | |
+| Functional-suite run vs baseline: new failures | _<n>_ | |
+| Functional-suite run vs baseline: `XPASS(strict)` | _<n>_ | |
+
+---
+
+## Fix verification (Phase D)
+
+For every finding that was fixed, re-run the report's own repro against the
+**rebuilt** artifact. An unverified fix does not clear its finding.
+
+| ID | Sev | Fix (PR/commit) | Re-tested on (digest / package) | Verdict |
+|----|-----|-----------------|---------------------------------|---------|
+| F-01 | S? | | | CONFIRMED-FIXED / STILL-BROKEN / NOT-RETESTED |
+
+---
+
+## Coverage actually achieved
+
+Tracks not run, checks skipped, and platforms not covered — including whether
+arm64 was native or emulated, and which PG majors got depth beyond a smoke slice
+(`ENVIRONMENT-SETUP.md §10`). An unrun track reads as a pass unless it is listed
+here.
 
 ---
 

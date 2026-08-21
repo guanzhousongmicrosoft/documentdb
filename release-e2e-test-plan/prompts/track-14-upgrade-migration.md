@@ -16,6 +16,23 @@ extension state, and a clear path.
 Coordinate with Tracks 08/09 for the package-manager mechanics; this track owns the
 **data and extension-state** correctness.
 
+## Step 0 — confirm you have a baseline (do this first, report immediately)
+
+Every scenario below needs a prior release to upgrade **from**, and that is the
+single most likely reason this track fails to run. Before anything else,
+establish and record:
+
+- Which older `documentdb-local` tags actually exist in the registry under this
+  repository path (`0.113`/`0.114`, per PG major), with digests.
+- Whether the prior-release `.deb`/`.rpm` artifacts are still downloadable —
+  GitHub Actions artifacts expire (~90 days), so an older release's build run may
+  no longer serve them. Fallbacks: the downstream `documentdb.io` apt/yum repos,
+  or building the baseline from the older tag.
+
+If a baseline cannot be obtained, the affected scenarios are **⛔ BLOCKED, not
+PASSED** — tell the coordinator immediately rather than at report time, because a
+release with an untested upgrade path is a release-owner decision.
+
 ## What to test (checklist)
 
 1. **Container image upgrade, same volume.** Start an older image on a named volume,
@@ -59,6 +76,23 @@ Coordinate with Tracks 08/09 for the package-manager mechanics; this track owns 
    mid-way. Restart. Confirm the system recovers to a consistent state (either fully
    old or fully new, never a corrupt in-between). Coordinate crash mechanics with
    Track 02.
+
+9. **TOAST-compression rollback hazard (specific, and already flagged in the
+   code).** The image applies TOAST compression through an include fragment
+   written under `GATEWAY_HOME`, which is image-ephemeral. The entrypoint itself
+   warns that after an image rollback the include line dangles and "rolling this
+   volume back to an older image may fail to start." Reproduce it: run 0.116 with
+   `--toast-compression lz4` on a volume, then start an **older** image on that
+   same volume. Confirm the failure is clean and self-explanatory rather than a
+   cryptic PG start error, and that the documented recovery works. This is the
+   concrete instance of check 5. Coordinate with Track 16 §10.
+10. **Legacy index metadata.** 0.116 changes per-path multikey marking and
+    rejects parallel arrays on metadata-backed composite indexes. An index
+    **built on the old version** carries the old metadata. After upgrading,
+    confirm such an index still returns correct results — compare index-path and
+    sequential-scan answers for the same predicates — or that a rebuild is
+    required *and documented*. A silently-wrong legacy index is **S1**;
+    Track 16 §9 has the integrity oracle.
 
 ## Expected results
 In-place image and extension upgrades preserve all data, indexes, and validators;

@@ -73,6 +73,30 @@ setup). Treat both as attacker-reachable.
     of the gateway doesn't corrupt data (ties to Track 02) and that limits produce
     clean failures, not corruption.
 
+11. **The known crash surface.** `documentdb-local/functional-tests/config/ci_crash_tests.txt`
+    lists **6 engine-crasher tests** that CI *skips* rather than runs, because an
+    xfailed crasher would crash the backend and cascade connection errors across
+    every concurrent test. These are known, reachable, wire-level inputs that take
+    the engine down. Read them, reproduce them against your own SUT, and
+    characterise each: is it reachable **post-auth only**, or **pre-auth**? Does it
+    kill the backend for every other connected client (a shared-instance DoS) or
+    only the caller's session? Does the data survive the crash? Skipping a
+    crasher in CI is a test-infrastructure decision, not a security assessment —
+    this is the security assessment. A pre-auth reachable engine crash is **S1**.
+12. **Default egress.** With default settings (`ENABLE_TELEMETRY=false`), confirm
+    the container opens **no outbound connections**. Watch the bridge with
+    `tcpdump` (or a monitored egress gateway) through startup, idle, and a short
+    workload. Then repeat with `--enable-telemetry true` and record exactly where
+    it connects. Undisclosed egress from a default install is **S2**.
+13. **`PGOPTIONS` injection (finding-seed C9).** The entrypoint word-splits the
+    environment's `PGOPTIONS` into the backend server-start argv, bypassing the
+    validation every documented flag goes through. Track 03 characterises it;
+    you weaponise it. Can `docker run -e PGOPTIONS=...` open the backend to the
+    network, change authentication, load a library, or otherwise reach a state
+    the flag surface refuses? Anything that reproduces a security-relevant flag
+    without that flag is **S2**; anything that exceeds the documented flag
+    surface entirely is **S1/S2** depending on reachability.
+
 ## Rules of engagement
 - Only your own SUT. No scanning/attacking anything else.
 - Reproduce every claimed vuln with a concrete PoC (commands + output).

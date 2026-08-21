@@ -75,6 +75,24 @@ and `REPORT-TEMPLATE.md`. **Write** to `reports/track-03-container-config-entryp
     (custom port + username + init-data-path + allow-external + toast-compression)
     must either start correctly or fail with one clear message — never partially.
 
+12. **`--disable-extended-rum`.** Inventoried in `ENVIRONMENT-SETUP §2` and easy
+    to forget. Confirm it is accepted, that the container starts, and that the
+    setting is observable at runtime (it drops `-r` from the backend server
+    start, so extended RUM is **on** by default). Depth — AM selection, result
+    equivalence, volume toggling both ways — belongs to Track 16 (seed C10); here
+    just prove the flag is wired and does not half-start the container.
+13. **`PGOPTIONS` back-door (finding-seed C9).** The entrypoint reads `PGOPTIONS`
+    **from the environment** and word-splits it into the backend server-start
+    argv — it is the channel the entrypoint itself uses to pass `-e` for
+    `--allow-external-connections`. It is not documented in `--help` and appears
+    in no validation path. Determine empirically what
+    `docker run -e PGOPTIONS="..." IMG ...` can do: can a user reach backend
+    server arguments the flag surface deliberately gates (external connections
+    among them), bypassing the validation every other setting goes through? An
+    unvalidated env channel that reaches server argv is at least S3, and **S2 if
+    it reproduces the effect of a security-relevant flag** without that flag.
+    Hand whatever you find to Track 07.
+
 ## Expected results
 Invalid inputs are rejected **before** "ready"; #61 positional exits fast; reserved
 usernames rejected; the C3/C4/C5 seeds get definitive empirical verdicts.

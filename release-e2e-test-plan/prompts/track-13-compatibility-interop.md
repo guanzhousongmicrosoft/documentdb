@@ -57,6 +57,16 @@ client.
    works, and whether very new or very old drivers are rejected cleanly. Document
    the supported driver-version floor.
 
+10. **Build the feature table from the baseline, not from guesswork.** The
+    supported-vs-not table in your report must be reconciled against the
+    known-failure baseline (`ENVIRONMENT-SETUP §8`): 15,422 upstream functional
+    tests are already listed as expected-failures for this gateway, and that list
+    is the authoritative statement of what MongoDB compatibility does not extend
+    to. Anything you observe as "not supported" that is **already listed** is
+    known — cite it. Anything **not** listed is a real finding. Deep feature
+    coverage (vector, geo, text, collation, RBAC, sharding, admin commands) is
+    Track 15's; stay on driver and tooling behavior here.
+
 ## Expected results
 Common drivers with default configs connect and work; tooling round-trips; behavior
 is consistent across PG majors and across drivers; unsupported features fail

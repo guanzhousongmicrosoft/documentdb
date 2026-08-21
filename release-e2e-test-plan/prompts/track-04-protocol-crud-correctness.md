@@ -21,6 +21,38 @@ Do this first and report the result immediately, before the rest of the track:
 2. `insertOne` + `countDocuments` + `find` round-trip over `mongosh`.
 3. Report PASS/FAIL. **If FAIL, this is an S1 and the coordinator halts the fan-out.**
 
+## PHASE-A2 — the pinned functional suite (do this before the checklist)
+
+This is the highest-value protocol result the plan can produce, and it is
+already built: `documentdb-local/functional-tests/` runs the pinned upstream
+wire-protocol suite (**~50k tests**) under a known-failures xfail model. Run it
+against the **published** image — not a locally built one:
+
+```bash
+documentdb-local/functional-tests/scripts/run-functional-tests.sh \
+  --use-existing-documentdb-image ghcr.io/documentdb/documentdb/documentdb-local:pg17-0.116.0 \
+  --engine-name oss --results-dir ./ft-results
+```
+
+Take the baseline lists **from the release tag** (`ENVIRONMENT-SETUP §8`), not
+from `main` — they were refreshed after the tag. Report the **diff**, which is
+the actual deliverable:
+
+- **Residual `failed`/`error`** (not on the failing list) — a regression. S1/S2.
+- **`XPASS(strict)`** — a listed known-failure that now passes. Not a defect, but
+  the baseline is stale and the gate will fail; report the list.
+- **Skipped engine-crashers** — confirm the 6 entries in `ci_crash_tests.txt` are
+  still skipped and hand them to Track 07 as a known crash surface.
+
+If the suite cannot be run (no runner, no network, suite image unavailable), say
+so explicitly and mark it ⛔ — do not silently substitute the hand-written
+checklist for 50k tests.
+
+**Everything below is the supplement, not the substitute.** It targets the
+0.116-specific changes and driver behavior the suite does not cover. Before
+filing any gap found by hand, grep the failing list: if it is listed, it is
+known — write "known, on the baseline" and move on.
+
 ## What to test (checklist)
 
 1. **Handshake / discovery.** Capture the connect sequence a driver issues
@@ -33,7 +65,11 @@ Do this first and report the result immediately, before the rest of the track:
    deny-list gate for exactly this). Scan container logs during a normal session
    for backend-contract errors; any disallowed SQLSTATE on the discovery path is
    S2 (it is the class of bug #650 was about). Note the documented difference under
-   `--start-pg false` (raw PG undefined-function error) if you can test it.
+   `--start-pg false` (raw PG undefined-function error) if you can test it. The
+   deny-list itself and its unit tests live in
+   `documentdb-local/scripts/documentdb_local_tests/backend_contract.py`; the
+   sibling `catalog_contract.py` covers the catalog contract — run both against
+   the published image rather than re-deriving them.
 3. **CRUD matrix.** For a representative collection: `insertOne`/`insertMany`,
    `find` with operators (`$eq/$gt/$in/$regex/$exists/$elemMatch`),
    `updateOne/Many` (`$set/$inc/$push/$pull/$addToSet`), `replaceOne`, upserts,

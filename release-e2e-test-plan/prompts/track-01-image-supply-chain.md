@@ -61,6 +61,21 @@ find every place a consumer could be misled about what they are running.
     wall-clock. You cannot fully rebuild, but note whether the provenance *claims*
     reproducibility and whether the evidence is consistent.
 
+11. **License & attribution compliance.** The image bundles third-party code with
+    distinct licenses (Rust crates, PostgreSQL, PostGIS, pgvector, RUM). Confirm
+    the shipped image carries the required license/`NOTICE` material and that the
+    SBOM's licence set contains nothing incompatible with how the image is
+    distributed. A missing attribution file is S3; a licence conflict is S2 and a
+    release-owner decision.
+12. **No default egress.** Start the container with default settings on an
+    isolated network and watch for outbound connections (`--network` with a
+    monitored gateway, or `tcpdump` on the bridge) for a few minutes of idle plus
+    a short workload. With `ENABLE_TELEMETRY=false` the image should phone home to
+    nothing. Any unexpected egress is **S2** and goes to Track 07 as well.
+13. **Reuse the in-tree image test.** `documentdb-local/scripts/documentdb_local_tests/test_image.py`
+    already asserts image-level properties. Run it against the **published** image
+    and report pass/fail rather than re-deriving what it covers.
+
 ## Expected results
 Signatures verify; wrong-param verify fails; `.sig` present; labels internally
 consistent except the known `revision` drift (P1) to confirm; both arches run;

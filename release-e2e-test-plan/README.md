@@ -33,7 +33,7 @@ setup doc was regenerated from the actual build artifacts for this release.
 
 ## 1. How the work is structured
 
-The plan is split into **14 tracks**. Each track is one self-contained prompt in
+The plan is split into **16 tracks**. Each track is one self-contained prompt in
 [`prompts/`](prompts/). A track owns a coherent slice of risk, sets up its own
 SUT, runs its checks, and writes one report into [`reports/`](reports/).
 
@@ -53,14 +53,18 @@ SUT, runs its checks, and writes one report into [`reports/`](reports/).
 | 12 | [UX & documentation fidelity](prompts/track-12-ux-docs.md) | Both | Help text, error messages, docs vs reality |
 | 13 | [Compatibility & interoperability](prompts/track-13-compatibility-interop.md) | Both | Driver matrix, tool clients, PG-version parity |
 | 14 | [Upgrade & migration](prompts/track-14-upgrade-migration.md) | Both | Cross-version data & extension upgrade |
+| 15 | [Data-plane feature matrix](prompts/track-15-data-plane-features.md) | Both | Vector, geo, text, collation, RBAC, sharding, admin cmds |
+| 16 | [Index, storage & feature flags](prompts/track-16-index-storage-flags.md) | Image | RUM vacuum races, index integrity, GUC defaults, dump/restore |
 
-Tracks 01–07 + 11 need only a container runtime (Docker/Podman). Tracks 08–10
-need Ubuntu 24.04 and RHEL/Rocky 9 hosts (or VMs/containers). Tracks 12–14 use
-whatever the track prompt specifies.
+Tracks 01–07, 11 and 16 need only a container runtime (Docker/Podman). Tracks
+08–10 need Ubuntu 24.04 and RHEL/Rocky 9 hosts (or VMs/containers). Tracks 12–15
+use whatever the track prompt specifies — Track 15 needs **both** a container and
+a package-installed host, because two of its checks exist to catch a bad
+PostGIS/pgvector dependency that Tracks 08/09 would not notice.
 
 ---
 
-## 2. Execution model (3 phases)
+## 2. Execution model (4 phases)
 
 A **coordinator** (the agent that owns this bundle) runs the phases. Individual
 tracks are dispatched to **worker agents**, one per track, in parallel where the
@@ -83,6 +87,30 @@ with each other; if a worker discovers something outside its track, it records a
 de-duplicates findings, and fills in
 [`reports/00-ROLLUP.md`](reports/00-ROLLUP.md) with the consolidated severity
 table and a single **GO / NO-GO / GO-WITH-CAVEATS** recommendation.
+
+**Phase D — Fix verification (serialize, only if fixes land).** A release gate is
+not done when it produces a verdict; it is done when the verdict is still true
+after the fixes. For every finding that gets fixed, re-run **the exact repro from
+the report** against the rebuilt artifact and record CONFIRMED-FIXED /
+STILL-BROKEN / NOT-RETESTED in the rollup's fix-verification table. A fix that
+was never re-tested against a real artifact does not clear an S1.
+
+### If you cannot run all 16 tracks
+
+Run them in this order and stop wherever the time runs out — the cut lines are
+deliberate:
+
+1. **Gate (hours).** Track 04 §Smoke, then the pinned functional suite
+   (`ENVIRONMENT-SETUP §8`) against the published image, then Track 01
+   (signatures) and Track 08 **or** 09 (does the package install at all). If
+   these do not pass, nothing else matters.
+2. **Ship-blocking (a day).** Tracks 02 (durability), 05 (auth), 06 (TLS), 16
+   (index integrity), 14 (upgrade). These are the S1 generators: data loss, auth
+   bypass, plaintext credentials, index corruption, upgrade data loss.
+3. **Quality (a day).** Tracks 03, 07, 10, 12, 15.
+4. **Breadth (as available).** Tracks 11, 13.
+
+Whatever you skip, say so in the rollup. A silently-unrun track reads as a pass.
 
 ---
 
@@ -111,6 +139,14 @@ table and a single **GO / NO-GO / GO-WITH-CAVEATS** recommendation.
 8. **Safety.** These tests target *your own* SUT instances. Do not attack
    infrastructure you were not handed. Adversarial tests (Track 07) are scoped to
    the container/host you spun up for the test.
+9. **Check the known-failure baseline first.** The release carries a curated list
+   of 15,422 known-failing and 1,898 known-flaky upstream functional tests
+   (`ENVIRONMENT-SETUP.md §8`). Before filing a missing or divergent feature,
+   grep it. If it is listed, it is **known** — write "known, on the baseline" and
+   move on. This is the data behind rule 7; without it every feature-facing track
+   re-files the same known gaps and the rollup becomes unreadable.
+10. **Say what you did not test.** An unrun check is not a passing check. Mark it
+    ⛔ blocked with the reason; the rollup depends on knowing the difference.
 
 ---
 

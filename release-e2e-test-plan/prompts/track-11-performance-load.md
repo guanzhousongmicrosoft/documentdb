@@ -55,6 +55,27 @@ load tool for real numbers).
     a v0.114 container and 0.116. Flag any material throughput/latency regression
     (>~15% on a core op) as S3 with the numbers.
 
+## Pass/fail thresholds (agree these before you start)
+
+"Reasonable throughput" is not falsifiable, so fix the bar first and record it
+in the report. These are the defaults; if the release owner sets different ones,
+use theirs and say so.
+
+| # | Criterion | Fail if |
+|---|-----------|---------|
+| 1 | Stability under sustained mixed load (≥30 min) | p99 latency drifts upward >25% from the first 5-minute window to the last, with no plateau |
+| 2 | Memory | gateway or PG RSS grows monotonically with no plateau over the run |
+| 3 | File descriptors / connections | count grows monotonically after load stabilises (leak) |
+| 4 | Connection ceiling | the failure mode is a hang, a crash, or a state that does not recover when load drops (a clean rejection passes) |
+| 5 | Correctness under contention | **any** lost update, duplicate unique key, or wrong count — S1 regardless of the perf numbers |
+| 6 | Memory-bounded aggregation | a large `$group`/`$sort`/`$lookup` OOM-kills the backend instead of spilling |
+| 7 | Regression vs the previous release | >15% throughput loss or >25% p99 increase on a core op, same host, same harness |
+| 8 | Cold start | time to first successful query exceeds the value the docs/readiness guidance imply (record it either way) |
+
+Criterion 7 needs a 0.114 baseline on the **same host**. If that baseline cannot
+be obtained (see `ENVIRONMENT-SETUP §10`), mark it ⛔ rather than reporting
+absolute numbers as though they were a comparison.
+
 ## Expected results
 Reasonable, stable throughput; graceful degradation at the ceilings; no leaks over
 sustained load; correctness holds under contention; 0.116 streaming paths correct.
