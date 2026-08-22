@@ -28,6 +28,22 @@ pins PostgreSQL %{pg_version} and its DocumentDB extension and owns the
 per-major systemd instance lifecycle; the shared PG-agnostic payload is
 provided by documentdb-common.
 
+This package pulls in postgresql%{pg_version}-documentdb, which depends on
+PGDG-provided PostgreSQL extension packages (pgvector, pg_cron, postgis36). On
+RHEL/Rocky/AlmaLinux, enable the PGDG, EPEL, and CodeReady Builder (CRB)
+repositories BEFORE installing so dependency resolution succeeds (adjust the
+EL major and arch in the PGDG URL for your host; use 'powertools' instead of
+'crb' on EL8):
+
+  sudo dnf install -y dnf-plugins-core
+  sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+  sudo dnf install -y epel-release
+  sudo dnf config-manager --set-enabled crb
+  sudo dnf -qy module disable postgresql
+
+Without CRB, dnf fails with 'nothing provides libqhull_r.so.7()(64bit)' - a
+transitive PostGIS -> GDAL dependency that only CRB/PowerTools provides.
+
 %install
 # documentdb-N ships no payload files: the shared payload lives in
 # documentdb-common. This package is a per-major dependency + maintainer-script

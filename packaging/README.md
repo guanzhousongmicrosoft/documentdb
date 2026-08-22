@@ -144,8 +144,16 @@ each workflow.
 > powertools` instead of `crb`; on arm64 replace `x86_64` with `aarch64`.
 > Then the RHEL install commands mirror the Debian workflows above with `dnf`
 > (for example `sudo dnf install documentdb` for Workflow C). This guidance is
-> also embedded in the `%description` of the extension and meta RPMs, so it is
-> visible via `dnf info` before install.
+> also embedded in the `%description` of the extension, per-major and meta RPMs,
+> so it is visible via `dnf info` before install.
+>
+> **CRB is not optional.** `postgresql<N>-documentdb` requires `postgis36_N`
+> because the extension's control file lists `postgis` in its `requires =` line,
+> so the dependency cannot be dropped without breaking `CREATE EXTENSION
+> documentdb`. `postgis36_N` pulls `gdal*-libs`, which needs `libqhull_r.so.7`,
+> and only CRB/PowerTools ships that library. Skipping CRB makes `dnf` fail with
+> a list of GDAL candidates and `nothing provides libqhull_r.so.7()(64bit)`, an
+> error that never names the missing repository.
 
 > **Troubleshooting: `nothing provides libqhull_r.so.7()(64bit)`.**
 > A `dnf install` that ends in ~20 near-identical lines like
