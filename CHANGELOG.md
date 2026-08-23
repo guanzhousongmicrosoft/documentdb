@@ -3,6 +3,7 @@
 * Allow nested `$lookup` stages to run after the parent equality join so enrichment applies only to matched foreign documents. Guarded by the default-off `documentdb.force_nested_lookup_pipeline_after_join` setting; unsupported query shapes may fail when it is enabled. *[Perf]*
 * Support collation with the `$stdDevPop`, `$stdDevSamp`, `$median` and `$percentile` `$group` accumulators. They only do arithmetic, so the collation is applied when their input expression is evaluated. *[Feature]*
 * Prevent index-only scans on collated indexes for all field-consuming projection and aggregation targets, while preserving them for constant-only targets such as `$count`. *[Bugfix]*
+* Enable targeted posting-tree pruning by default so vacuum takes brief posting-tree root cleanup locks for individual deletion attempts instead of holding one root lock across an entire pruning traversal. *[Perf]*
 * Apply collation to the symbol BSON type, so symbols compare and hash like the equivalent string under the active collation. *[Feature]*
 * Fix collation-aware hashing and index term generation for code with scope. *[Bugfix]*
 * Support collation with `count` command *[Feature]*
