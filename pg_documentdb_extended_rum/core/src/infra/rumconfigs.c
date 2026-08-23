@@ -161,8 +161,8 @@ PGDLLEXPORT bool RumSkipGlobalVisibilityCheckOnPrune =
 PGDLLEXPORT bool RumEnableOverwriteEntryTupleOnVacuum =
 	RUM_DEFAULT_ENABLE_OVERWRITE_ENTRY_TUPLE_ON_VACUUM;
 
-/* FeatureFlag: Added in v0.114, Pending stabilization, enable on v0.117 */
-#define RUM_DEFAULT_ENABLE_TARGETED_POSTING_TREE_PRUNING false
+/* FeatureFlag: Added in v0.114, enabled in v0.118, remove after v0.121 */
+#define RUM_DEFAULT_ENABLE_TARGETED_POSTING_TREE_PRUNING true
 PGDLLEXPORT bool RumEnableTargetedPostingTreePruning =
 	RUM_DEFAULT_ENABLE_TARGETED_POSTING_TREE_PRUNING;
 
