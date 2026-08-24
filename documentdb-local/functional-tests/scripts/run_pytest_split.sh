@@ -41,10 +41,21 @@ PFX="docdb_functional_tests/documentdb_tests/"
 ROOTDIR="docdb_functional_tests/documentdb_tests"
 TESTPATH="${SPLIT_TESTPATH:-${PFX}compatibility/tests}"
 ENGINE="${ENGINE_NAME:-documentdb}"
-CS="mongodb://${CONN_USER}:${CONN_PASS}@localhost:${CONN_PORT}/?tls=true&tlsAllowInvalidCertificates=true"
+# CONN_USER/CONN_PASS arrive RAW (CI exports the generated secret verbatim), but
+# they are about to be embedded in a URI, so reserved characters have to be
+# percent-encoded first. A password containing '@' or '/' would otherwise build
+# a URI that parses to a different host, or does not parse at all, and the
+# failure would surface deep inside pytest as an unrelated connection error.
+uri_escape() {
+  python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+CS="mongodb://$(uri_escape "${CONN_USER}"):$(uri_escape "${CONN_PASS}")@localhost:${CONN_PORT}/?tls=true&tlsAllowInvalidCertificates=true"
 GATE="python3 ${FT}/tools/functional_gate.py"
 REPORT="${RESULTS_DIR}/report.json"
 JUNIT="${RESULTS_DIR}/results.xml"
+# The gate's verdict rendered as JUnit, the file to read in the leg artifact.
+# results.xml is the pre-recovery main pass, kept alongside it for debugging.
+GATE_JUNIT="${RESULTS_DIR}/gate-results.xml"
 
 mkdir -p "${RESULTS_DIR}"
 
@@ -98,8 +109,8 @@ run_pytest() {  # $1 = json report path ; rest = parallelism + markers + targets
 # MIN_MANIFEST additionally guards the parallel collect: a short manifest on one
 # leg desyncs its ids[split_id::total] stride from the others, dropping tests at
 # some positions on no leg. Bump it if a source_sha update legitimately shrinks
-# the ~48k non-no_parallel suite.
-MIN_MANIFEST=30000
+# the ~51k non-no_parallel suite.
+MIN_MANIFEST=32000
 COLLECT_RC=0
 COLLECT_N=0
 collect_count() {  # $1 = out manifest ; rest = -m marker + targets.
@@ -297,7 +308,7 @@ fi
 #     results.xml is informational. ---
 run_pytest "${REPORT}" --junitxml="${JUNIT}" "${MAIN_ARGS[@]}" || true
 
-# Stop the observer before the exec below replaces this shell.
+# Stop the observer before the gate runs.
 [ -n "${OBSERVER_PID}" ] && kill "${OBSERVER_PID}" 2>/dev/null || true
 
 # --- fail CLOSED on a missing/partial run (never let a collapse score green) ---
@@ -317,15 +328,29 @@ fi
 # transient crash victims pass), merges each pass (bounded to 3; over the
 # transient limit = real breakage), and exits 1 on any residual failed/error. The
 # re-run command mirrors the main pass minus the marker/targets; recover-and-gate
-# appends --json-report and the @argfile of failing IDs. exec so the leg's exit
-# status IS the verdict — which is also why --output must write straight into
-# RESULTS_DIR (nothing below the exec would ever run to copy it there).
+# appends --json-report and the @argfile of failing IDs. Its exit status is the
+# leg's verdict — captured rather than exec'd, so the verdict can be rendered
+# for reporting before we exit with it. --output writes straight into
+# RESULTS_DIR so the residual list lands with the rest of the artifacts.
 # shellcheck disable=SC2086
-exec ${GATE} recover-and-gate \
+GATE_RC=0
+${GATE} recover-and-gate \
   --report "${REPORT}" --strip-prefix "${PFX}" --prefix "${PFX}" \
   --transient-limit "${TRANSIENT_LIMIT}" \
   --expected-ids "${EXPECTED_IDS}" --missing-limit "${MISSING_LIMIT}" \
   --workdir "${TMPDIR}" --output "${RESULTS_DIR}/gate-failures.txt" \
   -- python3 -m pytest -p conftest_known_failures -q --color=no ${IGN} \
      --engine-name="${ENGINE}" --connection-string="${CS}" --rootdir="${ROOTDIR}" \
-     -n=0 --timeout=600 --timeout-method=signal
+     -n=0 --timeout=600 --timeout-method=signal || GATE_RC=$?
+
+# Render the gate's verdict as JUnit. results.xml is frozen before recovery
+# (rescued crash victims read failed, worker-lost tests are absent), so this is
+# the file to read in the artifact: every failure in it is a real one.
+# Reporting never changes the verdict, GATE_RC already decided.
+# shellcheck disable=SC2086
+${GATE} emit-junit --report "${REPORT}" --out "${GATE_JUNIT}" \
+  --failing "${KF}/ci_failing_tests.txt" --flaky "${KF}/ci_flaky_tests.txt" \
+  --crash "${KF}/ci_crash_tests.txt" --expected-ids "${EXPECTED_IDS}" \
+  --suite-name "${SPLIT_TAG}" || echo "could not render the gate verdict as JUnit"
+
+exit "${GATE_RC}"

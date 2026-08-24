@@ -22,11 +22,13 @@ from functional_gate import (  # noqa: E402
 @pytest.fixture
 def valid_image(tmp_path):
     path = tmp_path / "image.yml"
+    # The pin file records the suite commit and nothing else; the image
+    # reference is derived from it, so there is no second field that could name
+    # a different suite version.
     path.write_text(yaml.dump({
-        "schema_version": 1,
-        "image": "ghcr.io/test/image@sha256:abc123",
+        "schema_version": 2,
         "source_ref": "test/repo@main",
-        "source_sha": "deadbeef",
+        "source_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     }))
     return str(path)
 
@@ -74,6 +76,9 @@ class TestCompareEngines:
         ], filename="b.json")
 
         result = compare_engines(report_a, report_b, "engineA", "engineB", valid_image)
+        # The provenance line is derived from source_sha, so it names the same
+        # suite version the run used rather than a separately recorded one.
+        assert result["image"].endswith(":sha-deadbee")
         assert len(result["both_pass"]) == 1
         assert len(result["both_fail"]) == 1
         assert len(result["a_only_pass"]) == 1

@@ -21,9 +21,12 @@ the gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import stat
 import sys
+import tempfile
 
 # Error annotations. GitHub Actions renders a line prefixed with "::error::" as
 # an annotation on the run; a CI system with different syntax can set
@@ -334,9 +337,146 @@ def _normalize_node_id(node_id: str, rootdir_name: str = _ROOTDIR_NAME) -> str:
     return node_id
 
 
+def _derive_prefix(lines) -> str:
+    """The path prefix the entries in ``lines`` are written with, "" if bare.
+
+    Lists are written either prefixed (``docdb_functional_tests/...``) or bare,
+    and a file must not mix the two. Comments and blank lines carry no style.
+    """
+    for entry in (line.strip() for line in lines):
+        if entry and not entry.startswith("#") and _normalize_node_id(entry) != entry:
+            return entry[: len(entry) - len(_normalize_node_id(entry))]
+    return ""
+
+
+def report_identity(report: dict) -> str:
+    """A stable short id for one pytest report.
+
+    Reconcile is NOT idempotent, and it cannot be: under strict xfail a LISTED
+    test that passes is reported as ``failed``, so "failed and on the list" ->
+    remove and "failed and not on the list" -> add. After one pass the list
+    membership of every failed test flips, so applying the SAME report again
+    swaps the two buckets and silently corrupts the baseline (the second run
+    adds back exactly what the first removed). Recording which report produced
+    a list is what makes that detectable.
+
+    The digest covers every record's (node id, outcome), not only the totals and
+    the first and last id. Two runs routinely agree on every counter while
+    failing different tests, and hashing the endpoints alone makes those
+    collide, so a genuinely new report is refused as a repeat of the old one.
+    The records are sorted because the suite runs under xdist and is recorded in
+    finish order: unsorted, re-serialising the SAME report in a different order
+    produces a different id and the guard waves it through twice, which is the
+    one thing it exists to prevent.
+    """
+    summary = report.get("summary", {}) or {}
+    parts = [str(summary.get(k, "")) for k in
+             ("collected", "total", "passed", "failed", "error", "xfailed", "xpassed", "skipped")]
+    records = sorted(
+        "{}={}".format(_normalize_node_id(str(test.get("nodeid", ""))),
+                       test.get("outcome", ""))
+        for test in (report.get("tests", []) or []) if test.get("nodeid"))
+    parts.append(str(len(records)))
+    parts.extend(records)
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def reconcile_identity(report_paths) -> str:
+    """The id recorded in the list: one value covering EVERY run consumed.
+
+    It has to span all of them. Reconciling from run A and then from runs A and
+    B are different operations with different outcomes, so if the id covered
+    only the first report the second would be refused as a repeat of the first.
+    """
+    ids = []
+    for path in report_paths:
+        with open(path) as f:
+            ids.append(report_identity(json.load(f)))
+    if len(ids) == 1:
+        return ids[0]
+    return hashlib.sha256("|".join(ids).encode("utf-8")).hexdigest()[:16]
+
+
+RECONCILED_MARKER = "# reconciled-from-report: "
+
+
+def _actually_failed(outcome: str, was_listed: bool):
+    """Translate a reported outcome into "did this test really fail?".
+
+    The report does not say that directly, because the known-failure plugin has
+    already inverted the result for anything it marked. A listed test that
+    fails is reported ``xfailed``; a listed test that passes is reported
+    ``failed`` (XPASS under strict). So the same word means opposite things
+    depending on whether the id was on the list for that run.
+
+    Returns True (really failed), False (really passed), or None when the
+    outcome carries no verdict (skipped, or a shape not seen before).
+    """
+    if was_listed:
+        if outcome == "xfailed":
+            return True
+        if outcome in ("failed", "error"):
+            return False       # XPASS: the expected failure did not happen
+        if outcome in ("passed", "xpassed"):
+            return False
+        return None
+    if outcome in ("failed", "error"):
+        return True
+    if outcome in ("passed", "xpassed", "xfailed"):
+        return False
+    return None
+
+
+def classify_across_runs(report_paths, listed_norm) -> dict:
+    """Split tests into consistently failing, inconsistent, and consistently passing.
+
+    One run cannot tell "always fails" apart from "failed that time", yet strict
+    xfail asserts the former: an entry that only sometimes fails turns every run
+    where it passes into a gate failure. Comparing two or more runs is what
+    makes the distinction observable, so this returns:
+
+      always  — really failed in every run that observed it -> strict
+      mixed   — really failed in some runs and not others   -> flaky
+      never   — really failed in no run that observed it    -> neither
+
+    Runs must all have been produced with the same list state, since that state
+    is what ``_actually_failed`` inverts against.
+    """
+    seen, failed = {}, {}
+    for path in report_paths:
+        with open(path) as f:
+            report = json.load(f)
+        for test in report.get("tests", []):
+            nid = test.get("nodeid", "")
+            if not nid:
+                continue
+            norm = _normalize_node_id(nid)
+            verdict = _actually_failed(test.get("outcome", "unknown"),
+                                       norm in listed_norm)
+            if verdict is None:
+                continue
+            seen[norm] = seen.get(norm, 0) + 1
+            failed[norm] = failed.get(norm, 0) + (1 if verdict else 0)
+
+    always, mixed, never = [], [], []
+    for norm, n in seen.items():
+        f = failed[norm]
+        if f == n:
+            always.append(norm)
+        elif f == 0:
+            never.append(norm)
+        else:
+            mixed.append(norm)
+    return {"always": sorted(always), "mixed": sorted(mixed),
+            "never": sorted(never), "runs": len(report_paths)}
+
+
 def reconcile_failing_list(report_path: str, failing_path: str,
                            flaky_path: str = "",
-                           prune_uncollected: bool = False) -> dict:
+                           prune_uncollected: bool = False,
+                           force: bool = False,
+                           crash_path: str = "",
+                           extra_reports=None) -> dict:
     """Reconcile a known-failures list against a (merged) pytest JSON report.
 
     The classification mirrors the gate's strict-xfail semantics under
@@ -371,10 +511,52 @@ def reconcile_failing_list(report_path: str, failing_path: str,
         call = test.get("call", {}) or {}
         details[norm] = str(call.get("longrepr", "") or "")
 
+    # What the runs COLLECTIVELY collected, and which ids carried an 'error'
+    # that xfail does not account for. Both have to span every report, not just
+    # the primary one. An entry the primary run lost (an xdist worker death
+    # drops its assigned tests from that report) but another run collected is
+    # still a live test, and pruning it deletes a baseline entry that reds the
+    # gate the next time it fails.
+    collected = set(outcomes)
+    xpassed_anywhere = {norm for norm, outcome in outcomes.items() if outcome == "xpassed"}
+    errored_raw = {norm for norm, outcome in outcomes.items()
+                   if outcome == "error" and "XPASS" not in details.get(norm, "")}
+    for extra_path in (extra_reports or []):
+        with open(extra_path) as f:
+            extra_report = json.load(f)
+        for test in extra_report.get("tests", []):
+            nid = test.get("nodeid", "")
+            if not nid:
+                continue
+            norm = _normalize_node_id(nid)
+            collected.add(norm)
+            outcome = test.get("outcome", "unknown")
+            if outcome == "xpassed":
+                xpassed_anywhere.add(norm)
+            detail = str((test.get("call", {}) or {}).get("longrepr", "") or "")
+            if outcome == "error" and "XPASS" not in detail:
+                errored_raw.add(norm)
+
     raw_lines = []
     with open(failing_path) as f:
         for line in f:
             raw_lines.append(line.rstrip("\n"))
+
+    # Refuse to apply the same report twice. See report_identity() for why this
+    # is not a style preference: the second pass adds back exactly what the
+    # first removed, and nothing in the output would say so.
+    rid = reconcile_identity([report_path] + list(extra_reports or []))
+    already = [l for l in raw_lines if l.strip().startswith(RECONCILED_MARKER)]
+    if already and not force:
+        prev = already[-1].strip()[len(RECONCILED_MARKER):].strip()
+        if prev == rid:
+            raise SystemExit(
+                f"{failing_path} was already reconciled from this exact report ({rid}).\n"
+                "Applying it twice swaps the added and removed sets and corrupts the baseline:\n"
+                "under strict xfail a listed test that passes is reported as 'failed', so the\n"
+                "second pass re-adds everything the first pass removed.\n"
+                "Re-run the suite to get a fresh report, or pass --force if you are certain.")
+
     entries = [l.strip() for l in raw_lines if l.strip() and not l.strip().startswith("#")]
     entry_by_norm = {_normalize_node_id(e): e for e in entries}
 
@@ -386,30 +568,96 @@ def reconcile_failing_list(report_path: str, failing_path: str,
                 if line and not line.startswith("#"):
                     flaky_norm.add(_normalize_node_id(line))
 
-    added, removed, kept_errored, skipped_flaky = [], [], [], []
-    for norm, outcome in sorted(outcomes.items()):
-        if outcome not in ("failed", "error"):
-            continue
-        if norm in entry_by_norm:
-            # Listed + failed = XPASS(strict) in the gate. A listed test can
-            # also 'error' outside the call phase (xfail does not cover setup
-            # errors) — keep those and let a human look.
-            detail = details.get(norm, "")
-            if outcome == "error" and "XPASS" not in detail:
+    # A crash-listed test is SKIPPED and must not also be xfailed: the plugin
+    # rejects any exact id present in both, so adding one here would make the
+    # whole suite fail to collect. Only exact ids can collide; file (.py) and
+    # directory (/) crash entries are prefixes the plugin handles separately.
+    crash_norm = set()
+    if crash_path and os.path.exists(crash_path):
+        with open(crash_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "::" in line:
+                    crash_norm.add(_normalize_node_id(line))
+
+    added, removed, kept_errored, skipped_flaky, skipped_crash = [], [], [], [], []
+    demoted_flaky = []
+
+    if extra_reports:
+        # Two or more runs: a test earns a strict entry only by failing in all
+        # of them. Anything that disagrees between runs is timing- or
+        # order-dependent, and strict xfail cannot express "sometimes", so it
+        # goes to the flaky list instead. This is the whole reason to pass more
+        # than one report.
+        verdicts = classify_across_runs([report_path] + list(extra_reports),
+                                        set(entry_by_norm))
+        always, mixed = set(verdicts["always"]), set(verdicts["mixed"])
+        never = set(verdicts["never"])
+
+        for norm in sorted(always):
+            if norm in entry_by_norm or norm in flaky_norm:
+                continue
+            if norm in crash_norm:
+                skipped_crash.append(norm)
+            else:
+                added.append(norm)
+        for norm in sorted(mixed):
+            if norm in crash_norm or norm in flaky_norm:
+                continue
+            demoted_flaky.append(norm)
+        for norm in sorted(never):
+            # Passed in every run, so a strict entry asserting failure is wrong.
+            if norm not in entry_by_norm:
+                continue
+            if norm in errored_raw:
+                # Not a pass. _actually_failed reads a listed 'error' as "did
+                # not fail", so without this the entry is dropped on evidence
+                # that the test never actually produced. Keep it and flag it,
+                # exactly as the single-report path does.
                 kept_errored.append(norm)
             else:
                 removed.append(norm)
-        elif norm in flaky_norm:
-            skipped_flaky.append(norm)
-        else:
-            added.append(norm)
+    else:
+        for norm, outcome in sorted(outcomes.items()):
+            if outcome not in ("failed", "error"):
+                continue
+            if norm in entry_by_norm:
+                # Listed + failed = XPASS(strict) in the gate. An 'error' with
+                # no XPASS detail is a shape the plugin does not normally
+                # produce, because xfail absorbs setup and teardown failures
+                # into 'xfailed'. It therefore means the failure happened
+                # outside anything xfail covers (collection, a session-scoped
+                # finaliser), which is not evidence the test passed — keep the
+                # entry and let a human look.
+                detail = details.get(norm, "")
+                if outcome == "error" and "XPASS" not in detail:
+                    kept_errored.append(norm)
+                else:
+                    removed.append(norm)
+            elif norm in flaky_norm:
+                skipped_flaky.append(norm)
+            elif norm in crash_norm:
+                skipped_crash.append(norm)
+            else:
+                added.append(norm)
 
-    uncollected = [norm for norm in entry_by_norm if norm not in outcomes]
+    uncollected = [norm for norm in entry_by_norm if norm not in collected]
     pruned = uncollected if prune_uncollected else []
+
+    # An entry already on the list that is ALSO crash-listed is the same
+    # collision seen from the other side, and it fails collection just as hard.
+    # Drop it here: skip beats xfail, because the test never runs.
+    collided = [n for n in entry_by_norm if n in crash_norm]
 
     drop = {entry_by_norm[n] for n in removed}
     drop.update(entry_by_norm[n] for n in pruned)
-    new_lines = [l for l in raw_lines if l.strip() not in drop]
+    drop.update(entry_by_norm[n] for n in collided)
+    # A test that disagreed between runs must not keep a strict entry: strict
+    # asserts it always fails, and the runs just showed it does not.
+    drop.update(entry_by_norm[n] for n in demoted_flaky if n in entry_by_norm)
+    new_lines = [l for l in raw_lines
+                 if l.strip() not in drop
+                 and not l.strip().startswith(RECONCILED_MARKER)]
 
     if added:
         # Preserve the file's dominant entry style: prefixed (backend-gate
@@ -425,27 +673,158 @@ def reconcile_failing_list(report_path: str, failing_path: str,
         new_lines.append("# --- added by functional_gate.py reconcile ---")
         new_lines.extend(style_prefix + n for n in added)
 
+    # Provenance, so applying this same report again is refused rather than
+    # silently swapping the added and removed sets.
+    new_lines.append("")
+    new_lines.append(f"{RECONCILED_MARKER}{rid}")
+
     return {
         "lines": new_lines,
+        "report_id": rid,
         "added": added,
         "removed": removed,
         "uncollected": uncollected,
         "pruned": pruned,
         "kept_errored": kept_errored,
         "skipped_flaky": skipped_flaky,
-        "flaky_passes": sorted(n for n, o in outcomes.items()
-                               if o == "xpassed" and n in flaky_norm),
+        "skipped_crash": skipped_crash,
+        "demoted_flaky": demoted_flaky,
+        "runs": 1 + len(extra_reports or []),
+        "crash_collisions": sorted(collided),
+        # Across every report for the same reason as `collected`: a flaky entry
+        # that xpassed only in the run the primary report lost is still a
+        # pruning candidate.
+        "flaky_passes": sorted(flaky_norm & xpassed_anywhere),
     }
 
 
-def cmd_reconcile(args):
-    result = reconcile_failing_list(args.report, args.failing, args.flaky,
-                                    prune_uncollected=args.prune_uncollected)
-    out_path = args.out or args.failing
-    with open(out_path, "w", newline="\n") as f:
-        f.write("\n".join(result["lines"]) + "\n")
+def _write_text_atomic(path: str, text: str):
+    """Write through a temp file in the same directory, then replace.
 
-    print(f"Reconciled {args.failing} from {args.report} -> {out_path}")
+    A half-written baseline is worse than an unwritten one: these lists are what
+    the gate asserts, and a truncated file quietly changes the verdict.
+    """
+    # /dev/null is a legitimate --out for "classify but keep the list", and a
+    # character device cannot be replaced by a rename. Write straight through.
+    if os.path.exists(path) and not os.path.isfile(path):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return
+
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    mode = None
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".functional_gate-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        # mkstemp creates 0600. Carry the destination's own permissions over, or
+        # a reconcile silently turns a shared, world-readable baseline into an
+        # owner-only file.
+        if mode is None:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_reconcile(args):
+    reports = args.report if isinstance(args.report, list) else [args.report]
+    primary, extra = reports[0], reports[1:]
+    result = reconcile_failing_list(primary, args.failing, args.flaky,
+                                    prune_uncollected=args.prune_uncollected,
+                                    force=getattr(args, "force", False),
+                                    crash_path=getattr(args, "crash", ""),
+                                    extra_reports=extra)
+    out_path = args.out or args.failing
+
+    # Validate and stage EVERY output before writing ANY of them. --out defaults
+    # to the tracked failing list, so a check that runs after the first write
+    # leaves the baseline rewritten, marker and all, by a command that then
+    # exits non-zero. The obvious retry is then refused by the duplicate-report
+    # guard, and --force is the documented way past it — which is exactly the
+    # non-idempotent second application that guard exists to stop.
+    staged = [(out_path, "\n".join(result["lines"]) + "\n")]
+
+    # Demotions only exist in the multi-run mode, and they are only meaningful
+    # if they actually reach the flaky list, so write it here rather than
+    # leaving the caller to move them by hand.
+    if result["demoted_flaky"]:
+        if not args.flaky:
+            raise SystemExit(
+                f"{len(result['demoted_flaky'])} test(s) disagreed between runs and belong "
+                "on the flaky list, but --flaky was not given. Re-run with --flaky <path>.")
+        prefix = ""
+        try:
+            with open(args.flaky, encoding="utf-8") as f:
+                existing = f.read().rstrip("\n").split("\n")
+        except OSError as exc:
+            raise SystemExit(f"cannot read the flaky list {args.flaky}: {exc}")
+        # Write the demoted ids in the style of the list they are JOINING, not
+        # the one they are leaving. Deriving from the failing list appended bare
+        # ids to a prefixed flaky list whenever no prefixed entry survived there.
+        prefix = _derive_prefix(existing) or _derive_prefix(result["lines"])
+        existing.append("")
+        existing.append(f"# --- disagreed across {result['runs']} runs, so not assertable as "
+                        "a consistent failure ---")
+        existing.extend(prefix + n for n in result["demoted_flaky"])
+        staged.append((args.flaky, "\n".join(existing) + "\n"))
+
+    if getattr(args, "summary_json", ""):
+        # Machine-readable classification for the auto-reconcile bot. "clean" is
+        # true when the reconcile is safe to auto-apply: it ONLY drops
+        # XPASS(strict) entries. Uncollected entries (a listed test the run did
+        # not collect — deleted/renamed upstream, or a run that did not cover the
+        # list) make it false whether or not they were pruned, since dropping them
+        # is a suite-composition change a human should confirm. Demotions and
+        # crash collisions move entries BETWEEN tracked lists, so they are the
+        # same kind of change and must be reported too: omitting them let a
+        # reconcile rewrite both lists on disk and still report changed=false.
+        clean = (not result["added"] and not result["kept_errored"]
+                 and not result["skipped_flaky"] and not result["uncollected"]
+                 and not result["demoted_flaky"] and not result["crash_collisions"])
+        summary = {
+            "added": result["added"],
+            "removed": result["removed"],
+            "kept_errored": result["kept_errored"],
+            "skipped_flaky": result["skipped_flaky"],
+            "uncollected": result["uncollected"],
+            "pruned": result["pruned"],
+            "flaky_passes": result["flaky_passes"],
+            "demoted_flaky": result["demoted_flaky"],
+            "skipped_crash": result["skipped_crash"],
+            "crash_collisions": result["crash_collisions"],
+            "changed": bool(result["added"] or result["removed"] or result["pruned"]
+                            or result["demoted_flaky"] or result["crash_collisions"]),
+            "clean": clean,
+        }
+        staged.append((args.summary_json, json.dumps(summary, indent=2)))
+
+    # A destination whose directory is missing would otherwise fail mid-sequence,
+    # after the earlier destinations were already replaced.
+    for path, _ in staged:
+        directory = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(directory):
+            raise SystemExit(f"cannot write {path}: {directory} does not exist")
+
+    for path, text in staged:
+        _write_text_atomic(path, text)
+
+    print(f"Reconciled {args.failing} from {primary} -> {out_path}")
+    if extra:
+        print(f"  runs compared:                 {result['runs']} "
+              "(strict requires failing in every run)")
+    print(f"  report id:                     {result['report_id']}")
     print(f"  added (new failures):          {len(result['added'])}")
     print(f"  removed (XPASS strict):        {len(result['removed'])}")
     print(f"  uncollected list entries:      {len(result['uncollected'])}"
@@ -458,31 +837,17 @@ def cmd_reconcile(args):
         print(f"  SKIPPED failures already on the flaky list (would overlap): {len(result['skipped_flaky'])}")
         for n in result["skipped_flaky"]:
             print(f"    {n}")
+    if result.get("demoted_flaky"):
+        print(f"  MOVED strict -> flaky (disagreed between runs): {len(result['demoted_flaky'])}")
+    if result.get("skipped_crash"):
+        print(f"  SKIPPED failures on the crash list (skip beats xfail): {len(result['skipped_crash'])}")
+    if result.get("crash_collisions"):
+        print(f"  DROPPED entries that are also crash-listed: {len(result['crash_collisions'])}")
+        for n in result["crash_collisions"]:
+            print(f"    {n}")
     if result["flaky_passes"]:
         print(f"  flaky-list entries that passed this run (pruning candidates): {len(result['flaky_passes'])}")
 
-    if getattr(args, "summary_json", ""):
-        # Machine-readable classification for the auto-reconcile bot. "clean" is
-        # true when the reconcile is safe to auto-apply: it ONLY drops
-        # XPASS(strict) entries. Uncollected entries (a listed test the run did
-        # not collect — deleted/renamed upstream, or a run that did not cover the
-        # list) make it false whether or not they were pruned, since dropping them
-        # is a suite-composition change a human should confirm.
-        clean = (not result["added"] and not result["kept_errored"]
-                 and not result["skipped_flaky"] and not result["uncollected"])
-        summary = {
-            "added": result["added"],
-            "removed": result["removed"],
-            "kept_errored": result["kept_errored"],
-            "skipped_flaky": result["skipped_flaky"],
-            "uncollected": result["uncollected"],
-            "pruned": result["pruned"],
-            "flaky_passes": result["flaky_passes"],
-            "changed": bool(result["added"] or result["removed"] or result["pruned"]),
-            "clean": clean,
-        }
-        with open(args.summary_json, "w") as f:
-            json.dump(summary, f, indent=2)
     return 0
 
 
@@ -552,10 +917,16 @@ def compare_engines(report_a_path: str, report_b_path: str,
                     engine_a: str, engine_b: str,
                     image_path: str = "") -> dict:
     """Compare pytest JSON reports from two engines and classify differences."""
+    # image.yml pins the suite commit and nothing else; the image reference is
+    # derived from it the same way run-functional-tests.sh derives it, so this
+    # provenance line cannot name a different version than the run used.
     image = ""
     if image_path and os.path.exists(image_path):
-        image_data = load_yaml(image_path)
-        image = image_data.get("image", "")
+        sha = str(load_yaml(image_path).get("source_sha", "") or "")
+        if sha:
+            repo = os.environ.get("FUNCTIONAL_TESTS_IMAGE_REPO",
+                                  "ghcr.io/documentdb/functional-tests")
+            image = f"{repo}:sha-{sha[:7]}"
 
     with open(report_a_path) as f:
         report_a = json.load(f)
@@ -845,6 +1216,237 @@ def _rerun_isolated(rerun_cmd: list[str], ids: list[str], prefix: str,
     return reports
 
 
+# ---------------------------------------------------------------------------
+# The gate's verdict, rendered as JUnit
+# ---------------------------------------------------------------------------
+# Pytest's own --junitxml cannot be read as the verdict: that file is the MAIN
+# PASS and is frozen before recovery rewrites report.json. It disagrees with the
+# gate in both directions:
+#
+#   over-reports   a transient crash victim that the sequential re-run rescued
+#                  still reads `failed`, so a green build shows red tests;
+#   under-reports  a test that vanished with a dying xdist worker is simply
+#                  ABSENT, so the file looks clean on exactly the id the gate
+#                  fails the build for.
+#
+# Tolerating the first hid the second, and it trains everyone to ignore the
+# results view. Rendering the post-recovery verdict instead makes "results view
+# red" and "build red" the same statement, so a reader can act on a failure
+# like any other suite.
+
+_JUNIT_SKIP_TYPE = "pytest.skip"
+
+
+def _xml_safe(text: str) -> str:
+    """Drop the characters XML 1.0 cannot carry.
+
+    A longrepr can quote raw bytes from a crashed backend. Serialising those
+    produces a document the results parser rejects outright, which loses the
+    whole report rather than the one test.
+    """
+    return "".join(
+        ch for ch in text
+        if ch in "\t\n\r"
+        or 0x20 <= ord(ch) <= 0xD7FF
+        or 0xE000 <= ord(ch) <= 0xFFFD
+        or 0x10000 <= ord(ch) <= 0x10FFFF)
+
+
+def _junit_names(node_id: str):
+    """Split a node ID into (classname, name) the way the results view groups.
+
+    The file path becomes the classname so a folder of cases collapses into one
+    readable group, and any test-class component is folded onto it so the name
+    stays the case itself.
+    """
+    norm = _normalize_node_id(node_id)
+    path, _, rest = norm.partition("::")
+    classname = path[:-3] if path.endswith(".py") else path
+    classname = classname.replace("/", ".").replace("\\", ".")
+    if not rest:
+        return classname, norm
+    if "::" in rest:
+        cls, _, method = rest.rpartition("::")
+        return f"{classname}.{cls.replace('::', '.')}", method
+    return classname, rest
+
+
+def _test_detail(test: dict) -> str:
+    for phase in ("call", "setup", "teardown"):
+        section = test.get(phase, {}) or {}
+        text = section.get("longrepr", "")
+        if text:
+            return str(text)
+    return ""
+
+
+def classify_for_junit(outcome: str, detail: str, listed_strict: bool,
+                       listed_flaky: bool, crash_listed: bool,
+                       failing_name: str = "the failing list",
+                       flaky_name: str = "the flaky list"):
+    """Map one recorded outcome onto ('passed'|'skipped'|'failed', message).
+
+    The message carries the remediation, because the classification is the part
+    a reader cannot reconstruct: the same outcome word means opposite things
+    depending on which list the id was on for that run, and the reader has no
+    way to see the lists from the results view.
+    """
+    if outcome in ("failed", "error"):
+        if listed_strict and "XPASS" in detail:
+            return "failed", (
+                f"XPASS(strict): this test is on {failing_name} but PASSED. "
+                "The baseline improved — remove the entry.")
+        return "failed", (detail.strip().splitlines() or [f"{outcome} with no detail"])[-1][:900]
+    if outcome == "xfailed":
+        if listed_strict:
+            return "skipped", f"expected failure (strict xfail from {failing_name})"
+        if listed_flaky:
+            return "skipped", f"known flaky, failed this run (non-strict xfail from {flaky_name})"
+        return "skipped", "expected failure (xfail declared by the test itself)"
+    if outcome == "xpassed":
+        if listed_flaky:
+            return "skipped", f"known flaky, passed this run ({flaky_name} tolerates either)"
+        return "skipped", "unexpectedly passed under a non-strict xfail"
+    if outcome == "skipped":
+        if crash_listed:
+            return "skipped", (
+                "crash skip list: this test takes the engine down and cascades "
+                "onto every test sharing the run, so it is never executed")
+        return "skipped", "skipped"
+    if outcome == "passed":
+        return "passed", ""
+    # An outcome this mapping has not seen must not be silently counted as a
+    # pass; that is how a reporting gap becomes a false green.
+    return "failed", f"unrecognised outcome '{outcome}'"
+
+
+def _read_id_set(path: str) -> set:
+    ids = set()
+    if not path or not os.path.exists(path):
+        return ids
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ids.add(_normalize_node_id(line))
+    return ids
+
+
+def render_gate_junit(report_path: str, failing_path: str = "", flaky_path: str = "",
+                      crash_path: str = "", expected_ids=(), suite_name: str = "functional"):
+    """Render the post-recovery report as JUnit. Returns (xml_bytes, counts)."""
+    import xml.etree.ElementTree as ET
+
+    with open(report_path) as f:
+        report = json.load(f)
+
+    strict = _read_id_set(failing_path)
+    flaky = _read_id_set(flaky_path)
+    crash = _read_id_set(crash_path)
+    failing_name = os.path.basename(failing_path) if failing_path else "the failing list"
+    flaky_name = os.path.basename(flaky_path) if flaky_path else "the flaky list"
+
+    suite = ET.Element("testsuite", {"name": f"functional-tests {suite_name}"})
+    counts = {"tests": 0, "failures": 0, "skipped": 0, "recovered": 0, "passed": 0}
+    total_time = 0.0
+    seen = set()
+
+    for test in report.get("tests", []):
+        node_id = test.get("nodeid", "")
+        if not node_id:
+            continue
+        norm = _normalize_node_id(node_id)
+        seen.add(norm)
+        detail = _test_detail(test)
+        kind, message = classify_for_junit(
+            test.get("outcome", "unknown"), detail,
+            norm in strict, norm in flaky, norm in crash,
+            failing_name, flaky_name)
+
+        classname, name = _junit_names(node_id)
+        duration = float(test.get("duration", 0) or 0)
+        total_time += duration
+        case = ET.SubElement(suite, "testcase", {
+            "classname": classname, "name": name, "time": f"{duration:.3f}"})
+        counts["tests"] += 1
+
+        if kind == "failed":
+            counts["failures"] += 1
+            node = ET.SubElement(case, "failure", {
+                "message": _xml_safe(message), "type": "failure"})
+            node.text = _xml_safe(detail or message)
+        elif kind == "skipped":
+            counts["skipped"] += 1
+            ET.SubElement(case, "skipped", {
+                "message": _xml_safe(message), "type": _JUNIT_SKIP_TYPE})
+        else:
+            counts["passed"] += 1
+
+        # Recovery is otherwise invisible. Surfacing it per test is what turns
+        # "the gate quietly retried things" into a number that can be watched:
+        # a rising count is an engine crash-rate regression, not a clean run.
+        recovered = test.get("_docdb_recovered_pass")
+        if recovered:
+            counts["recovered"] += 1
+            out = ET.SubElement(case, "system-out")
+            out.text = (f"recovered: failed in the parallel pass and passed on "
+                        f"sequential re-run {recovered}. Counted as a pass by the "
+                        f"gate; a rising recovered count means the engine is "
+                        f"crashing more often.")
+
+    # An assigned test with no record at all is the failure mode the main-pass
+    # JUnit cannot express: it is absent, so the tab reads clean while the gate
+    # reds. Give it a row.
+    for missing in sorted(set(expected_ids) - seen):
+        classname, name = _junit_names(missing)
+        case = ET.SubElement(suite, "testcase", {
+            "classname": classname, "name": name, "time": "0.000"})
+        node = ET.SubElement(case, "failure", {
+            "message": "no outcome recorded: assigned to this leg but the run "
+                       "never reported it (an xdist worker died with it queued)",
+            "type": "failure"})
+        node.text = node.get("message")
+        counts["tests"] += 1
+        counts["failures"] += 1
+
+    suite.set("tests", str(counts["tests"]))
+    suite.set("failures", str(counts["failures"]))
+    suite.set("skipped", str(counts["skipped"]))
+    suite.set("errors", "0")
+    suite.set("time", f"{total_time:.3f}")
+
+    root = ET.Element("testsuites")
+    root.append(suite)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True), counts
+
+
+def cmd_emit_junit(args):
+    expected = []
+    if getattr(args, "expected_ids", "") and os.path.exists(args.expected_ids):
+        with open(args.expected_ids, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if "::" in line:
+                    expected.append(_normalize_node_id(line))
+
+    try:
+        xml_bytes, counts = render_gate_junit(
+            args.report, args.failing, args.flaky, args.crash,
+            expected, args.suite_name)
+    except (OSError, ValueError) as exc:
+        # Reporting must never decide the build. The gate's exit code already
+        # did that; failing here would red a run whose verdict was PASS.
+        print(f"could not render the gate verdict as JUnit: {exc}")
+        return 0
+
+    with open(args.out, "wb") as f:
+        f.write(xml_bytes)
+    print(f"gate verdict -> {args.out}: {counts['tests']} tests, "
+          f"{counts['passed']} passed, {counts['skipped']} expected/skipped, "
+          f"{counts['failures']} failed, {counts['recovered']} recovered by re-run")
+    return 0
+
+
 def cmd_recover_and_gate(args):
     """Sequential re-run recovery of transient crash victims + gate on the merged
     report. The single canonical implementation shared by the single-job lane and
@@ -980,6 +1582,17 @@ def cmd_recover_and_gate(args):
             break
         try:
             merged = merge_reports(args.report, rerun_reports)
+            # Record WHICH pass rescued each test. Recovery is otherwise
+            # invisible: the merged report shows a pass and nothing says it took
+            # a serial retry to get there, so an engine that is crashing more
+            # often looks exactly like a clean run.
+            rerun_set = set(ids)
+            for test in merged.get("tests", []):
+                nid = test.get("nodeid", "")
+                if args.strip_prefix and nid.startswith(args.strip_prefix):
+                    nid = nid[len(args.strip_prefix):]
+                if nid in rerun_set and test.get("outcome") not in ("failed", "error"):
+                    test.setdefault("_docdb_recovered_pass", p)
             with open(merged_json, "w") as f:
                 json.dump(merged, f)
             os.replace(merged_json, args.report)
@@ -1101,13 +1714,23 @@ def main():
         "reconcile",
         help="Update a known-failures list from a (merged) JSON report: add new "
              "failures, drop XPASS(strict) entries (used after a source_sha bump)")
-    reconcile_parser.add_argument("--report", required=True,
-                                  help="Path to the merged pytest JSON report of a gate run")
+    reconcile_parser.add_argument("--report", required=True, action="append",
+                                  help="Path to the merged pytest JSON report of a gate run. "
+                                       "Repeat it to compare runs: with two or more, a test "
+                                       "only earns a strict entry by failing in EVERY run, and "
+                                       "anything that disagrees between them is moved to the "
+                                       "flaky list. One run cannot tell 'always fails' from "
+                                       "'failed that time', and strict xfail asserts the former")
     reconcile_parser.add_argument("--failing", required=True,
                                   help="Path to the known-failures list to reconcile")
     reconcile_parser.add_argument("--flaky", default="",
                                   help="Path to the flaky list (new failures already on it are "
                                        "skipped so the plugin's overlap check cannot throw)")
+    reconcile_parser.add_argument("--crash", default="",
+                                  help="Path to the crash/skip list. Failures on it are not added, "
+                                       "and existing entries that collide with it are dropped: a "
+                                       "crash-listed test is skipped, and the plugin refuses any "
+                                       "exact id present in both, which fails collection outright")
     reconcile_parser.add_argument("--out", default="",
                                   help="Write the updated list here (default: rewrite --failing in place)")
     reconcile_parser.add_argument("--prune-uncollected", action="store_true",
@@ -1117,6 +1740,35 @@ def main():
                                   help="Also write a machine-readable classification (added/removed/"
                                        "kept_errored/skipped_flaky/changed/clean) here for the "
                                        "auto-reconcile bot")
+    reconcile_parser.add_argument("--force", action="store_true",
+                                  help="Reconcile even if this list was already reconciled from "
+                                       "this exact report. Applying one report twice swaps the "
+                                       "added and removed sets and corrupts the baseline, so this "
+                                       "is refused by default")
+
+    # emit-junit: the gate's verdict as JUnit, so the results view and the build
+    # status are the same statement and every failure in it is a real one.
+    junit_parser = subparsers.add_parser(
+        "emit-junit",
+        help="Render the post-recovery report as JUnit reflecting the GATE's "
+             "verdict (expected failures as skipped, residual failures as "
+             "failures, unrecorded assigned tests as failures)")
+    junit_parser.add_argument("--report", required=True,
+                              help="Path to the pytest JSON report AFTER recover-and-gate "
+                                   "merged the re-runs into it")
+    junit_parser.add_argument("--out", required=True, help="Path to write the JUnit XML")
+    junit_parser.add_argument("--failing", default="",
+                              help="Strict known-failure list, so an expected failure is "
+                                   "labelled as one instead of looking skipped for no reason")
+    junit_parser.add_argument("--flaky", default="", help="Non-strict known-failure list")
+    junit_parser.add_argument("--crash", default="",
+                              help="Crash/skip list, so a never-executed test says why")
+    junit_parser.add_argument("--expected-ids", default="",
+                              help="Assigned-slice file. Any id in it with no record becomes a "
+                                   "FAILURE: a test lost with a dying xdist worker is absent "
+                                   "from the report, which is invisible in pytest's own JUnit")
+    junit_parser.add_argument("--suite-name", default="functional",
+                              help="Suite name shown in the results view (e.g. the split tag)")
 
     # recover-and-gate: sequential re-run recovery of transient crash victims,
     # then gate on the merged report. Shared by the single-job lane and the
@@ -1172,6 +1824,8 @@ def main():
         return cmd_reconcile(args)
     elif args.command == "recover-and-gate":
         return cmd_recover_and_gate(args)
+    elif args.command == "emit-junit":
+        return cmd_emit_junit(args)
     # Fail LOUD on an unrecognized command. Without this the chain falls through,
     # main() returns None, and sys.exit(None) exits 0 — so a subcommand renamed in
     # add_parser() but not here would silently no-op and score the caller green.

@@ -13,6 +13,7 @@ PREFIX = "docdb_functional_tests/documentdb_tests/"
 
 
 def _report(tmp_path, tests):
+    os.makedirs(str(tmp_path), exist_ok=True)
     p = tmp_path / "report.json"
     p.write_text(json.dumps({"tests": [
         {"nodeid": nid, "outcome": oc, "call": {"longrepr": detail}}
@@ -94,4 +95,28 @@ class TestReconcileSummary:
         flaky = _list(tmp_path, "flaky.txt", ["# none"])
         s = _run(report, failing, flaky, tmp_path)
         assert "gone.py::t_deleted" in "\n".join(s["uncollected"])
+        assert s["clean"] is False
+
+    def test_demotion_to_flaky_is_reported_as_changed(self, tmp_path):
+        # A test that fails in one run and passes in the other cannot carry a
+        # strict entry, so reconcile moves it to the flaky list. That rewrites
+        # BOTH tracked lists, so the summary has to say so: reporting
+        # changed=false here let a bot skip the PR while the files on disk had
+        # already diverged from HEAD, and clean=true claimed a list-to-list move
+        # needs no human.
+        r1 = _report(tmp_path / "r1", [(PREFIX + "e.py::t_flip", "failed", "AssertionError")])
+        r2 = _report(tmp_path / "r2", [(PREFIX + "e.py::t_flip", "passed", "")])
+        failing = _list(tmp_path, "failing.txt", ["# none"])
+        flaky = _list(tmp_path, "flaky.txt", ["# none"])
+        out = str(tmp_path / "summary.json")
+        subprocess.run([sys.executable, TOOL, "reconcile",
+                        "--report", r1, "--report", r2,
+                        "--failing", failing, "--flaky", flaky,
+                        "--out", str(tmp_path / "new.txt"),
+                        "--summary-json", out], check=True,
+                       capture_output=True, text=True)
+        s = json.load(open(out))
+        assert s["demoted_flaky"] == ["e.py::t_flip"]
+        assert s["added"] == []
+        assert s["changed"] is True
         assert s["clean"] is False
