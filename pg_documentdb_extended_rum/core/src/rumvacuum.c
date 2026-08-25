@@ -34,7 +34,6 @@
 	vacuum_delay_point();
 #endif
 
-extern bool RumSkipRetryOnDeletePage;
 extern bool RumPruneEmptyPages;
 extern bool RumEnableNewBulkDelete;
 extern bool RumVacuumSkipPrunePostingTreePages;
@@ -415,7 +414,11 @@ restart:
 	leftBlkno = RumPageGetOpaque(dPage)->leftlink;
 	rightBlkno = RumPageGetOpaque(dPage)->rightlink;
 
-	/* do not remove left/right most pages */
+	/*
+	 * TODO: Support boundary-page and parent collapse. Refusing both boundary
+	 * pages leaves a fully empty posting tree permanently multi-level, which
+	 * also prevents its entry page from becoming reclaimable.
+	 */
 	if (leftBlkno == InvalidBlockNumber || rightBlkno == InvalidBlockNumber)
 	{
 		UnlockReleaseBuffer(dBuffer);
@@ -452,8 +455,7 @@ restart:
 		 * those are held would stall other backends. The loop is bounded via
 		 * maxRetryCount instead.
 		 */
-		if (RumSkipRetryOnDeletePage &&
-			retryCount >= maxRetryCount)
+		if (retryCount >= maxRetryCount)
 		{
 			return false;
 		}
@@ -522,8 +524,7 @@ restart:
 		 * those cleanup/exclusive locks are held, stalling every backend blocked
 		 * on them. The loop is instead kept bounded via maxRetryCount.
 		 */
-		if (RumSkipRetryOnDeletePage &&
-			retryCount >= maxRetryCount)
+		if (retryCount >= maxRetryCount)
 		{
 			return false;
 		}
@@ -551,6 +552,12 @@ restart:
 
 	/* Delete downlink from parent */
 	parentPage = GenericXLogRegisterBuffer(state, pBuffer, 0);
+
+	/*
+	 * TODO: Replace the assertion-only parent check with a runtime validation
+	 * of this downlink and the following right-sibling downlink. On mismatch,
+	 * report index corruption and leave the parent unchanged.
+	 */
 #ifdef USE_ASSERT_CHECKING
 	do {
 		RumPostingItem *tod = (RumPostingItem *) RumDataPageGetItem(parentPage, myoff);
@@ -1067,6 +1074,18 @@ IsRumEntryPageEmptyCheck(Page page, Relation index, BufferAccessStrategy bufferS
 }
 
 
+/*
+ * TODO: Add coverage for entry-page deletion under streaming-standby page
+ * reuse, serializable scans, persistent buffer-pin contention, and crash
+ * recovery between posting-root pruning and entry-page unlink. Also verify
+ * that fully empty multi-level posting trees are structurally reclaimed.
+ * These scenarios require isolation, recovery, or replication tests beyond
+ * the current SQL regression coverage.
+ *
+ * TODO: Include entry pages and posting roots deleted here in
+ * IndexBulkDeleteResult.pages_deleted. The posting-page deletion path updates
+ * that field, but this path currently updates only private vacuum counters.
+ */
 static bool
 CheckAndPruneEmptyRumPage(RumState *rumState, BufferAccessStrategy bufferStrategy,
 						  BlockNumber blkno,
@@ -1106,6 +1125,11 @@ CheckAndPruneEmptyRumPage(RumState *rumState, BufferAccessStrategy bufferStrateg
 		return false;
 	}
 
+	/*
+	 * TODO: Support deleting boundary entry leaves and collapsing their
+	 * parents. Keeping both boundary leaves means the entry tree cannot
+	 * reclaim all empty levels after large deletions.
+	 */
 	if (RumPageRightMost(page) || RumPageLeftMost(page))
 	{
 		/* never prune leftmost or rightmost pages */
@@ -2416,6 +2440,10 @@ rumvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 			 */
 			vacStats.numEmptyPostingTreePages++;
 		}
+		else if (RumPageIsHalfDead(page))
+		{
+			vacStats.numVoidPages++;
+		}
 		else
 		{
 			idxStat.nEntryPages++;
@@ -2489,7 +2517,7 @@ rumvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 	vacStats.numEntryPages = idxStat.nEntryPages;
 	vacStats.numDataPages = idxStat.nDataPages;
-	vacStats.numVoidPages = stats->pages_free;
+	vacStats.numVoidPages += stats->pages_free;
 
 	LogFinalVacuumState(index, &vacStats, RumEnableNewBulkDelete, isVacuumCleanup);
 	return stats;
@@ -3080,6 +3108,12 @@ RumVacuumPrunePostingTree(RumVacuumState *gvs, OffsetNumber attnum, BlockNumber 
 	 */
 	while (true)
 	{
+		/*
+		 * TODO: Use BufferGetBlockNumber(buffer), as the targeted path above
+		 * does. On the first iteration blockNo still identifies the root,
+		 * not the leftmost leaf returned by FindLeftMostLeafDataPage(), so
+		 * deletion targets the wrong block.
+		 */
 		BlockNumber currentBlockNo = blockNo;
 		blockNo = RumPageGetOpaque(page)->rightlink;
 		if (RumDataPageMaxOff(page) < FirstOffsetNumber)
