@@ -11,6 +11,7 @@
 * Fix collation-aware hashing and index term generation for code with scope. *[Bugfix]*
 * Support collation with `count` command *[Feature]*
 * Persist and manage custom roles through the data plane: `createRole`/`dropRole`/`rolesInfo` are backed by the roles catalog (keyed by role name). Guarded by `documentdb.enableRoleCrud` feature flag, disabled by default. *[Feature]*
+* Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
