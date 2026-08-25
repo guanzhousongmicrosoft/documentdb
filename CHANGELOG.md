@@ -43,6 +43,7 @@
 * Fix per-path multikey metadata so an array ancestor marks every indexed descendant, including fields absent from the document. *[Bugfix]*
 * Support the `enum` keyword in `$jsonSchema` validators, requiring a value to equal one of the listed allowed values, both at the top level and for individual properties. *[Feature]*
 * Support the `oneOf` keyword in `$jsonSchema` validators, matching the documented semantics where a value must validate against exactly one of the listed subschemas, both at the top level and for individual properties. *[Feature]*
+* Fix the gateway tearing down warm PostgreSQL connection pools: idle-pool cleanup evicted pools that were still serving requests (the last-used timestamp was written in seconds but compared as nanoseconds), and every authentication rebuilt the user's pool from scratch. A user's pool is now reused across re-authentication while the credential is unchanged, and replaced when it rotates. *[Bugfix/Perf]*
 
 ### documentdb v0.115-0 (Unreleased) ###
 * Fix `$min` and `$max` accumulators to skip null and missing values when non-null values are present, only returning null when all values are null or missing. Guarded by `enable_min_max_skip_null_values`, enabled by default. *[Bugfix]*
