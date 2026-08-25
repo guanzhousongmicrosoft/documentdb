@@ -157,6 +157,7 @@ COPY documentdb-local/scripts/emulator_entrypoint.sh /home/documentdb/gateway/sc
 COPY documentdb-local/scripts/documentdb_reserved_roles.sh /home/documentdb/gateway/scripts/documentdb_reserved_roles.sh
 COPY documentdb-local/scripts/documentdb_validate_username.sh /home/documentdb/gateway/scripts/documentdb_validate_username.sh
 COPY documentdb-local/scripts/documentdb_install_getparameter_stub.sh /home/documentdb/gateway/scripts/documentdb_install_getparameter_stub.sh
+COPY documentdb-local/scripts/documentdb_prepare_data_directory.sh /home/documentdb/gateway/scripts/documentdb_prepare_data_directory.sh
 COPY documentdb-local/scripts/healthcheck.sh /home/documentdb/gateway/scripts/healthcheck.sh
 COPY scripts/utils.sh /home/documentdb/gateway/scripts/utils.sh
 COPY scripts/preload_libraries.sh /home/documentdb/gateway/scripts/preload_libraries.sh
@@ -182,17 +183,51 @@ RUN sudo chmod +x /home/documentdb/gateway/scripts/init_documentdb_data.sh
 RUN sudo chmod +x /home/documentdb/gateway/scripts/healthcheck.sh && \
     sudo ln -s /home/documentdb/gateway/scripts/healthcheck.sh /usr/local/bin/documentdb-healthcheck
 
+# Pre-initialize the PostgreSQL data directory at image build time (issue
+# #480). initdb and CREATE EXTENSION dominate first-boot latency (both are
+# fsync- and I/O-heavy, which makes them painfully slow on Docker Desktop
+# filesystems), so run them once here. The entrypoint adopts this ready-made
+# cluster on first boot instead of initializing from scratch, and Docker
+# populates the /data volume (anonymous or named) from this image content at
+# container create, so every run gets the fast path. The marker file records
+# the cluster's control-data fingerprint -- system identifier, cluster state,
+# and latest checkpoint location; the entrypoint recomputes the same three
+# lines from live pg_controldata at boot and only byte-equality proves the
+# template pristine (the cluster never ran, so no user data exists and it is
+# safe to re-initialize when runtime flags require different init-time
+# options). No single field covers every "the cluster ran" case -- a clean
+# startup does not advance the checkpoint -- but together they do: a killed
+# cluster reads "in production" (state mismatch) and a cleanly stopped one
+# wrote a shutdown checkpoint (checkpoint mismatch). Known accepted tradeoff:
+# every first-boot volume shares this template's database system identifier,
+# which disables PostgreSQL's cross-cluster identity check (replication /
+# backup tooling keyed on the identifier); acceptable for a local emulator.
+# MUST stay above the VOLUME declaration: build steps that touch /data after
+# VOLUME is declared are discarded.
+RUN sudo install -d -o documentdb -g documentdb "$DATA_PATH" && \
+    /home/documentdb/gateway/scripts/start_oss_server.sh -r -u "" -d "$DATA_PATH" -p "$POSTGRESQL_PORT" && \
+    bash /home/documentdb/gateway/scripts/documentdb_install_getparameter_stub.sh "$POSTGRESQL_PORT" && \
+    pg_ctl stop -D "$DATA_PATH" -m fast && \
+    rm -f "$DATA_PATH/pglog.log" && \
+    mkdir -p "$DATA_PATH/.documentdb-local" && \
+    LC_ALL=C pg_controldata "$DATA_PATH" | sed -E 's/[[:space:]]+/ /g; s/ $//' | \
+        grep -E '^(Database system identifier|Database cluster state|Latest checkpoint location): ' | \
+        sed -E 's|^(Latest checkpoint location: [0-9A-F]+/)0*([0-9A-F])|\1\2|' \
+        > "$DATA_PATH/.documentdb-local/baked_template" && \
+    [ "$(wc -l < "$DATA_PATH/.documentdb-local/baked_template")" -eq 3 ] && \
+    grep -q '^Database cluster state: shut down$' "$DATA_PATH/.documentdb-local/baked_template"
+
 WORKDIR /home/documentdb/gateway/scripts
 # Declare /data as a volume mount point for the PostgreSQL data directory.
 # This does NOT persist by itself: without an explicit `-v host_path:/data`
 # (or a named volume), each `docker run` gets a fresh anonymous volume and
 # `docker rm` can strand it. Its purpose is to (a) follow the official
 # postgres/mysql image convention so `-v` mounts land on the right path and
-# (b) keep the heavy data dir out of the container's writable layer. Runtime
-# initialization happens in the entrypoint (not at build time), so declaring
-# the volume does not discard any baked-in state. See the container's "ready"
-# banner (printed by the entrypoint) for the `-v` guidance users must follow
-# to persist.
+# (b) keep the heavy data dir out of the container's writable layer. The
+# pre-initialized template is baked BEFORE this declaration, so Docker copies
+# it into each fresh /data volume at container create. See the container's
+# "ready" banner (printed by the entrypoint) for the `-v` guidance users must
+# follow to persist.
 VOLUME ["/data"]
 
 RUN v="$(dpkg-query -W -f='${Version}' "postgresql-${POSTGRES_VERSION}-documentdb")" \
