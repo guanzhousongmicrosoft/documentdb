@@ -691,8 +691,16 @@ do_setup() {
         ext_check="$(run_as_user "${PG_OWNER}" "${PSQL}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
             -d "${TARGET_DB}" -X -tA -c "SELECT 1 FROM pg_extension WHERE extname = 'documentdb';" 2>/dev/null || true)"
         if [[ "${ext_check}" != "1" ]]; then
+            # Name every extension the target database needs, not just
+            # 'documentdb': creating that alone leaves a database that cannot
+            # create an index when the config pins an alternate handler.
+            local handler required_ext=""
+            handler="$(documentdb_read_alternate_index_handler "${PSQL}" "${SOCKET_DIR}" \
+                "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}")"
+            required_ext="$(documentdb_alternate_index_handler_extension "${handler}")"
+
             log "WARNING: The DocumentDB extension is not loaded in the '${TARGET_DB}' database."
-            log "Run:  sudo -u ${PG_OWNER} psql -d ${TARGET_DB} -c 'CREATE EXTENSION documentdb CASCADE;'"
+            log "Run:  $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}")"
             log "Then: ${reload_cmd}"
         fi
     fi

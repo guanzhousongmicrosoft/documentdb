@@ -91,9 +91,14 @@ install paths, all served by the four packages above:
 
 - **Workflow A — Extension only into a managed PostgreSQL instance
   (advanced):** `apt install postgresql-18-documentdb documentdb-postgresql-tools`
-  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`.
-  No gateway runtime, no wire-protocol endpoint — useful for ops /
-  migration tooling that talks SQL directly.
+  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`,
+  restart PostgreSQL, then run the `CREATE EXTENSION` statements
+  `documentdb-tune` prints — both of them, since
+  `CREATE EXTENSION documentdb CASCADE` does not pull in
+  `documentdb_extended_rum` and every index creation fails without it.
+  On Debian/Ubuntu, `sudo documentdb-createcluster 18 main --start` does
+  this in one step. No gateway runtime, no wire-protocol endpoint —
+  useful for ops / migration tooling that talks SQL directly.
 
 - **Workflow B — Extension + gateway with BYO local PostgreSQL
   (advanced):** Workflow A plus `apt install documentdb-gateway` and

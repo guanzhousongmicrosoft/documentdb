@@ -987,6 +987,29 @@ verify_postgres_state() {
     fi
 }
 
+# A tuned cluster whose documentdb_extended_rum was never created looks healthy
+# in \dx but cannot create an index of any kind, so assert the behaviour rather
+# than only the catalog rows.
+verify_index_creation_works() {
+    local probe_db="documentdb_pkg_index_probe"
+    local index_spec='{"createIndexes": "probe_coll", "indexes": [{"key": {"n": 1}, "name": "n_1"}]}'
+    local index_ok="" probe_err=""
+
+    log "Verifying index creation works end-to-end."
+    create_temp_file probe_err "/tmp/documentdb-index-probe.XXXXXX.log"
+    # client_min_messages silences the "creating collection" NOTICE, and stderr
+    # is redirected to a file rather than merged into the captured value, so
+    # only the ok flag lands in it. statement_timeout bounds the wait on the
+    # background build, so a broken background-worker config fails the suite
+    # instead of hanging it.
+    if ! index_ok="$(run_psql "SET client_min_messages = warning; SET statement_timeout = '180s'; SELECT ok FROM documentdb_api.create_indexes_background('${probe_db}', '${index_spec}'::documentdb_core.bson);" 2>"${probe_err}")"; then
+        fail "createIndexes failed after a packaged install: $(cat "${probe_err}")"
+    fi
+    assert_eq "${index_ok}" "t" "create_indexes_background did not report ok=true (got: '${index_ok}'; stderr: $(cat "${probe_err}"))"
+
+    run_psql "SELECT documentdb_api.drop_database('${probe_db}');" >/dev/null 2>&1 || true
+}
+
 verify_gateway_crud() {
     local mongosh_log="/tmp/mongosh-smoke.log"
     local crud_script=""
@@ -1434,6 +1457,7 @@ main() {
     verify_self_managed_postgres_persistence
     verify_live_cluster_readoption
     verify_postgres_state
+    verify_index_creation_works
     verify_tls_key_permissions
     verify_gateway_crud
     verify_sample_data_absent
