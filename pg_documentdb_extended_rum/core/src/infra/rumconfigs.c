@@ -116,12 +116,8 @@ PGDLLEXPORT int RumParallelIndexWorkersOverride =
 PGDLLEXPORT bool RumEnableParallelIndexBuild = RUM_DEFAULT_ENABLE_PARALLEL_INDEX_BUILD;
 
 /* rumvacuum.c */
-/* FeatureFlag: Added in v0.108, enabled in v0.108, remove after v0.120 */
-#define RUM_DEFAULT_SKIP_RETRY_ON_DELETE_PAGE true
-PGDLLEXPORT bool RumSkipRetryOnDeletePage = RUM_DEFAULT_SKIP_RETRY_ON_DELETE_PAGE;
-
-/* FeatureFlag: Added in v0.108, Pending stabilization, enable on v0.118 */
-#define RUM_DEFAULT_PRUNE_EMPTY_PAGES false
+/* FeatureFlag: Added on v0.108, enabled on v0.118, remove after v0.125 */
+#define RUM_DEFAULT_PRUNE_EMPTY_PAGES true
 PGDLLEXPORT bool RumPruneEmptyPages = RUM_DEFAULT_PRUNE_EMPTY_PAGES;
 
 /* FeatureFlag: Added on v0.108, enabled in v0.113, remove after v0.125 */
@@ -237,15 +233,6 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 							-1, -1, INT_MAX,
 							PGC_USERSET, 0,
 							NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(psprintf("%s.rum_skip_retry_on_delete_page",
-									  documentDBRumGucPrefix),
-							 "Sets whether or not to skip retrying on delete pages during vacuuming",
-							 NULL,
-							 &RumSkipRetryOnDeletePage,
-							 RUM_DEFAULT_SKIP_RETRY_ON_DELETE_PAGE,
-							 PGC_USERSET, 0,
-							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
 		psprintf("%s.rum_throw_error_on_invalid_data_page", documentDBRumGucPrefix),
@@ -425,7 +412,7 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 		"test only guc to skip checking visibility on pruning pages",
 		NULL,
 		&RumSkipGlobalVisibilityCheckOnPrune,
-		RUM_DEFAULT_TRAVERSE_PAGE_ONLY_ON_BACKTRACK,
+		RUM_DEFAULT_SKIP_GLOBAL_VISIBILITY_CHECK_ON_PRUNE,
 		PGC_USERSET, 0,
 		NULL, NULL, NULL);
 
