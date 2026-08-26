@@ -487,6 +487,7 @@ pub trait PgDataClient: Send + Sync {
         let request = request_context.request();
         let command_timeout_ms = request.max_time_ms().map(i64::cast_unsigned);
         let req_opts = self.request_options(command_timeout_ms);
+        let dynamic_configuration = self.service_context().dynamic_configuration();
 
         run_request_with_retries(
             source,
@@ -497,6 +498,7 @@ pub trait PgDataClient: Send + Sync {
                     .setup_configuration()
                     .postgres_command_timeout_secs(),
             ),
+            dynamic_configuration.as_ref(),
             request_context,
             run_func,
         )
