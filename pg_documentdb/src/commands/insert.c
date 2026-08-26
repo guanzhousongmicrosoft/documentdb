@@ -50,6 +50,7 @@
 #include "planner/documentdb_planner.h"
 #include "optimizer/plancat.h"
 #include "utils/index_utils.h"
+#include "rbac_hooks.h"
 
 
 /*
@@ -1667,6 +1668,17 @@ CreateLocalShardInsertPlan(MongoCollection *collection, Oid shardOid,
 #else
 	RangeTblEntry *relationRte = CreateBaseTableRteForInsert(collection, shardOid, NULL);
 #endif
+
+	/*
+	 * This plan is returned without running the planner, so the permission
+	 * record it carries has not been evaluated.
+	 *
+	 * Only this plan needs it. A range table entry built for a Query reaches
+	 * the planner, which settles the record itself, so doing it there too
+	 * would run the decision twice for the same relation.
+	 */
+	ApplyCollectionAccessIdentityToPlan(relationRte, stmt);
+
 	RangeTblEntry *valuesRte = CreateValueRteForInsert(collection, valuesLists);
 	List *targetList = CreateTargetListForInsert(collection);
 
