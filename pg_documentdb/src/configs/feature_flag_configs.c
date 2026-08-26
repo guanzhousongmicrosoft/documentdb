@@ -360,6 +360,11 @@ bool EnableGroupByDistinctScan = DEFAULT_ENABLE_GROUP_BY_DISTINCT_SCAN;
 #define DEFAULT_ENABLE_DISTINCT_SCAN_FOR_GROUP_FIRST true
 bool EnableDistinctScanForGroupFirst = DEFAULT_ENABLE_DISTINCT_SCAN_FOR_GROUP_FIRST;
 
+/* Added in v0.118, enabled in v0.118, remove after v0.121 */
+#define DEFAULT_ENABLE_DISTINCT_SCAN_FOR_ORDERED_GROUP_FIRST true
+bool EnableDistinctScanForOrderedGroupFirst =
+	DEFAULT_ENABLE_DISTINCT_SCAN_FOR_ORDERED_GROUP_FIRST;
+
 /* Added in v0.117, Pending stabilization, enable in v0.121 */
 #define DEFAULT_ENABLE_SUPPORT_FUNCTION_ID_PUSHDOWN false
 bool EnableSupportFunctionIdPushdown = DEFAULT_ENABLE_SUPPORT_FUNCTION_ID_PUSHDOWN;
@@ -883,6 +888,15 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"$group pipelines whose accumulators are exclusively $first."),
 		NULL, &EnableDistinctScanForGroupFirst,
 		DEFAULT_ENABLE_DISTINCT_SCAN_FOR_GROUP_FIRST,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_distinct_scan_for_ordered_group_first", newGucPrefix),
+		gettext_noop(
+			"Whether to enable the distinct custom scan wrapper for $group "
+			"pipelines with ordered $first accumulators."),
+		NULL, &EnableDistinctScanForOrderedGroupFirst,
+		DEFAULT_ENABLE_DISTINCT_SCAN_FOR_ORDERED_GROUP_FIRST,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
