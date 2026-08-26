@@ -14,7 +14,10 @@
     reason = "Test helper functions - expect failures indicate test failures"
 )]
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use bson::{rawbson, RawBson};
 use documentdb_gateway_core::{
@@ -29,18 +32,30 @@ use documentdb_gateway_core::{
 };
 use tokio::task::yield_now;
 
-/// Dynamic configuration that answers every lookup with the caller's default,
-/// so a test only has to reason about the pool settings it sets explicitly.
-#[derive(Debug)]
-pub struct TestConfiguration;
+/// Dynamic configuration with mutable shutdown responses that otherwise uses
+/// each lookup's default value.
+#[derive(Debug, Default)]
+pub struct TestConfiguration {
+    send_shutdown_responses: AtomicBool,
+}
+
+impl TestConfiguration {
+    /// Sets whether requests should return shutdown responses.
+    pub fn set_send_shutdown_responses(&self, value: bool) {
+        self.send_shutdown_responses.store(value, Ordering::Relaxed);
+    }
+}
 
 impl DynamicConfiguration for TestConfiguration {
     fn get_str(&self, _: &str) -> Option<String> {
         None
     }
 
-    fn get_bool(&self, _: &str, default: bool) -> bool {
-        default
+    fn get_bool(&self, key: &str, default: bool) -> bool {
+        match key {
+            "SendShutdownResponses" => self.send_shutdown_responses.load(Ordering::Relaxed),
+            _ => default,
+        }
     }
 
     fn get_i32(&self, _: &str, default: i32) -> i32 {

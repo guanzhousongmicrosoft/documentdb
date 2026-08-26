@@ -253,6 +253,7 @@ where
         false, // Setting in_replica_cluster_mode to false means we will alway retry in case of SqlState::READ_ONLY_SQL_TRANSACTION.
         None,  // Do not run any gateway-level command timeout for auth-related queries.
     );
+    let dynamic_configuration = connection_context.dynamic_configuration();
 
     run_request_with_retries(
         ConnectionSource::Pool(pool),
@@ -264,6 +265,7 @@ where
                 .setup_configuration()
                 .postgres_command_timeout_secs(),
         ),
+        dynamic_configuration.as_ref(),
         request_context,
         run_func,
     )
