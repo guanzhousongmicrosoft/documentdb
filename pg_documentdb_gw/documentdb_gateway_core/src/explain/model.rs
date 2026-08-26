@@ -140,6 +140,9 @@ pub struct ExplainWorker {
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct ExplainPlan {
+    #[serde(rename = "Actual Loops")]
+    pub actual_loops: Option<f64>,
+
     #[serde(
         rename = "Actual Rows",
         default,
