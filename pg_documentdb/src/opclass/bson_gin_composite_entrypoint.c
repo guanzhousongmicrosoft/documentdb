@@ -309,8 +309,7 @@ static Datum * ProcessStandardCompositeQueryEntries(int32_t totalPathTerms,
 													uint32_t *indexPathLengths,
 													int8_t *sortOrders, bool
 													isOrderedScan);
-static Datum * ProcessOrderedCompositeQueryEntries(int32_t totalPathTerms,
-												   IndexTermCreateMetadata *
+static Datum * ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *
 												   singlePathMetadata,
 												   IndexTermCreateMetadata *
 												   compositeMetadata,
@@ -680,6 +679,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 	 * with each of the boundaries.
 	 */
 	int32_t totalPathTerms = 1;
+	bool termPathsOverflowed = false;
 
 	/* These are the scan keys to validate in consistent checks */
 	runData->metaInfo->numScanKeys = list_length(variableBounds.variableBoundsList);
@@ -702,6 +702,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 			{
 				/* If one scanKey is unsatisfiable then the query is not satisfiable */
 				totalPathTerms = 0;
+				termPathsOverflowed = false;
 			}
 
 			/* Insert the index into the active key */
@@ -721,7 +722,14 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 											 (list_length(
 												  pathScanTermMap[i].scanKeyIndexList) >
 											  1);
-				totalPathTerms = totalPathTerms * pathScanTermMap[i].numTermsPerPath;
+				if (!termPathsOverflowed &&
+					totalPathTerms > 0 &&
+					__builtin_mul_overflow(totalPathTerms,
+										   pathScanTermMap[i].numTermsPerPath,
+										   &totalPathTerms))
+				{
+					termPathsOverflowed = true;
+				}
 			}
 		}
 	}
@@ -739,10 +747,11 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 	 */
 	Datum *entries;
 	if (supportsOrderedOperatorScans &&
-		MaxNonOrderedTermScanThreshold > 0 &&
-		totalPathTerms > MaxNonOrderedTermScanThreshold)
+		((MaxNonOrderedTermScanThreshold > 0 &&
+		  totalPathTerms > MaxNonOrderedTermScanThreshold) ||
+		 termPathsOverflowed))
 	{
-		entries = ProcessOrderedCompositeQueryEntries(totalPathTerms, &singlePathMetadata,
+		entries = ProcessOrderedCompositeQueryEntries(&singlePathMetadata,
 													  &compositeMetadata, nentries,
 													  partialmatch, extra_data,
 													  runData, &variableBounds,
@@ -751,6 +760,10 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 													  hasArrayPaths,
 													  metaInfo->isOrderedScan,
 													  searchMode);
+	}
+	else if (termPathsOverflowed)
+	{
+		ereport(ERROR, (errmsg("Query generates too many index terms to process")));
 	}
 	else
 	{
@@ -765,7 +778,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 			ReportFeatureUsage(FEATURE_QUERY_ORDERED_SAOP_50_TERMS);
 		}
 
-		entries = ProcessStandardCompositeQueryEntries(totalPathTerms,
+		entries = ProcessStandardCompositeQueryEntries((int32_t) totalPathTerms,
 													   &singlePathMetadata,
 													   &compositeMetadata,
 													   pathScanTermMap, nentries,
@@ -902,8 +915,7 @@ CompareCompositeIndexBoundsForOrderedScan(const void *a, const void *b,
  * revs the ordered path data to keep the keys moving forward.
  */
 static Datum *
-ProcessOrderedCompositeQueryEntries(int32_t totalPathTerms,
-									IndexTermCreateMetadata *singlePathMetadata,
+ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *singlePathMetadata,
 									IndexTermCreateMetadata *compositeMetadata,
 									int32_t *nentries, bool **partialmatch,
 									Pointer **extra_data,
