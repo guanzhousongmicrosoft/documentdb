@@ -13,6 +13,7 @@
 #include "utils/documentdb_errors.h"
 
 #include "rbac_hooks.h"
+#include "rbac_hooks_def.h"
 
 GrantCollectionPrivilegesToRole_HookType
 	grant_collection_privileges_to_role_hook = NULL;
@@ -20,6 +21,8 @@ RemoveCollectionPrivileges_HookType
 	remove_collection_privileges_hook = NULL;
 GrantCollectionPrivilegesToBaselineRoles_HookType
 	grant_collection_privileges_to_baseline_roles_hook = NULL;
+ApplyCollectionAccessIdentityToPlan_HookType
+	apply_collection_access_identity_to_plan_hook = NULL;
 
 
 /*
@@ -77,5 +80,19 @@ GrantCollectionPrivilegesToBaselineRoles(uint64 collectionId, bool includeRetryT
 	{
 		grant_collection_privileges_to_baseline_roles_hook(collectionId,
 														   includeRetryTable);
+	}
+}
+
+
+/*
+ * Records, on a plan built without the planner, the identity a relation's
+ * permission record should be checked against.
+ */
+void
+ApplyCollectionAccessIdentityToPlan(RangeTblEntry *rte, PlannedStmt *stmt)
+{
+	if (apply_collection_access_identity_to_plan_hook != NULL)
+	{
+		apply_collection_access_identity_to_plan_hook(rte, stmt);
 	}
 }
