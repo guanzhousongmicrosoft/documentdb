@@ -25,6 +25,7 @@ test: rum_incomplete_split_page_deletion_tests
 test: bson_dynamic_cursor_parallel_tests
 test: bson_dynamic_cursor_wildcard_root_tests
 test: bson_dynamic_cursor_multikey_bitmap_tests
+test: bson_large_in_predicate_tests
 test: bson_aggregation_group_scalar_index_pushdown_tests!PG16_OR_HIGHER!
 test: bson_dynamic_cursor_dedup_tests
 test: bson_group_by_dynamic_streaming_tests!PG16_OR_HIGHER!
