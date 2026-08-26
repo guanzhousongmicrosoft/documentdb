@@ -14,6 +14,7 @@
 #include "utils/resowner.h"
 #include "lib/stringinfo.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "utils/typcache.h"
 #include "parser/parse_type.h"
 #include "nodes/makefuncs.h"
@@ -74,6 +75,9 @@ static void SetPermissionsForReadOnlyRole(void);
 static void SetPermissionsForReadWriteRole(void);
 static void CheckAndReplicateReferenceTable(const char *schema, const char *tableName);
 static void UpdateChangesTableOwnerToAdminRole(void);
+static bool MetadataColumnExists(const char *tableName, const char *columnName);
+static void ExecuteMetadataColumnAlter(const char *query, const char *tableName,
+									   const char *columnName);
 static bool RunUpgradeActions(ExtensionVersion installedVersion, ExtensionVersion
 							  lastUpgradeVersion);
 static void AddMetadataCollectionOptionsColumn(void);
@@ -395,7 +399,10 @@ RunUpgradeActions(ExtensionVersion installedVersion, ExtensionVersion lastUpgrad
 		 * Migrate the roles reference table primary key from role_oid to
 		 * role_name.
 		 */
-		AlterRolesTablePrimaryKey();
+		if (MetadataColumnExists("roles", "role_oid"))
+		{
+			AlterRolesTablePrimaryKey();
+		}
 	}
 
 	/* we call the post setup cluster hook to allow the extension to do any additional setup */
@@ -528,15 +535,49 @@ CreateIndexBuildsTable(bool includeOptions, bool includeDropCommandType)
 static void
 AddMetadataCollectionOptionsColumn(void)
 {
-	bool readOnly = false;
-	bool isNull = false;
 	StringInfo queryStr = makeStringInfo();
 	appendStringInfo(queryStr,
 					 "ALTER TABLE %s.collections "
 					 "ADD COLUMN IF NOT EXISTS options %s.bson DEFAULT NULL",
 					 ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(queryStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(queryStr->data, "collections", "options");
+}
+
+
+static bool
+MetadataColumnExists(const char *tableName, const char *columnName)
+{
+	bool missingOk = true;
+	Oid namespaceOid = get_namespace_oid(ApiCatalogSchemaName, missingOk);
+	if (namespaceOid == InvalidOid)
+	{
+		return false;
+	}
+
+	Oid relationOid = get_relname_relid(tableName, namespaceOid);
+	return relationOid != InvalidOid &&
+		   get_attnum(relationOid, columnName) != InvalidAttrNumber;
+}
+
+
+static void
+ExecuteMetadataColumnAlter(const char *query, const char *tableName,
+						   const char *columnName)
+{
+	int gucLevel = 0;
+	if (MetadataColumnExists(tableName, columnName))
+	{
+		gucLevel = NewGUCNestLevel();
+		SetGUCLocally("client_min_messages", "WARNING");
+	}
+
+	bool isNull = false;
+	ExtensionExecuteQueryViaSPI(query, false, SPI_OK_UTILITY, &isNull);
+
+	if (gucLevel != 0)
+	{
+		RollbackGUCChange(gucLevel);
+	}
 }
 
 
@@ -666,15 +707,11 @@ AlterDefaultDatabaseObjects(void)
 static void
 AddCollectionsTableViewDefinition(void)
 {
-	bool isNull = false;
-	bool readOnly = false;
-
 	StringInfo cmdStr = makeStringInfo();
 	appendStringInfo(cmdStr,
 					 "ALTER TABLE %s.collections ADD IF NOT EXISTS view_definition "
 					 "%s.bson default null;", ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "view_definition");
 }
 
 
@@ -684,18 +721,31 @@ AddCollectionsTableViewDefinition(void)
 static void
 AddCollectionsTableValidationColumns(void)
 {
-	bool isNull = false;
-	bool readOnly = false;
-
 	StringInfo cmdStr = makeStringInfo();
+
 	appendStringInfo(cmdStr,
 					 "ALTER TABLE %s.collections "
-					 "ADD COLUMN IF NOT EXISTS validator %s.bson DEFAULT null, "
-					 "ADD COLUMN IF NOT EXISTS validation_level text DEFAULT null CONSTRAINT validation_level_check CHECK (validation_level IN ('off', 'strict', 'moderate')), "
-					 "ADD COLUMN IF NOT EXISTS validation_action text DEFAULT null CONSTRAINT validation_action_check CHECK (validation_action IN ('warn', 'error'));",
+					 "ADD COLUMN IF NOT EXISTS validator %s.bson DEFAULT null;",
 					 ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validator");
+
+	resetStringInfo(cmdStr);
+	appendStringInfo(cmdStr,
+					 "ALTER TABLE %s.collections "
+					 "ADD COLUMN IF NOT EXISTS validation_level text DEFAULT null "
+					 "CONSTRAINT validation_level_check "
+					 "CHECK (validation_level IN ('off', 'strict', 'moderate'));",
+					 ApiCatalogSchemaName);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validation_level");
+
+	resetStringInfo(cmdStr);
+	appendStringInfo(cmdStr,
+					 "ALTER TABLE %s.collections "
+					 "ADD COLUMN IF NOT EXISTS validation_action text DEFAULT null "
+					 "CONSTRAINT validation_action_check "
+					 "CHECK (validation_action IN ('warn', 'error'));",
+					 ApiCatalogSchemaName);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validation_action");
 }
 
 
