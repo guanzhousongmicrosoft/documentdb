@@ -1,5 +1,6 @@
 ### documentdb v0.116-0 (August 19, 2026) ###
 * Note: version 0.115-0 was never published; its changes are included in this release.
+* Fix the `documentdb-local` container failing to start on a reused data volume after an unclean stop (`docker rm -f`, `docker kill`, an OOM kill, a host crash). A leftover `postmaster.pid` names a PID that the new container's fresh PID namespace has frequently re-assigned to an unrelated process, so PostgreSQL's `kill(pid, 0)` staleness check wrongly concluded a postmaster was already running and refused to start. Observed on roughly 1 in 5 unclean restarts. No data was ever at risk. *[Bugfix]*
 * Fix gateway connection pool eviction of in-use pools, and stop rebuilding warm data pools on every authentication. This resolves connections being dropped after the pool dispose interval elapsed. *[Bugfix]*
 * Fix a backend crash (segmentation fault) on insert into a sharded collection from a pooled/reused session when running on PostgreSQL 18.6 or newer. *[Bugfix]*
 * Default TOAST compression to `lz4`, with an administrator override. *[Perf]*
