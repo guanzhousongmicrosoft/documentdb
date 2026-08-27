@@ -91,6 +91,9 @@ typedef struct BatchInsertionResult
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
+
+	/* Logical index names resolved while processing this request */
+	HTAB *indexNameCache;
 } BatchInsertionResult;
 
 
@@ -762,7 +765,11 @@ DoSingleInsert(MongoCollection *collection,
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  insertIndex));
+																	  insertIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -820,7 +827,11 @@ DoSingleInsertWithSubTxn(MongoCollection *collection,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  insertIndex));
+																	  insertIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -1137,6 +1148,7 @@ CommandInsertCore(PG_FUNCTION_ARGS, WriteMode writeMode, MemoryContext allocCont
 	ReportInsertFeatureUsage(list_length(batchSpec->documents));
 	BatchInsertionResult batchResult;
 	batchResult.resultMemoryContext = allocContext;
+	batchResult.indexNameCache = NULL;
 	MemoryContextSwitchTo(oldContext);
 	if (list_length(batchSpec->documents) == 0)
 	{

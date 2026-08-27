@@ -174,6 +174,10 @@ bool EnableCompositeReducedCorrelatedFirstOwnerFallback =
 #define DEFAULT_ENABLE_INDEX_METADATA_GLOBAL_TRACKING false
 bool EnableIndexMetadataGlobalTracking = DEFAULT_ENABLE_INDEX_METADATA_GLOBAL_TRACKING;
 
+/* Added on v0.118, enabled on v0.118, remove after v0.121 */
+#define DEFAULT_ENABLE_REQUEST_INDEX_NAME_CACHE true
+bool EnableRequestIndexNameCache = DEFAULT_ENABLE_REQUEST_INDEX_NAME_CACHE;
+
 /* Added on v0.115, enabled on v0.115, remove after v0.118 */
 #define DEFAULT_ENABLE_PER_PATH_MULTI_KEY_SORT_PUSHDOWN true
 bool EnablePerPathMultiKeySortPushdown =
@@ -1223,6 +1227,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to enable tracking of index metadata in the index global metadata."),
 		NULL, &EnableIndexMetadataGlobalTracking,
 		DEFAULT_ENABLE_INDEX_METADATA_GLOBAL_TRACKING,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_request_index_name_cache", newGucPrefix),
+		gettext_noop(
+			"Whether to cache logical secondary-index names while processing a request."),
+		NULL, &EnableRequestIndexNameCache,
+		DEFAULT_ENABLE_REQUEST_INDEX_NAME_CACHE,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
