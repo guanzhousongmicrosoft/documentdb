@@ -52,3 +52,5 @@ test: command_compact_tests
 test: bson_mem_vtable_palloc_test collection_cache_validity_test
 
 test: documentdb_guc_naming_conventions
+
+test: bson_text_meta_state_cleanup_tests

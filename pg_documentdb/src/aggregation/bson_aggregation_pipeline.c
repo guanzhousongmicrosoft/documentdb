@@ -5897,6 +5897,7 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 			Expr *sortInput = entry->expr;
 			pgbsonelement subOrderingElement;
 			bool isSortByMeta = false;
+			bool isSortByMetaTextScore = false;
 			if (element.bsonValue.value_type == BSON_TYPE_DOCUMENT &&
 				TryGetBsonValueToPgbsonElement(&element.bsonValue, &subOrderingElement) &&
 				subOrderingElement.pathLength == 5 &&
@@ -5904,6 +5905,10 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 			{
 				RangeTblEntry *rte = linitial(query->rtable);
 				isSortByMeta = true;
+				isSortByMetaTextScore =
+					subOrderingElement.bsonValue.value_type == BSON_TYPE_UTF8 &&
+					strcmp(subOrderingElement.bsonValue.value.v_utf8.str,
+						   "textScore") == 0;
 				if (rte->rtekind == RTE_RELATION ||
 					rte->rtekind == RTE_FUNCTION)
 				{
@@ -5965,10 +5970,30 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 				sortOrderConst = MakeBsonConst(updatedSortDoc);
 			}
 
+			/*
+			 * When enabled on a new-enough cluster, a $meta:"textScore" sort
+			 * uses an order by that receives the text index options and TSQuery
+			 * as explicit arguments instead of reading process-global query
+			 * state. The index options and TSQuery are only resolved during
+			 * planning, so they are emitted here as null placeholders and filled
+			 * in by the planner once the text index is matched.
+			 */
+			bool useOrderByMeta = isSortByMetaTextScore &&
+								  EnableSkipUseQueryTextData &&
+								  IsClusterVersionAtleast(DocDB_V0, 118, 0);
+
 			List *args = NIL;
 
+			if (useOrderByMeta)
+			{
+				funcOid = BsonOrderByMetaFunctionOid();
+				funcReturnType = BsonTypeId();
+				Const *indexOptionsConst = makeNullConst(BYTEAOID, -1, InvalidOid);
+				Const *queryConst = makeNullConst(TSQUERYOID, -1, InvalidOid);
+				args = list_make3(sortInput, indexOptionsConst, queryConst);
+			}
 			/* apply collation to the sort comparison */
-			if (IsCollationApplicable(context->collationString))
+			else if (IsCollationApplicable(context->collationString))
 			{
 				funcOid = funcOidWithCollation;
 				Const *collationConst = MakeTextConst(context->collationString,
