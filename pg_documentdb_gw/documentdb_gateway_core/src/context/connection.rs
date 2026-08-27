@@ -24,7 +24,7 @@ use crate::{
         ServiceContext, TransactionNumber,
     },
     error::Result,
-    postgres::conn_mgmt::Connection,
+    postgres::conn_mgmt::{Connection, PgPoolSettings},
     security::principal::Principal,
     telemetry::TelemetryProvider,
 };
@@ -156,16 +156,17 @@ impl ConnectionContext {
     /// # Errors
     ///
     /// Returns an error if the operation fails.
-    pub fn allocate_data_pool(&self, password: &str) -> Result<()> {
+    pub fn allocate_data_pool(&mut self, password: &str) -> Result<()> {
         let username = self.auth_state.username()?;
+        let settings = PgPoolSettings::from_configuration(
+            self.service_context.dynamic_configuration().as_ref(),
+        );
 
         self.service_context
             .connection_pool_manager()
-            .allocate_data_pool(
-                username,
-                password,
-                self.service_context.dynamic_configuration().as_ref(),
-            )
+            .allocate_data_pool_with_settings(username, password, settings)?;
+        self.auth_state.set_data_pool_settings(settings);
+        Ok(())
     }
 
     #[must_use]

@@ -19,7 +19,8 @@ use tokio::{
 use crate::{
     configuration::{
         dynamic::{parse_cluster_version, ClusterVersion, POSTGRES_RECOVERY_KEY},
-        DynamicConfiguration, SetupConfiguration,
+        DynamicConfiguration, SetupConfiguration, MAX_REQUEST_TIMEOUT_DEFAULT_SEC,
+        MAX_REQUEST_TIMEOUT_SEC_KEY, TRANSACTION_TIMEOUT_DEFAULT_SEC, TRANSACTION_TIMEOUT_SEC_KEY,
     },
     error::{DocumentDBError, Result},
     postgres::{conn_mgmt::PoolManager, PgDocument},
@@ -424,6 +425,14 @@ impl DynamicConfiguration for PgConfiguration {
 
     fn allow_transaction_snapshot(&self) -> bool {
         self.get_bool("mongoAllowTransactionSnapshot", false)
+    }
+
+    fn max_request_timeout_sec(&self) -> u64 {
+        self.get_u64(MAX_REQUEST_TIMEOUT_SEC_KEY, MAX_REQUEST_TIMEOUT_DEFAULT_SEC)
+    }
+
+    fn transaction_timeout_sec(&self) -> u64 {
+        self.get_u64(TRANSACTION_TIMEOUT_SEC_KEY, TRANSACTION_TIMEOUT_DEFAULT_SEC)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

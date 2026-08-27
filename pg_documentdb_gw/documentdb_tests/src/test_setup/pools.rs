@@ -21,7 +21,11 @@ use std::sync::{
 
 use bson::{rawbson, RawBson};
 use documentdb_gateway_core::{
-    configuration::{DocumentDBSetupConfiguration, DynamicConfiguration, SetupConfiguration},
+    configuration::{
+        DocumentDBSetupConfiguration, DynamicConfiguration, SetupConfiguration,
+        MAX_REQUEST_TIMEOUT_DEFAULT_SEC, MAX_REQUEST_TIMEOUT_SEC_KEY,
+        TRANSACTION_TIMEOUT_DEFAULT_SEC, TRANSACTION_TIMEOUT_SEC_KEY,
+    },
     postgres::{
         conn_mgmt::{
             ConnectionPool, PgPoolSettings, PoolManager, AUTHENTICATION_MAX_CONNECTIONS,
@@ -86,6 +90,14 @@ impl DynamicConfiguration for TestConfiguration {
         false
     }
 
+    fn max_request_timeout_sec(&self) -> u64 {
+        self.get_u64(MAX_REQUEST_TIMEOUT_SEC_KEY, MAX_REQUEST_TIMEOUT_DEFAULT_SEC)
+    }
+
+    fn transaction_timeout_sec(&self) -> u64 {
+        self.get_u64(TRANSACTION_TIMEOUT_SEC_KEY, TRANSACTION_TIMEOUT_DEFAULT_SEC)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -100,6 +112,25 @@ pub async fn build_connection_pool(
     user: &str,
     max_connections: usize,
 ) -> ConnectionPool {
+    build_connection_pool_with_command_timeout(
+        setup_config,
+        user,
+        max_connections,
+        MAX_REQUEST_TIMEOUT_DEFAULT_SEC,
+    )
+    .await
+}
+
+/// Builds a single pool bound to `user` with a custom command timeout.
+///
+/// # Panics
+/// Panics if the pool cannot be constructed.
+pub async fn build_connection_pool_with_command_timeout(
+    setup_config: &DocumentDBSetupConfiguration,
+    user: &str,
+    max_connections: usize,
+    command_timeout_sec: u64,
+) -> ConnectionPool {
     yield_now().await;
 
     let query_catalog = create_query_catalog();
@@ -109,7 +140,10 @@ pub async fn build_connection_pool(
         user,
         None,
         "test-app",
-        PgPoolSettings::system_pool_settings(max_connections),
+        PgPoolSettings::system_pool_settings_with_command_timeout(
+            max_connections,
+            command_timeout_sec,
+        ),
     )
     .expect("Failed to create connection pool")
 }
@@ -120,6 +154,18 @@ pub async fn build_connection_pool(
 /// Panics if either pool cannot be constructed.
 #[must_use]
 pub fn build_pool_manager(setup_config: &DocumentDBSetupConfiguration) -> PoolManager {
+    build_pool_manager_with_command_timeout(setup_config, MAX_REQUEST_TIMEOUT_DEFAULT_SEC)
+}
+
+/// Builds a manager with a custom command timeout for its startup pools.
+///
+/// # Panics
+/// Panics if either pool cannot be constructed.
+#[must_use]
+pub fn build_pool_manager_with_command_timeout(
+    setup_config: &DocumentDBSetupConfiguration,
+    command_timeout_sec: u64,
+) -> PoolManager {
     let query_catalog = create_query_catalog();
     let postgres_system_user = setup_config.postgres_system_user();
 
@@ -129,7 +175,10 @@ pub fn build_pool_manager(setup_config: &DocumentDBSetupConfiguration) -> PoolMa
         postgres_system_user,
         None,
         &format!("{}-SystemRequests", setup_config.application_name()),
-        PgPoolSettings::system_pool_settings(SYSTEM_REQUESTS_MAX_CONNECTIONS),
+        PgPoolSettings::system_pool_settings_with_command_timeout(
+            SYSTEM_REQUESTS_MAX_CONNECTIONS,
+            command_timeout_sec,
+        ),
     )
     .expect("Failed to create system requests pool");
 
@@ -139,7 +188,10 @@ pub fn build_pool_manager(setup_config: &DocumentDBSetupConfiguration) -> PoolMa
         postgres_system_user,
         None,
         &format!("{}-PreAuthRequests", setup_config.application_name()),
-        PgPoolSettings::system_pool_settings(AUTHENTICATION_MAX_CONNECTIONS),
+        PgPoolSettings::system_pool_settings_with_command_timeout(
+            AUTHENTICATION_MAX_CONNECTIONS,
+            command_timeout_sec,
+        ),
     )
     .expect("Failed to create authentication pool");
 
