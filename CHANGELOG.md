@@ -36,7 +36,7 @@
 * Prevent index-only scans from reading field values from collated indexes, whose shared entries cannot reconstruct each row's stored values. *[Bugfix]*
 * Refactor Gateway telemetry and metrics to be provider neutral *[Refactor]*
 
-### documentdb v0.116-0 (Unreleased) ###
+### documentdb v0.116-0 (August 20, 2026) ###
 * Rename the `$sample` EXPLAIN metric `Sample Heap Skips` to `Sample Heap Fetches`. *[Refactor]*
 * Enable pushing suffix sort keys into the accumulator in `$sortGroup` when group-by keys form a non-dotted prefix of the sort keys by default (`enableSortPushToAccumulatorWithPrefix`). *[Perf]*
 * Fix `$sample` size coercion and validation to be wire protocol compatible. *[Bugfix]*
@@ -49,7 +49,8 @@
 * Support the `oneOf` keyword in `$jsonSchema` validators, matching the documented semantics where a value must validate against exactly one of the listed subschemas, both at the top level and for individual properties. *[Feature]*
 * Fix the gateway tearing down warm PostgreSQL connection pools: idle-pool cleanup evicted pools that were still serving requests (the last-used timestamp was written in seconds but compared as nanoseconds), and every authentication rebuilt the user's pool from scratch. A user's pool is now reused across re-authentication while the credential is unchanged, and replaced when it rotates. *[Bugfix/Perf]*
 
-### documentdb v0.115-0 (Unreleased) ###
+### documentdb v0.115-0 (August 20, 2026) [Release skipped] ###
+* The v0.115-0 release was skipped; these changes were included in v0.116-0.
 * Fix `$min` and `$max` accumulators to skip null and missing values when non-null values are present, only returning null when all values are null or missing. Guarded by `enable_min_max_skip_null_values`, enabled by default. *[Bugfix]*
 * Optimize `$sample` over an Index Scan by avoiding heap reads for rows the reservoir discards (visible rows are counted via the visibility map). Applies to Index Scans without runtime filters over btree or regular RUM indexes. *[Perf]*
 * Fix `$exists` argument coercion so falsy non-boolean values (`null`, `undefined`, `0`) are treated as `$exists: false` and truthy non-boolean values as `$exists: true`, matching the documented truthiness semantics. Previously `$exists: null` behaved like `$exists: true`. *[Bugfix]*
