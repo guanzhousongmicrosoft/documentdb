@@ -3,9 +3,9 @@
  *
  * include/rbac_hooks_def.h
  *
- * Definition of the hook that settles the permission identity of a plan built
- * without the planner. A layer that implements it registers itself here; a
- * caller that only invokes it includes rbac_hooks.h instead.
+ * Definitions of the collection RBAC hooks a hosting layer registers. A layer
+ * that implements a hook registers itself here; a caller that only invokes one
+ * includes rbac_hooks.h instead.
  *
  *-------------------------------------------------------------------------
  */
@@ -20,5 +20,9 @@ typedef void (*ApplyCollectionAccessIdentityToPlan_HookType)(RangeTblEntry *rte,
 															 PlannedStmt *stmt);
 extern ApplyCollectionAccessIdentityToPlan_HookType
 	apply_collection_access_identity_to_plan_hook;
+
+typedef void (*NotifyCollectionMetadataInvalidated_HookType)(void);
+extern NotifyCollectionMetadataInvalidated_HookType
+	notify_collection_metadata_invalidated_hook;
 
 #endif

@@ -37,6 +37,7 @@
 #include "metadata/metadata_cache.h"
 #include "metadata/collection.h"
 #include "commands/defrem.h"
+#include "rbac_hooks.h"
 
 
 #define PG_EXTENSION_NAME_SCAN_NARGS 1
@@ -1442,6 +1443,9 @@ InvalidateDocumentDBApiCache(Datum argument, Oid relationId)
 		CacheValidity = CACHE_INVALID;
 		ResetCollectionsCache();
 		InvalidateVersionCache();
+
+		/* Let a hosting layer refresh state it derives from collection metadata. */
+		NotifyCollectionMetadataInvalidated();
 	}
 	else
 	{
