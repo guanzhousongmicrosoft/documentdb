@@ -262,7 +262,7 @@ RunVacuumAndMeasureFreedSpace(uint64 collectionId, const CompactArgs *args)
 	 * During a rolling upgrade fall back to the estimate based accounting so
 	 * that compact keeps working instead of failing on a lagging worker.
 	 */
-	if (!IsClusterVersionAtleast(DocDB_V0, 118, 0))
+	if (!IsClusterVersionAtleast(DocDB_V1, 0, 0))
 	{
 		return RunVacuumAndEstimateFreedSpace(collectionId, args);
 	}
@@ -303,7 +303,7 @@ RunVacuumAndMeasureFreedSpace(uint64 collectionId, const CompactArgs *args)
 
 
 /*
- * Pre-0.118 accounting, kept so that compact still behaves sanely while a
+ * Pre-1.0 accounting, kept so that compact still behaves sanely while a
  * cluster is partially upgraded and get_storage_stats_worker is not yet
  * guaranteed to exist on every node.
  */

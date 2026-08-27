@@ -419,7 +419,7 @@ GetPostgresRelationSizes(ArrayType *relationIds)
 CollectionBloatStats
 GetCollectionBloatEstimate(uint64 collectionId)
 {
-	if (!IsClusterVersionAtleast(DocDB_V0, 118, 0))
+	if (!IsClusterVersionAtleast(DocDB_V1, 0, 0))
 	{
 		/*
 		 * get_storage_stats_worker only exists once every node has been
