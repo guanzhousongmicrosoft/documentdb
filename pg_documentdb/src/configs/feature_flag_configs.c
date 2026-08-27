@@ -34,6 +34,19 @@ bool EnableBypassDocumentValidation =
 bool EnableNullCollectionValidation = DEFAULT_ENABLE_NULL_COLLECTION_VALIDATION;
 
 /*
+ * SECTION: Text search flags
+ */
+
+/*
+ * Gates skipping the use of leaked per-statement text query state that a prior
+ * aborted statement may have left published on this backend.
+ */
+
+/* Added on v0.118, enabled on v0.118, remove after v0.120 */
+#define DEFAULT_ENABLE_SKIP_USE_QUERY_TEXT_DATA true
+bool EnableSkipUseQueryTextData = DEFAULT_ENABLE_SKIP_USE_QUERY_TEXT_DATA;
+
+/*
  * SECTION: Authentication & Authorization user flags
  */
 
@@ -689,6 +702,17 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableBypassDocumentValidation,
 		DEFAULT_ENABLE_BYPASSDOCUMENTVALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_skip_use_query_text_data", newGucPrefix),
+		gettext_noop(
+			"Whether to skip using per-statement text query state that a prior aborted statement may have left published on this backend."),
+		NULL,
+		&EnableSkipUseQueryTextData,
+		DEFAULT_ENABLE_SKIP_USE_QUERY_TEXT_DATA,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);

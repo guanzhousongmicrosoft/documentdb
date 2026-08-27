@@ -133,6 +133,8 @@ static Query * ExpandNestedAggregationFunction(Query *node, ParamListInfo boundP
 static void ForceExcludeNonIndexPaths(PlannerInfo *root, RelOptInfo *rel,
 									  Index rti, RangeTblEntry *rte);
 static List * AugmentBaseRestrictInfo(PlannerInfo *root, RelOptInfo *rel);
+static void PatchOrderByMetaWithTextIndexData(PlannerInfo *root, Index baseRteIndex,
+											  QueryTextIndexData *textIndexData);
 static void ExtensionPostParseAnalyzeHookCore(ParseState *pstate, Query *query,
 											  const JumbleState *jstate);
 
@@ -512,6 +514,131 @@ InMatchIsEquvalentTo(ScalarArrayOpExpr *opExpr, const bson_value_t *arrayValue)
 }
 
 
+/*
+ * Fills the placeholder index options and TSQuery arguments of a
+ * bson_orderby_meta order by with the values resolved from the matched text
+ * index. HandleSort emits a $meta:"textScore" sort as
+ * bson_orderby_meta(document, NULL, NULL) because the text index options and
+ * TSQuery are only known once the text index is chosen during planning.
+ *
+ * Both the sort target entry and the equivalence-class copy that backs the sort
+ * pathkey must be patched: the equivalence class stores a copyObject of the
+ * order by expression (see get_eclass_for_sort_expr), so patching only the
+ * target entry would make the two diverge and cause create_plan to append a
+ * duplicate sort column.
+ */
+static bool
+PatchOrderByMetaFuncExprArgs(Expr *expr, Oid orderByMetaFuncId, Index baseRteIndex,
+							 QueryTextIndexData *textIndexData)
+{
+	if (expr != NULL && IsA(expr, RelabelType))
+	{
+		expr = ((RelabelType *) expr)->arg;
+	}
+
+	if (expr == NULL || !IsA(expr, FuncExpr))
+	{
+		return false;
+	}
+
+	FuncExpr *funcExpr = (FuncExpr *) expr;
+	if (funcExpr->funcid != orderByMetaFuncId ||
+		list_length(funcExpr->args) != 3)
+	{
+		return false;
+	}
+
+	/*
+	 * The first argument is the document being scored. Only patch this
+	 * bson_orderby_meta if that argument is a Var referencing the current base
+	 * relation (the text-indexed table this hook invocation is planning). This
+	 * guards against patching an unrelated bson_orderby_meta that happens to
+	 * appear in the same target list or equivalence class (for example a
+	 * document sourced from a different range table entry), which would
+	 * incorrectly attach this relation's text index options and TSQuery to it.
+	 */
+	Node *documentArg = (Node *) linitial(funcExpr->args);
+	if (documentArg != NULL && IsA(documentArg, RelabelType))
+	{
+		documentArg = (Node *) ((RelabelType *) documentArg)->arg;
+	}
+
+	if (documentArg == NULL || !IsA(documentArg, Var))
+	{
+		return false;
+	}
+
+	Var *documentVar = (Var *) documentArg;
+	if ((Index) documentVar->varno != baseRteIndex || documentVar->varlevelsup != 0)
+	{
+		return false;
+	}
+
+	Const *indexOptionsConst = makeConst(BYTEAOID, -1, InvalidOid, -1,
+										 PointerGetDatum(textIndexData->indexOptions),
+										 false, false);
+	Const *queryConst = makeConst(TSQUERYOID, -1, InvalidOid, -1,
+								  textIndexData->query, false, false);
+
+	funcExpr->args = list_make3(linitial(funcExpr->args), indexOptionsConst,
+								queryConst);
+	return true;
+}
+
+
+static void
+PatchOrderByMetaWithTextIndexData(PlannerInfo *root, Index baseRteIndex,
+								  QueryTextIndexData *textIndexData)
+{
+	Oid orderByMetaFuncId = BsonOrderByMetaFunctionOid();
+	if (orderByMetaFuncId == InvalidOid)
+	{
+		return;
+	}
+
+	Query *query = root->parse;
+	bool patched = false;
+
+	/*
+	 * Patch any bson_orderby_meta in the query target list. On a single node the
+	 * function appears as the $meta:"textScore" sort target entry. On a sharded
+	 * query the sort is performed on the coordinator, so the per-shard query
+	 * projects bson_orderby_meta as a pulled-up target list column with no local
+	 * ORDER BY clause. Walking the target list (a superset of the sort target
+	 * entries) covers both shapes so the placeholder arguments are always filled.
+	 */
+	ListCell *tleCell;
+	foreach(tleCell, query->targetList)
+	{
+		TargetEntry *entry = (TargetEntry *) lfirst(tleCell);
+		if (PatchOrderByMetaFuncExprArgs(entry->expr, orderByMetaFuncId, baseRteIndex,
+										 textIndexData))
+		{
+			patched = true;
+		}
+	}
+
+	if (!patched)
+	{
+		return;
+	}
+
+	/* Keep the equivalence-class copies that back the sort pathkeys in sync. */
+	ListCell *ecCell;
+	foreach(ecCell, root->eq_classes)
+	{
+		EquivalenceClass *eqClass = (EquivalenceClass *) lfirst(ecCell);
+		ListCell *emCell;
+		foreach(emCell, eqClass->ec_members)
+		{
+			EquivalenceMember *eqMember = (EquivalenceMember *) lfirst(emCell);
+			PatchOrderByMetaFuncExprArgs(eqMember->em_expr, orderByMetaFuncId,
+										 baseRteIndex, textIndexData);
+		}
+	}
+}
+
+
 static void
 ExtensionRelPathlistHookCore(PlannerInfo *root, RelOptInfo *rel, Index rti,
 							 RangeTblEntry *rte)
@@ -657,6 +784,15 @@ ExtensionRelPathlistHookCore(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (textIndexData != NULL && textIndexData->indexOptions != NULL &&
 			textIndexData->query != (Datum) 0)
 		{
+			/* A $meta:"textScore" sort compiled to a bson_orderby_meta order by
+			 * carries placeholder index options and TSQuery arguments; now that
+			 * the text index is resolved, patch those arguments with the real
+			 * values so the sort does not depend on process-global query state. */
+			if (EnableSkipUseQueryTextData)
+			{
+				PatchOrderByMetaWithTextIndexData(root, rti, textIndexData);
+			}
+
 			AddExtensionQueryScanForTextQuery(root, rel, rte, textIndexData);
 		}
 	}

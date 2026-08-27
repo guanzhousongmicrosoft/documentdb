@@ -226,6 +226,7 @@ Oid ApiCatalogCollectionIndexIdSequenceId(void);
 
 /* order by */
 Oid BsonOrderByFunctionOid(void);
+Oid BsonOrderByMetaFunctionOid(void);
 Oid BsonOrderByWithCollationFunctionOid(void);
 Oid BsonOrderByIndexFunctionOid(void);
 Oid BsonOrderByIndexReverseFunctionOid(void);
