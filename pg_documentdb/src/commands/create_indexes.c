@@ -4827,6 +4827,7 @@ TryCreateCollectionIndexes(uint64 collectionId, List *indexDefList,
 {
 	TryCreateIndexesResult *result = MemoryContextAllocZero(retValueContext,
 															sizeof(TryCreateIndexesResult));
+	HTAB *indexNameCache = NULL;
 
 	int nindexes = list_length(indexDefList);
 	if (nindexes == 0)
@@ -4877,7 +4878,8 @@ TryCreateCollectionIndexes(uint64 collectionId, List *indexDefList,
 		{
 			MemoryContext oldContext = MemoryContextSwitchTo(retValueContext);
 			if (TryGetErrorMessageAndCode((ErrorData *) edata, &errorCodeInternal,
-										  &errorMessageInternal))
+										  &errorMessageInternal, retValueContext,
+										  &indexNameCache))
 			{
 				result->errcode = errorCodeInternal;
 				result->errmsg = errorMessageInternal;

@@ -100,6 +100,9 @@ typedef struct
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
+
+	/* Logical index names resolved while processing this request */
+	HTAB *indexNameCache;
 } BatchDeletionResult;
 
 PG_FUNCTION_INFO_V1(command_delete);
@@ -154,7 +157,9 @@ static void DeleteOneObjectId(MongoCollection *collection,
 							  bool queryHasNonIdFilters,
 							  bool forceInlineWrites,
 							  text *transactionId, DeleteOneResult *result);
-static List * ValidateQueryDocuments(BatchDeletionSpec *batchSpec);
+static List * ValidateQueryDocuments(BatchDeletionSpec *batchSpec,
+									 MemoryContext requestContext,
+									 HTAB **indexNameCache);
 static pgbson * BuildResponseMessage(BatchDeletionResult *batchResult);
 static void DeleteOneInternalCore(MongoCollection *collection, int64 shardKeyHash,
 								  DeleteOneParams *deleteOneParams,
@@ -312,7 +317,11 @@ CommandDeleteCore(PG_FUNCTION_ARGS, WriteMode writeMode, MemoryContext allocCont
 		 */
 		batchResult.ok = 1;
 		batchResult.rowsDeleted = 0;
-		batchResult.writeErrors = ValidateQueryDocuments(batchSpec);
+		batchResult.writeErrors = ValidateQueryDocuments(batchSpec,
+														 batchResult.
+														 resultMemoryContext,
+														 &batchResult.
+														 indexNameCache);
 		batchResponse = BuildResponseMessage(&batchResult);
 	}
 
@@ -774,7 +783,11 @@ DoSingleDeletion(MongoCollection *collection,
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  deleteIndex));
+																	  deleteIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -835,7 +848,11 @@ DoSingleDeletionWithSubTxn(MongoCollection *collection,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  deleteIndex));
+																	  deleteIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -2040,7 +2057,8 @@ DeleteOneObjectId(MongoCollection *collection, DeleteOneParams *deleteOneParams,
  * in the run-time to implicitly perform necessary validations.
  */
 static List *
-ValidateQueryDocuments(BatchDeletionSpec *batchSpec)
+ValidateQueryDocuments(BatchDeletionSpec *batchSpec, MemoryContext requestContext,
+					   HTAB **indexNameCache)
 {
 	/* declared volatile because of the longjmp in PG_CATCH */
 	List *volatile writeErrorList = NIL;
@@ -2071,7 +2089,9 @@ ValidateQueryDocuments(BatchDeletionSpec *batchSpec)
 			ErrorData *errorData = CopyErrorDataAndFlush();
 
 			writeErrorList = lappend(writeErrorList, GetWriteErrorFromErrorData(errorData,
-																				writeErrorIdx));
+																				writeErrorIdx,
+																				requestContext,
+																				indexNameCache));
 			isSuccess = false;
 		}
 		PG_END_TRY();

@@ -256,6 +256,9 @@ typedef struct
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
+
+	/* Logical index names resolved while processing this request */
+	HTAB *indexNameCache;
 } BatchUpdateResult;
 
 
@@ -359,7 +362,9 @@ static pgbson * UpsertDocument(MongoCollection *collection, const bson_value_t *
 							   ExprEvalState *stateForSchemaValidation,
 							   bool hasOnlyObjectIdFilter,
 							   const bson_value_t *variableSpec);
-static List * ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec);
+static List * ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
+											  MemoryContext requestContext,
+											  HTAB **indexNameCache);
 static pgbson * BuildResponseMessage(BatchUpdateResult *batchResult);
 static void BuildUpdates(BatchUpdateSpec *spec);
 static void DeserializeUpdateWorkerSpec(pgbson *updateInternalSpec,
@@ -635,7 +640,9 @@ PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 			batchResult.ok = 1;
 			batchResult.rowsMatched = 0;
 			batchResult.rowsModified = 0;
-			batchResult.writeErrors = ValidateQueryAndUpdateDocuments(batchSpec);
+			batchResult.writeErrors = ValidateQueryAndUpdateDocuments(
+				batchSpec, batchResult.resultMemoryContext,
+				&batchResult.indexNameCache);
 			batchResult.upserted = NIL;
 
 			values[0] = PointerGetDatum(BuildResponseMessage(&batchResult));
@@ -1288,7 +1295,11 @@ DoSingleUpdateWithSubTxn(MongoCollection *collection, UpdateSpec *updateSpec,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  updateIndex));
+																	  updateIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -1341,7 +1352,11 @@ DoSingleUpdate(MongoCollection *collection, UpdateSpec *updateSpec, text *transa
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  updateIndex));
+																	  updateIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -4140,7 +4155,9 @@ UpsertDocument(MongoCollection *collection, const bson_value_t *update,
  * as if we're in the run-time to implicitly perform necessary validations.
  */
 static List *
-ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec)
+ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
+								MemoryContext requestContext,
+								HTAB **indexNameCache)
 {
 	/* declared volatile because of the longjmp in PG_CATCH */
 	List *volatile writeErrorList = NIL;
@@ -4174,7 +4191,9 @@ ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec)
 			ErrorData *errorData = CopyErrorDataAndFlush();
 
 			writeErrorList = lappend(writeErrorList, GetWriteErrorFromErrorData(errorData,
-																				writeErrorIdx));
+																				writeErrorIdx,
+																				requestContext,
+																				indexNameCache));
 			isSuccess = false;
 		}
 		PG_END_TRY();
