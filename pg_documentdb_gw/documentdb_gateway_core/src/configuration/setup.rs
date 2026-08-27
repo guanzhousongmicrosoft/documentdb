@@ -96,6 +96,7 @@ pub struct DocumentDBSetupConfiguration {
     pub postgres_startup_wait_time_seconds: Option<u64>,
 
     // Runtime configuration
+    pub enable_v2_runtime: Option<bool>,
     pub async_runtime_worker_threads: Option<usize>,
     pub stream_read_buffer_size: Option<usize>,
     pub stream_write_buffer_size: Option<usize>,
@@ -182,6 +183,7 @@ impl std::fmt::Debug for DocumentDBSetupConfiguration {
                 "postgres_startup_wait_time_seconds",
                 &self.postgres_startup_wait_time_seconds,
             )
+            .field("enable_v2_runtime", &self.enable_v2_runtime)
             .field(
                 "async_runtime_worker_threads",
                 &self.async_runtime_worker_threads,
@@ -208,6 +210,12 @@ impl std::fmt::Debug for DocumentDBSetupConfiguration {
 }
 
 impl DocumentDBSetupConfiguration {
+    /// Returns whether the v2 gateway runtime is enabled.
+    #[must_use]
+    pub fn enable_v2_runtime(&self) -> bool {
+        self.enable_v2_runtime.unwrap_or(false)
+    }
+
     /// Load configuration strictly from a JSON file.
     ///
     /// Kept for back-compat with existing callers (tests, dev tooling) and
