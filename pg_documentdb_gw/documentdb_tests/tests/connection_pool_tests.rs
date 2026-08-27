@@ -32,10 +32,11 @@ use documentdb_gateway_core::{
     requests::{request_tracker::RequestTracker, RequestExecutionMode, RequestType, WireRequest},
 };
 use documentdb_tests::test_setup::{
-    config::{
-        failing_setup_configuration, setup_configuration, setup_configuration_with_command_timeout,
+    config::{failing_setup_configuration, setup_configuration},
+    pools::{
+        build_connection_pool, build_connection_pool_with_command_timeout,
+        build_pool_manager_with_command_timeout, TestConfiguration,
     },
-    pools::{build_connection_pool, build_pool_manager, TestConfiguration},
 };
 use tokio::{
     net::TcpListener,
@@ -180,9 +181,14 @@ async fn pool_backend_error_converts_to_pool_kind_documentdb_error() {
 
 #[tokio::test]
 async fn acquire_connection_records_timeout_metric_on_pool_timeout() {
-    let setup_config = setup_configuration_with_command_timeout(0);
-    let pool =
-        build_connection_pool(&setup_config, &setup_config.postgres_system_user.clone(), 1).await;
+    let setup_config = setup_configuration();
+    let pool = build_connection_pool_with_command_timeout(
+        &setup_config,
+        &setup_config.postgres_system_user.clone(),
+        1,
+        0,
+    )
+    .await;
 
     let _held = pool.acquire_connection().await.unwrap();
     let error = pool
@@ -198,9 +204,14 @@ async fn acquire_connection_records_timeout_metric_on_pool_timeout() {
 
 #[tokio::test]
 async fn run_request_with_retries_counts_deadpool_timeouts_once() {
-    let setup_config = setup_configuration_with_command_timeout(0);
-    let pool =
-        build_connection_pool(&setup_config, &setup_config.postgres_system_user.clone(), 1).await;
+    let setup_config = setup_configuration();
+    let pool = build_connection_pool_with_command_timeout(
+        &setup_config,
+        &setup_config.postgres_system_user.clone(),
+        1,
+        0,
+    )
+    .await;
     let _held = pool.acquire_connection().await.unwrap();
     let _ = pool.report_status();
     let request_tracker = RequestTracker::new();
@@ -230,10 +241,8 @@ async fn run_request_with_retries_counts_deadpool_timeouts_once() {
 
 #[tokio::test]
 async fn pool_manager_system_requests_connection_counts_deadpool_timeouts_once() {
-    let mut setup_config = setup_configuration();
-    setup_config.postgres_command_timeout_secs = Some(0);
-
-    let pool_manager = build_pool_manager(&setup_config);
+    let setup_config = setup_configuration();
+    let pool_manager = build_pool_manager_with_command_timeout(&setup_config, 0);
 
     // Saturate the system requests pool (max = SYSTEM_REQUESTS_MAX_CONNECTIONS = 2).
     let _first = pool_manager.system_requests_connection().await.unwrap();
@@ -258,9 +267,14 @@ async fn pool_manager_system_requests_connection_counts_deadpool_timeouts_once()
 
 #[tokio::test]
 async fn run_request_with_retries_returns_exceeded_time_limit_when_command_timeout_exceeded() {
-    let setup_config = setup_configuration_with_command_timeout(1);
-    let pool =
-        build_connection_pool(&setup_config, &setup_config.postgres_system_user.clone(), 1).await;
+    let setup_config = setup_configuration();
+    let pool = build_connection_pool_with_command_timeout(
+        &setup_config,
+        &setup_config.postgres_system_user.clone(),
+        1,
+        1,
+    )
+    .await;
     // Hold the only connection so the next acquire will time out.
     let _held = pool.acquire_connection().await.unwrap();
     let _ = pool.report_status();
@@ -289,9 +303,14 @@ async fn run_request_with_retries_returns_exceeded_time_limit_when_command_timeo
 
 #[tokio::test]
 async fn run_request_with_retries_returns_original_error_when_no_command_timeout() {
-    let setup_config = setup_configuration_with_command_timeout(1);
-    let pool =
-        build_connection_pool(&setup_config, &setup_config.postgres_system_user.clone(), 1).await;
+    let setup_config = setup_configuration();
+    let pool = build_connection_pool_with_command_timeout(
+        &setup_config,
+        &setup_config.postgres_system_user.clone(),
+        1,
+        1,
+    )
+    .await;
     // Hold the only connection so the next acquire will time out.
     let _held = pool.acquire_connection().await.unwrap();
     let _ = pool.report_status();
