@@ -39,7 +39,7 @@ impl ServiceContext {
         let request_metrics_enabled = setup_configuration
             .telemetry_settings()
             .request_metrics_enabled();
-        let timeout_secs = setup_configuration.transaction_timeout_secs();
+        let timeout_secs = dynamic_configuration.transaction_timeout_sec();
         let cursor_store = CursorStore::with_reaper(Arc::clone(&dynamic_configuration), true);
         let transaction_store = TransactionStore::new(Duration::from_secs(timeout_secs));
         let session_manager = SessionManager::new(
