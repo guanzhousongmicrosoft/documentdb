@@ -305,6 +305,8 @@ TryCleanupRequestFromQueue(IndexCmdRequest *request, bool skipIndexCleanup)
 static BackgroundIndexRunStatus
 build_index_concurrently_from_indexqueue_core(MemoryContext stableContext)
 {
+	HTAB *indexNameCache = NULL;
+
 	/* Prioritize pruning the index queue for old indexes */
 	if (PruneSkippableIndexes(stableContext))
 	{
@@ -686,7 +688,8 @@ build_index_concurrently_from_indexqueue_core(MemoryContext stableContext)
 		int errorCodeInternal = 0;
 		char *errorMessageInternal = NULL;
 		if (TryGetErrorMessageAndCode((ErrorData *) edata, &errorCodeInternal,
-									  &errorMessageInternal))
+									  &errorMessageInternal, stableContext,
+									  &indexNameCache))
 		{
 			errorCode = errorCodeInternal;
 			errorMessage = errorMessageInternal;
