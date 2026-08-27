@@ -38,7 +38,7 @@ static TrackedVersions *TrackedExtensionVersions = NULL;
 
 int FirstMajorVersionOffset = 0;
 
-#define MaxVersionAllowed DocDB_V0
+#define MaxVersionAllowed DocDB_V1
 
 static char *VersionRefreshQuery = NULL;
 static char * GetVersionRefreshQuery(void);
