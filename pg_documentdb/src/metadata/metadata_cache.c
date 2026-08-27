@@ -287,6 +287,9 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the bson_orderby with collation function */
 	Oid BsonOrderByWithCollationFunctionId;
 
+	/* OID of the bson_orderby_meta function */
+	Oid BsonOrderByMetaFunctionId;
+
 	/* OID of the bson_orderby_index function */
 	Oid BsonOrderByIndexFunctionId;
 
@@ -5492,6 +5495,24 @@ BsonOrderByFunctionOid(void)
 {
 	return GetBinaryOperatorFunctionId(&Cache.BsonOrderByFunctionId,
 									   "bson_orderby", BsonTypeId(), BsonTypeId());
+}
+
+
+/*
+ * BsonOrderByMetaFunctionOid returns the OID of the
+ * bson_orderby_meta(<bson>, bytea, tsquery) function that computes the
+ * text score for a document from an explicit index options blob and TSQuery.
+ */
+Oid
+BsonOrderByMetaFunctionOid(void)
+{
+	int nargs = 3;
+	Oid argTypes[3] = { BsonTypeId(), BYTEAOID, TSQUERYOID };
+	bool missingOk = true;
+	return GetSchemaFunctionIdWithNargs(&Cache.BsonOrderByMetaFunctionId,
+										ApiInternalSchemaNameV2,
+										"bson_orderby_meta", nargs, argTypes,
+										missingOk);
 }
 
 
