@@ -29,6 +29,10 @@ pub mod time;
 pub(crate) mod collections;
 mod runtime;
 
+#[cfg(feature = "runtime-benchmarks")]
+#[doc(hidden)]
+pub use runtime::v2::benchmarks as runtime_benchmarks;
+
 #[cfg(test)]
 pub(crate) mod testing;
 
@@ -55,6 +59,22 @@ pub async fn run_gateway<T>(
 where
     T: PgDataClient + 'static,
 {
-    tracing::info!(">> Starting Gateway v1 Runtime");
+    runtime::v2::run_gateway::<T>(service_context, telemetry, token).await
+}
+
+/// Runs the legacy (v1) gateway runtime.
+///
+/// # Errors
+///
+/// Returns an error if the legacy runtime fails while binding, serving, or
+/// shutting down listener tasks.
+pub async fn run_legacy_gateway<T>(
+    service_context: ServiceContext,
+    telemetry: Option<Box<dyn TelemetryProvider>>,
+    token: CancellationToken,
+) -> Result<()>
+where
+    T: PgDataClient + 'static,
+{
     runtime::v1::run_gateway::<T>(service_context, telemetry, token).await
 }
