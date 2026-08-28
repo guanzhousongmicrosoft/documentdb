@@ -52,6 +52,8 @@
 #include "opclass/bson_text_gin.h"
 #include "aggregation/bson_aggregation_pipeline.h"
 #include "aggregation/bson_query_common.h"
+#include "commands/update.h"
+#include "commands/write_commands.h"
 #include "utils/query_utils.h"
 #include "utils/guc_utils.h"
 #include "utils/docdb_make_funcs.h"
@@ -109,6 +111,9 @@ typedef struct DocumentDbQueryFlagsState
 
 	/* The current depth (intermediate state during walking) */
 	int queryDepth;
+
+	/* the bound parameters for the given request context */
+	ParamListInfo boundParams;
 } DocumentDbQueryFlagsState;
 
 static bool DocumentDbQueryFlagsWalker(Node *node, DocumentDbQueryFlagsState *queryFlags);
@@ -127,8 +132,10 @@ static bool IsRTEShardForDocumentDbCollection(RangeTblEntry *rte,
 static bool ProcessWorkerWriteQueryPath(PlannerInfo *root, RelOptInfo *rel, Index rti,
 										RangeTblEntry *rte);
 static Query * ExpandAggregationFunction(Query *node, ParamListInfo boundParams,
-										 PlannedStmt **plan, int *cursorOptions);
-static Query * ExpandNestedAggregationFunction(Query *node, ParamListInfo boundParams);
+										 PlannedStmt **plan, int *cursorOptions,
+										 int *queryFlags);
+static Query * ExpandNestedAggregationFunction(Query *node,
+											   DocumentDbQueryFlagsState *state);
 
 static void ForceExcludeNonIndexPaths(PlannerInfo *root, RelOptInfo *rel,
 									  Index rti, RangeTblEntry *rte);
@@ -279,7 +286,7 @@ DocumentDBApiPlanner(Query *parse, const char *queryString, int cursorOptions,
 		if (queryFlags & HAS_AGGREGATION_FUNCTION)
 		{
 			parse = (Query *) ExpandAggregationFunction(parse, boundParams, &plan,
-														&cursorOptions);
+														&cursorOptions, &queryFlags);
 			if (plan != NULL)
 			{
 				return plan;
@@ -288,7 +295,11 @@ DocumentDBApiPlanner(Query *parse, const char *queryString, int cursorOptions,
 
 		if (queryFlags & HAS_NESTED_AGGREGATION_FUNCTION)
 		{
-			parse = (Query *) ExpandNestedAggregationFunction(parse, boundParams);
+			DocumentDbQueryFlagsState innerState = { 0 };
+			innerState.documentDbQueryFlags = queryFlags;
+			innerState.boundParams = boundParams;
+			parse = (Query *) ExpandNestedAggregationFunction(parse, &innerState);
+			queryFlags = innerState.documentDbQueryFlags;
 		}
 
 		/* replace the @@ operators and inject shard_key_value filters */
@@ -1215,6 +1226,9 @@ IsAggregationFunction(Oid funcId)
 	return funcId == ApiCatalogAggregationPipelineFunctionId() ||
 		   funcId == ApiCatalogAggregationFindFunctionId() ||
 		   funcId == ApiCatalogAggregationCountFunctionId() ||
+		   funcId == ApiCatalogAggregationUpdateFunctionId() ||
+		   funcId == ApiCatalogAggregationDeleteFunctionId() ||
+		   funcId == ApiCatalogAggregationFindAndModifyFunctionId() ||
 		   funcId == ApiCatalogAggregationDistinctFunctionId() ||
 		   funcId == ApiCatalogAggregationGetMoreFunctionId();
 }
@@ -2013,7 +2027,7 @@ ProcessWorkerWriteQueryPath(PlannerInfo *root, RelOptInfo *rel, Index rti,
  * query, replaces it with the post-processed query.
  */
 static Node *
-MutateQueryAggregatorFunction(Node *node, ParamListInfo boundParams)
+MutateQueryAggregatorFunction(Node *node, DocumentDbQueryFlagsState *state)
 {
 	if (node == NULL)
 	{
@@ -2036,25 +2050,27 @@ MutateQueryAggregatorFunction(Node *node, ParamListInfo boundParams)
 				{
 					PlannedStmt *stmt = NULL;
 					int cursorOptions = 0;
-					return (Node *) ExpandAggregationFunction(query, boundParams, &stmt,
-															  &cursorOptions);
+					return (Node *) ExpandAggregationFunction(query, state->boundParams,
+															  &stmt,
+															  &cursorOptions,
+															  &state->documentDbQueryFlags);
 				}
 			}
 		}
 
 		return (Node *) query_tree_mutator((Query *) node, MutateQueryAggregatorFunction,
-										   boundParams, QTW_DONT_COPY_QUERY |
+										   state, QTW_DONT_COPY_QUERY |
 										   QTW_EXAMINE_RTES_BEFORE);
 	}
 
-	return expression_tree_mutator(node, MutateQueryAggregatorFunction, boundParams);
+	return expression_tree_mutator(node, MutateQueryAggregatorFunction, state);
 }
 
 
 static Query *
-ExpandNestedAggregationFunction(Query *query, ParamListInfo boundParams)
+ExpandNestedAggregationFunction(Query *query, DocumentDbQueryFlagsState *state)
 {
-	return query_tree_mutator(query, MutateQueryAggregatorFunction, boundParams,
+	return query_tree_mutator(query, MutateQueryAggregatorFunction, state,
 							  QTW_DONT_COPY_QUERY | QTW_EXAMINE_RTES_BEFORE);
 }
 
@@ -2066,7 +2082,7 @@ ExpandNestedAggregationFunction(Query *query, ParamListInfo boundParams)
  */
 static Query *
 ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt **plan,
-						  int *cursorOptions)
+						  int *cursorOptions, int *queryFlags)
 {
 	/* Top level validations - these are right now during development */
 	*plan = NULL;
@@ -2245,6 +2261,28 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 		finalQuery = GenerateCountQuery(databaseName,
 										pipeline,
 										setStatementTimeout);
+	}
+	else if (aggregationFunc->funcid == ApiCatalogAggregationUpdateFunctionId())
+	{
+		/* Force eval the query match code path */
+		*queryFlags = *queryFlags | HAS_QUERY_MATCH_FUNCTION;
+		finalQuery = GenerateUpdateQuery(databaseName,
+										 pipeline,
+										 setStatementTimeout);
+	}
+	else if (aggregationFunc->funcid == ApiCatalogAggregationDeleteFunctionId())
+	{
+		/* Force eval the query match code path */
+		*queryFlags = *queryFlags | HAS_QUERY_MATCH_FUNCTION;
+		finalQuery = GenerateDeleteQuery(databaseName,
+										 pipeline,
+										 setStatementTimeout);
+	}
+	else if (aggregationFunc->funcid == ApiCatalogAggregationFindAndModifyFunctionId())
+	{
+		finalQuery = GenerateFindAndModifyQuery(databaseName,
+												pipeline,
+												setStatementTimeout);
 	}
 	else if (aggregationFunc->funcid == ApiCatalogAggregationDistinctFunctionId())
 	{
