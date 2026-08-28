@@ -1,4 +1,5 @@
 ### documentdb v1.0-0 (Unreleased) ###
+* Release executable memory allocated for PCRE2 JIT-compiled regular expressions when their memory context resets. *[Bugfix]* (work item 5530914)
 * Prevent RUM vacuum from processing internal entry-tree and posting-tree roots as leaf pages after concurrent root splits. *[Bugfix]*
 * Restore vacuum cost delays and interrupt handling between RUM posting-tree leaf pages. *[Bugfix]*
 * Keep background index callers waiting after retryable failures, and report an error only after the request becomes terminal. *[Bugfix]*
