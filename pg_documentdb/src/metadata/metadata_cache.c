@@ -819,6 +819,15 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the bson_aggregation_count function */
 	Oid ApiCatalogAggregationCountFunctionId;
 
+	/* OID of the bson_aggregation_update function */
+	Oid ApiCatalogAggregationUpdateFunctionId;
+
+	/* OID of the bson_aggregation_delete function */
+	Oid ApiCatalogAggregationDeleteFunctionId;
+
+	/* OID of the bson_aggregation_find_and_modify function */
+	Oid ApiCatalogAggregationFindAndModifyFunctionId;
+
 	/* OID of the bson_aggregation_distinct function */
 	Oid ApiCatalogAggregationDistinctFunctionId;
 
@@ -3792,6 +3801,39 @@ ApiCatalogAggregationCountFunctionId(void)
 		"bson_aggregation_count",
 		TEXTOID, BsonTypeId(),
 		"1.7");
+}
+
+
+Oid
+ApiCatalogAggregationUpdateFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationUpdateFunctionId,
+		"bson_aggregation_update",
+		TEXTOID, BsonTypeId(),
+		"2.0");
+}
+
+
+Oid
+ApiCatalogAggregationDeleteFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationDeleteFunctionId,
+		"bson_aggregation_delete",
+		TEXTOID, BsonTypeId(),
+		"2.0");
+}
+
+
+Oid
+ApiCatalogAggregationFindAndModifyFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationFindAndModifyFunctionId,
+		"bson_aggregation_find_and_modify",
+		TEXTOID, BsonTypeId(),
+		"2.0");
 }
 
 
