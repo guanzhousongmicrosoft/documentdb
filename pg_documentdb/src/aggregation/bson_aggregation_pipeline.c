@@ -6010,7 +6010,7 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 			 */
 			bool useOrderByMeta = isSortByMetaTextScore &&
 								  EnableSkipUseQueryTextData &&
-								  IsClusterVersionAtleast(DocDB_V0, 118, 0);
+								  IsClusterVersionAtleast(DocDB_V1, 0, 0);
 
 			List *args = NIL;
 
