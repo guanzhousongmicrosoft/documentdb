@@ -1198,6 +1198,9 @@ static const int MaxEvenFunctionArguments = ((int) (FUNC_MAX_ARGS / 2)) * 2;
 
 PG_FUNCTION_INFO_V1(command_bson_aggregation_pipeline);
 PG_FUNCTION_INFO_V1(command_bson_aggregation_getmore);
+PG_FUNCTION_INFO_V1(command_bson_aggregation_update);
+PG_FUNCTION_INFO_V1(command_bson_aggregation_delete);
+PG_FUNCTION_INFO_V1(command_bson_aggregation_find_and_modify);
 PG_FUNCTION_INFO_V1(command_api_collection);
 PG_FUNCTION_INFO_V1(command_aggregation_support);
 PG_FUNCTION_INFO_V1(documentdb_core_bson_to_bson);
@@ -1305,6 +1308,33 @@ command_bson_aggregation_getmore(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR, (errmsg(
 						"bson_aggregation function should have been processed by the planner. This is an internal error")));
+	PG_RETURN_BOOL(false);
+}
+
+
+Datum
+command_bson_aggregation_update(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR, (errmsg(
+						"bson_aggregation_update must be replaced by the planner. This is an internal error")));
+	PG_RETURN_BOOL(false);
+}
+
+
+Datum
+command_bson_aggregation_delete(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR, (errmsg(
+						"bson_aggregation_delete must be replaced by the planner. This is an internal error")));
+	PG_RETURN_BOOL(false);
+}
+
+
+Datum
+command_bson_aggregation_find_and_modify(PG_FUNCTION_ARGS)
+{
+	ereport(ERROR, (errmsg(
+						"bson_aggregation_find_and_modify must be replaced by the planner. This is an internal error")));
 	PG_RETURN_BOOL(false);
 }
 
