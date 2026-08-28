@@ -32,6 +32,7 @@
 #include "utils/version_utils_private.h"
 #include "utils/data_table_utils.h"
 #include "api_hooks.h"
+#include "distributed_schema_operations.h"
 
 extern char *ApiExtensionName;
 extern char *ApiGucPrefix;
@@ -54,7 +55,6 @@ extern char * GetIndexQueueName(void);
 static char * GetClusterInitializedVersion(void);
 static void DistributeCrudFunctions(void);
 static void CreateIndexBuildsTable(bool includeOptions, bool includeDropCommandType);
-static void CreateValidateDbNameTrigger(void);
 static void AlterDefaultDatabaseObjects(void);
 static char * UpdateClusterMetadata(void);
 static void CreateReferenceTable(const char *tableName);
@@ -66,7 +66,6 @@ static void DropLegacyChangeStream(void);
 static void TriggerInvalidateClusterMetadata(void);
 static void AddCollectionsTableViewDefinition(void);
 static void AddCollectionsTableValidationColumns(void);
-static void CreateExtensionVersionsTrigger(void);
 static bool VersionEquals(ExtensionVersion versionA, ExtensionVersion versionB);
 static void GetInstalledVersion(ExtensionVersion *installedVersion);
 static void ParseVersionString(ExtensionVersion *extensionVersion, char *versionString);
@@ -582,27 +581,6 @@ ExecuteMetadataColumnAlter(const char *query, const char *tableName,
 
 
 /*
- * Create validate_dbname trigger on the collections table.
- */
-static void
-CreateValidateDbNameTrigger(void)
-{
-	bool isNull = false;
-	bool readOnly = false;
-
-	StringInfo cmdStr = makeStringInfo();
-	appendStringInfo(cmdStr,
-					 "CREATE OR REPLACE TRIGGER collections_trigger_validate_dbname "
-					 "BEFORE INSERT OR UPDATE ON %s.collections "
-					 "FOR EACH ROW EXECUTE FUNCTION "
-					 "%s.trigger_validate_dbname();", ApiCatalogSchemaName,
-					 ApiCatalogToApiInternalSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
-}
-
-
-/*
  * Handle failures if the worker has the attribute.
  * This handles mixed schema versioning.
  */
@@ -752,7 +730,7 @@ AddCollectionsTableValidationColumns(void)
 /*
  * Creates trigger for updates or deletes in the cluster_data table from the catalog schema.
  */
-static void
+void
 CreateExtensionVersionsTrigger(void)
 {
 	bool isNull = false;
@@ -760,7 +738,7 @@ CreateExtensionVersionsTrigger(void)
 
 	StringInfo cmdStr = makeStringInfo();
 	appendStringInfo(cmdStr,
-					 "CREATE TRIGGER %s_versions_trigger "
+					 "CREATE OR REPLACE TRIGGER %s_versions_trigger "
 					 "AFTER UPDATE OR DELETE ON "
 					 "%s.%s_cluster_data "
 					 "FOR STATEMENT EXECUTE FUNCTION "
