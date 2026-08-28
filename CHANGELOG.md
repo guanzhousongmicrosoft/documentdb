@@ -1,4 +1,6 @@
 ### documentdb v1.0-0 (Unreleased) ###
+* Prevent RUM vacuum from processing internal entry-tree and posting-tree roots as leaf pages after concurrent root splits. *[Bugfix]*
+* Restore vacuum cost delays and interrupt handling between RUM posting-tree leaf pages. *[Bugfix]*
 * Keep background index callers waiting after retryable failures, and report an error only after the request becomes terminal. *[Bugfix]*
 * Fix a backend crash when `$getField`, `$setField` or `$unsetField` were given an `input` document that constant-folds to a system variable, such as `{ "$redact": { "$getField": { "field": "f", "input": { "f": "$$PRUNE" } } } }`. The parse-time null-check evaluated the input without a lifetime tracker, so materializing a non-inline result dereferenced a null pointer and terminated the backend. *[Bugfix]*
 * Fix a lock-upgrade deadlock between two overlapping non-concurrent `dropIndexes` on the same collection by acquiring the final `AccessExclusiveLock` on the collection table up front instead of upgrading from `AccessShareLock`. *[Bugfix]*

@@ -716,6 +716,18 @@ FindLeftMostLeafDataPage(RumVacuumState *gvs, BlockNumber blkno, bool *isPageRoo
 			{
 				LockBuffer(buffer, RUM_UNLOCK);
 				LockBuffer(buffer, RUM_EXCLUSIVE);
+				page = BufferGetPage(buffer);
+
+				/*
+				 * A concurrent root split can turn this leaf into an internal page
+				 * while no lock is held. Restart from the same root block to descend
+				 * to the new leftmost leaf.
+				 */
+				if (!RumPageIsLeaf(page))
+				{
+					UnlockReleaseBuffer(buffer);
+					continue;
+				}
 			}
 
 			break;
@@ -843,6 +855,9 @@ rumCleanPostingTreeLeavesTidsByRightlink(RumVacuumState *gvs, OffsetNumber attnu
 		{
 			break;
 		}
+
+		/* Delay and accept interrupts while no buffer lock is held. */
+		RumVacuumDelayPointCompat();
 
 		buffer = ReadBufferExtended(gvs->index, MAIN_FORKNUM, blkno,
 									RBM_NORMAL, gvs->strategy);
@@ -2646,6 +2661,15 @@ backtrack:
 	LockBuffer(buf, RUM_UNLOCK);
 	LockBuffer(buf, RUM_EXCLUSIVE);
 	page = BufferGetPage(buf);
+
+	/* The entry-tree root can become an internal page while no lock is held.
+	 * Its newly allocated leaves will be visited by the disk-ordered scan, so
+	 * returning is safe. */
+	if (blkno == RUM_ROOT_BLKNO && !RumPageIsLeaf(page))
+	{
+		UnlockReleaseBuffer(buf);
+		return;
+	}
 
 	/*
 	 * Check whether we need to backtrack to earlier pages.  What we are
