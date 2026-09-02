@@ -17,6 +17,7 @@
 * Support collation with `count` command *[Feature]*
 * Persist and manage custom roles through the data plane: `createRole`/`dropRole`/`rolesInfo` are backed by the roles catalog (keyed by role name). Guarded by `documentdb.enableRoleCrud` feature flag, disabled by default. *[Feature]*
 * Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
+* Fix an internal error for `$group` over a `$sort` whose trailing key opposes the composite index direction. Guarded by the default-on `documentdb.enable_skip_setting_order_scan_direction_for_full_scan_expr` setting. *[Bugfix]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
