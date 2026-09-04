@@ -333,7 +333,7 @@ static PersistentTupleDestReceiver * CreatePersistentTupleDestReceiver(
 static void DrainStatementViaExecutor(PlannedStmt *queryPlan, ParamListInfo paramList,
 									  const char *sourceText, DestReceiver *destReceiver,
 									  MemoryContext currentContext,
-									  UpdateCustomScanState updateFunc);
+									  UpdateCustomScanState updateFunc, bool drainQuery);
 
 const char NodeId[] = "nodeId";
 uint32_t NodeIdLength = 7;
@@ -384,8 +384,10 @@ DrainSingleResultQuery(Query *query)
 		UseFileBasedPersistedCursors);
 
 	UpdateCustomScanState stateFunc = NULL;
+	bool drainQuery = true;
 	DrainStatementViaExecutor(queryPlan, paramListInfo, sourceText,
-							  (DestReceiver *) receiver, currentContext, stateFunc);
+							  (DestReceiver *) receiver, currentContext, stateFunc,
+							  drainQuery);
 
 	return receiver->singleResult;
 }
@@ -405,13 +407,6 @@ DrainStreamingQuery(HTAB *cursorMap, Query *query, int batchSize,
 	bool queryFullyDrained = false;
 	int32_t accumulatedRows = 0;
 	int cursorOptions = CURSOR_OPT_NO_SCROLL | CURSOR_OPT_BINARY;
-
-	/* batchSize=0 means no documents should be returned; skip executor startup. */
-	if (batchSize == 0)
-	{
-		(*numIterations)++;
-		return false;
-	}
 
 	MemoryContext currentContext = CurrentMemoryContext;
 	while (true)
@@ -458,11 +453,15 @@ DrainStreamingQuery(HTAB *cursorMap, Query *query, int batchSize,
 		receiver->base.numRowsFetched = accumulatedRows;
 
 		UpdateCustomScanState stateFunc = NULL;
+		bool drainQuery = batchSize > 0;
 		DrainStatementViaExecutor(queryPlan, paramListInfo, sourceText,
-								  (DestReceiver *) receiver, currentContext, stateFunc);
+								  (DestReceiver *) receiver, currentContext, stateFunc,
+								  drainQuery);
+
+		TerminationReason reason = drainQuery ? receiver->terminationReason :
+								   TerminationReason_BatchSizeLimit;
 
 		/* Extract scalar results before freeing the iteration context. */
-		TerminationReason reason = receiver->terminationReason;
 		uint64_t currentAccumulatedSize = receiver->streamingAccumulatedSize;
 		accumulatedRows = receiver->base.numRowsFetched;
 		accumulatedSize = receiver->base.currentAccumulatedSize;
@@ -597,18 +596,19 @@ DrainDynamicStreamingCursor(QueryCursorPlanResult *planResult,
 							pgbson_array_writer *arrayWriter,
 							uint32_t accumulatedSize)
 {
-	/* batchSize=0 means no documents should be returned; skip executor startup. */
-	if (batchSize == 0)
-	{
-		return inputContinuation;
-	}
-
 	DynamicStreamingTupleDestReceiver *receiver = CreateDynamicStreamingTupleDestReceiver(
 		arrayWriter, CurrentMemoryContext, batchSize,
 		accumulatedSize);
 	UpdateCustomScanState stateFunc = UpdateQueryDescriptionForDynamicCursor;
+	bool drainQuery = batchSize > 0;
 	DrainStatementViaExecutor(planResult->queryPlan, NULL, planResult->queryString,
-							  (DestReceiver *) receiver, CurrentMemoryContext, stateFunc);
+							  (DestReceiver *) receiver, CurrentMemoryContext, stateFunc,
+							  drainQuery);
+
+	if (!drainQuery)
+	{
+		return inputContinuation;
+	}
 
 	switch (receiver->terminationReason)
 	{
@@ -783,8 +783,9 @@ CreateAndDrainSingleBatchQuery(const char *cursorName, Query *query,
 		isSingleResult,
 		UseFileBasedPersistedCursors);
 	UpdateCustomScanState stateFunc = NULL;
+	bool drainQuery = true;
 	DrainStatementViaExecutor(queryPlan, paramList, sourceText, (DestReceiver *) receiver,
-							  currentContext, stateFunc);
+							  currentContext, stateFunc, drainQuery);
 }
 
 
@@ -938,9 +939,10 @@ CreateAndDrainPersistedQueryWithFiles(const char *cursorName,
 																			  isSingleResult,
 																			  useFileBasedCursors);
 	UpdateCustomScanState stateFunc = NULL;
+	bool drainQuery = true;
 	DrainStatementViaExecutor(result->queryPlan, result->paramList, result->queryString,
 							  (DestReceiver *) receiver,
-							  currentContext, stateFunc);
+							  currentContext, stateFunc, drainQuery);
 
 	/* return the continuation state */
 	return receiver->continuationState;
@@ -994,8 +996,10 @@ CreateAndDrainPointReadQuery(const char *cursorName, Query *query,
 		isSingleResult,
 		UseFileBasedPersistedCursors);
 	UpdateCustomScanState stateFunc = NULL;
+	bool drainQuery = true;
 	DrainStatementViaExecutor(queryPlan, paramList, sourceText,
-							  (DestReceiver *) receiver, currentContext, stateFunc);
+							  (DestReceiver *) receiver, currentContext, stateFunc,
+							  drainQuery);
 }
 
 
@@ -1480,7 +1484,7 @@ static void
 DrainStatementViaExecutor(PlannedStmt *queryPlan, ParamListInfo paramList, const
 						  char *sourceText,
 						  DestReceiver *destReceiver, MemoryContext currentContext,
-						  UpdateCustomScanState updateFunc)
+						  UpdateCustomScanState updateFunc, bool drainQuery)
 {
 	ScanDirection scanDirection = ForwardScanDirection;
 	QueryEnvironment *queryEnv = create_queryEnv();
@@ -1498,12 +1502,18 @@ DrainStatementViaExecutor(PlannedStmt *queryPlan, ParamListInfo paramList, const
 										   queryEnv, 0);
 
 	ExecutorStart(queryDesc, eflags);
-	if (updateFunc)
+
+	/* drainQuery=false means no documents should be returned; skip executor after startup. */
+	if (drainQuery)
 	{
-		updateFunc(queryDesc->planstate, destReceiver);
+		if (updateFunc)
+		{
+			updateFunc(queryDesc->planstate, destReceiver);
+		}
+
+		ExecutorRun_Compat(queryDesc, scanDirection, 0L, true);
 	}
 
-	ExecutorRun_Compat(queryDesc, scanDirection, 0L, true);
 	ExecutorFinish(queryDesc);
 	ExecutorEnd(queryDesc);
 

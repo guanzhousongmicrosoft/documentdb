@@ -20,6 +20,7 @@
 * Fix an internal error for `$group` over a `$sort` whose trailing key opposes the composite index direction. Guarded by the default-on `documentdb.enable_skip_setting_order_scan_direction_for_full_scan_expr` setting. *[Bugfix]*
 * Fix a gateway panic when the system connection budget exceeds the configured maximum connections. *[Bugfix]*
 * Fall back to a logical posting-tree sweep when inline RUM vacuum observes a concurrent root split, ensuring dead TIDs are removed from leaves allocated behind the disk-order cursor. *[Bugfix]*
+* Run the permission check for `find` and `aggregate` with `batchSize: 0`, which returned a cursor on collections the caller could not read. *[Bugfix/Security]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
