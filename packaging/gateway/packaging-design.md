@@ -455,18 +455,26 @@ sudo documentdb-tune --pg-version 18 --cluster main --dry-run       # preview
 sudo documentdb-tune --pg-version 18 --cluster main --yes
 sudo systemctl restart postgresql@18-main
 
-# (3) Create the extension in the `postgres` database (the tune fragment
+# (3) Create the extensions in the `postgres` database (the tune fragment
 # pins cron.database_name='postgres', so pg_cron — pulled in via CASCADE —
 # only allows extension creation there). If you need a custom DB name,
 # either override cron.database_name in the per-instance documentdb.conf
 # fragment before restart, OR keep the DocumentDB metadata in `postgres`
 # and create your application data DBs separately.
+#
+# Both statements are required when documentdb-tune wrote
+# documentdb.alternate_index_handler_name='extended_rum' (it does whenever the
+# extended-RUM extension is installed, the default for these packages).
+# CASCADE does not pull in documentdb_extended_rum, and without it every index
+# creation fails. documentdb-tune prints the exact command for your host.
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 \
-        -c 'CREATE EXTENSION documentdb CASCADE;'
+        -c 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;' \
+        -c 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;'
 
 # (4) Verify
 sudo -u postgres psql -d postgres -c '\dx documentdb*'
-# Should list: documentdb, documentdb_core, plus dependencies (pg_cron, pgvector, postgis, ...)
+# Should list: documentdb, documentdb_core, documentdb_extended_rum, plus
+# dependencies (pg_cron, pgvector, postgis, ...)
 ```
 
 **Even simpler on Debian/Ubuntu when starting from scratch:**
@@ -475,11 +483,9 @@ sudo -u postgres psql -d postgres -c '\dx documentdb*'
 sudo apt install postgresql-18-documentdb
 sudo apt install documentdb-postgresql-tools
 sudo documentdb-createcluster 18 main --start
-sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 \
-        -c 'CREATE EXTENSION documentdb CASCADE;'
 ```
 
-`documentdb-createcluster` wraps `pg_createcluster` and `documentdb-tune`, so the PostgreSQL instance is created and the per-instance `documentdb.conf` fragment is written in one step. On Debian/Ubuntu the instance config stays under `/etc/postgresql/18/main/`, while the managed fragment lives at `/etc/postgresql-common/documentdb/18/main/documentdb.conf`. When `--start` is requested, the wrapper tunes the instance before starting it.
+`documentdb-createcluster` wraps `pg_createcluster` and `documentdb-tune`, so the PostgreSQL instance is created and the per-instance `documentdb.conf` fragment is written in one step. With `--start` it also creates the DocumentDB extensions — including `documentdb_extended_rum` when the tuning requires it — in the `postgres` database. On Debian/Ubuntu the instance config stays under `/etc/postgresql/18/main/`, while the managed fragment lives at `/etc/postgresql-common/documentdb/18/main/documentdb.conf`. When `--start` is requested, the wrapper tunes the instance before starting it.
 
 After verification the administrator has three options:
 
@@ -512,7 +518,13 @@ sudo apt install postgresql-18-documentdb documentdb-gateway
 sudo apt install documentdb-postgresql-tools
 sudo documentdb-tune --pg-version 18 --cluster main --yes
 sudo systemctl restart postgresql@18-main
-sudo -u postgres psql -d postgres -c 'CREATE EXTENSION documentdb CASCADE;'
+# Both statements: documentdb-tune pins
+# documentdb.alternate_index_handler_name='extended_rum' whenever the
+# extended-RUM extension is installed (the default), and CASCADE does not pull
+# it in. Skipping the second leaves a database where every index creation fails.
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 \
+    -c 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;' \
+    -c 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;'
 
 # (3) One-shot PostgreSQL-side gateway registration against the local PostgreSQL instance.
 # Auto-detects when there is exactly one PostgreSQL instance on the host (typical case).

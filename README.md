@@ -66,12 +66,17 @@ Step 3. Setup DocumentDB using Docker
    docker tag ghcr.io/documentdb/documentdb/documentdb-local:latest documentdb
 
    # Run the container with your chosen username and password
-   docker run -dt -p 10260:10260 --name documentdb-container documentdb --username <YOUR_USERNAME> --password <YOUR_PASSWORD>
+   docker run -dt -p 10260:10260 -v documentdb-data:/data --name documentdb-container documentdb --username <YOUR_USERNAME> --password <YOUR_PASSWORD>
+
+   # Wait for first boot, then press Ctrl+C (the container keeps running)
+   docker logs -f documentdb-container   # wait for "=== DocumentDB is ready ==="
 
 ```
 
-   > **Note:** Replace `<YOUR_USERNAME>` and `<YOUR_PASSWORD>` with your desired credentials. You must set these when creating the container for authentication to work.
-   > 
+   > **Note:** Replace `<YOUR_USERNAME>` and `<YOUR_PASSWORD>` with your desired credentials. You must set these when creating the container for authentication to work. A password is only applied when that username is first created in the volume: reusing the username with a different `--password` silently keeps the old password, and a new username adds a second user rather than replacing the first.
+   >
+   > **Data Note:** `-v documentdb-data:/data` keeps your data across `docker rm`. Without it each new container gets a fresh empty volume, so a recreated container starts blank and the old data is stranded. To delete all data and users and start over: `docker rm -f documentdb-container; docker volume rm documentdb-data`.
+   >
    > **Port Note:** Port `10260` is used by default in these instructions to avoid conflicts with other local database services. You can use port `27017` (the standard MongoDB port) or any other available port if you prefer. If you do, be sure to update the port number in both your `docker run` command and your connection string accordingly.
 
 Step 4: Initialize the pymongo client with the credentials from the previous step

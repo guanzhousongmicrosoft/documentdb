@@ -91,8 +91,17 @@ install paths, all served by the four packages above:
 
 - **Workflow A — Extension only into a managed PostgreSQL instance
   (advanced):** `apt install postgresql-18-documentdb documentdb-postgresql-tools`
-  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`.
-  No gateway runtime, no wire-protocol endpoint — useful for ops /
+  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`,
+  restart PostgreSQL, then run the `CREATE EXTENSION` statements
+  `documentdb-tune` prints — both of them, since
+  `CREATE EXTENSION documentdb CASCADE` does not pull in
+  `documentdb_extended_rum` and every index creation fails without it.
+  On Debian/Ubuntu, when the target cluster does *not* exist yet,
+  `sudo documentdb-createcluster 18 <cluster> --start` does all of the
+  above in one step. It wraps `pg_createcluster`, so it does not apply to
+  the `main` cluster the `postgresql-18` package auto-creates on install —
+  that one is already there, and `pg_createcluster` refuses to recreate
+  it. No gateway runtime, no wire-protocol endpoint — useful for ops /
   migration tooling that talks SQL directly.
 
 - **Workflow B — Extension + gateway with BYO local PostgreSQL
@@ -109,17 +118,36 @@ each workflow.
 > The DocumentDB RPMs depend on PGDG-provided PostgreSQL extension packages
 > (`pgvector_N`, `pg_cron_N`, `postgis36_N`), which live in the PGDG, EPEL, and
 > CodeReady Builder (CRB) repositories. On a stock RHEL-family host `dnf install
-> documentdb` fails dependency resolution until those repos are enabled. Enable
-> them once (adjust the EL major/arch for your host; use `powertools` instead of
-> `crb` on EL8):
+> documentdb` fails dependency resolution until those repos are enabled. **CRB
+> is disabled by default and all three are required** — PGDG's `postgis36_N`
+> pulls in `gdal*-libs`, which needs `libqhull_r.so.7`, and that library ships
+> only in CRB (`powertools` on EL8). Enable them once (adjust the EL major/arch
+> for your host). On Rocky/Alma/CentOS Stream the repo id is `crb`; on subscribed
+> Red Hat Enterprise Linux there is no such id and you enable CodeReady Builder
+> through `subscription-manager` instead:
 >
+> <!-- BEGIN:el-prereqs -- LOAD-BEARING, and the single source of truth for
+>      these commands. packaging/extract-el-prereqs.sh parses the fenced block
+>      below; test-documented-prereqs.sh runs it VERBATIM on a stock EL image
+>      before installing the real .rpm, the GitHub release body and the package
+>      job summary are generated from it, and --check-copies asserts the RPM
+>      %description copies still match. This is executable documentation, not
+>      prose. Keep it ONE bash fence whose every line is either a "sudo dnf ..."
+>      command or a "#" comment, and keep the leading "> " on every line -- the
+>      block lives inside this blockquote and un-quoting it breaks the parser.
+>      Comment lines are inert when executed, so they carry guidance that
+>      cannot be a dnf command (see the subscription-manager line). -->
 > ```bash
 > sudo dnf install -y dnf-plugins-core
 > sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 > sudo dnf install -y epel-release
+> # Rocky Linux / AlmaLinux / CentOS Stream:
 > sudo dnf config-manager --set-enabled crb
+> # Subscribed Red Hat Enterprise Linux has no 'crb' repo id. Use instead:
+> #   sudo subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
 > sudo dnf -qy module disable postgresql
 > ```
+> <!-- END:el-prereqs -->
 >
 > On EL8 replace `EL-9` with `EL-8` in the PGDG URL and use `--set-enabled
 > powertools` instead of `crb`; on arm64 replace `x86_64` with `aarch64`.
@@ -127,6 +155,25 @@ each workflow.
 > (for example `sudo dnf install documentdb` for Workflow C). This guidance is
 > also embedded in the `%description` of the extension and meta RPMs, so it is
 > visible via `dnf info` before install.
+
+> **Troubleshooting: `nothing provides libqhull_r.so.7()(64bit)`.**
+> A `dnf install` that ends in ~20 near-identical lines like
+>
+> ```text
+> - nothing provides libqhull_r.so.7()(64bit) needed by gdal313-libs-...PGDG.rhel9.x86_64 from pgdg-common
+> ```
+>
+> means the **CRB repository is not enabled** (GitHub issue #75). The message
+> never names the repository that provides `libqhull_r`, and the GDAL candidates
+> are noise from the `postgis36_N` -> `gdal*-libs` -> `libqhull_r` chain. Fix it
+> with the prerequisite block above — the single missing line is usually:
+>
+> ```bash
+> sudo dnf config-manager --set-enabled crb   # EL8: --set-enabled powertools
+> ```
+>
+> Confirm with `dnf provides "libqhull_r.so.7()(64bit)"`, which should report
+> `libqhull_r-1:7.2.1-11.el9` from `Repo : crb`.
 
 > **Multi-major side-by-side on Debian/Ubuntu (advanced capability).**
 > The major-agnostic files (`documentdb-setup`, the `@`-templated units, helper

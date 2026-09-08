@@ -1,4 +1,4 @@
-### documentdb v0.117-0 (Unreleased) ###
+### documentdb v0.117-0 (September 8, 2026) ###
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*
 * Fix a backend crash when the with-expr `$min`, `$max`, `$first`, and `$last` accumulators ran under a parallel partial-aggregation plan: their transition state embeds pointers only valid in the process that built it, which became dangling when PostgreSQL copied the raw state across a parallel worker boundary. These accumulators are now declared parallel-unsafe, and parallel-safe internal-state variants (`bson*withexprinternal`) were added that transfer their state via serialize/deserialize functions. *[Bugfix]*
 * Ignore null and missing values in `$mergeObjects` accumulators, returning an empty object when a group has no object inputs instead of reporting an internal input-format error or leaking an empty field. *[Bugfix]*
@@ -17,7 +17,8 @@
 * Prevent index-only scans for projected queries with collation so projections return each row's stored values instead of a collation-equivalent value shared by the index entry. *[Bugfix]*
 * Refactor Gateway telemetry and metrics to be provider neutral *[Refactor]*
 
-### documentdb v0.116-0 (Unreleased) ###
+### documentdb v0.116-0 (August 20, 2026) ###
+* This release also includes the changes prepared for v0.115-0. The v0.115-0 release itself was skipped.
 * Rename the `$sample` EXPLAIN metric `Sample Heap Skips` to `Sample Heap Fetches`. *[Refactor]*
 * Enable pushing suffix sort keys into the accumulator in `$sortGroup` when group-by keys form a non-dotted prefix of the sort keys by default (`enableSortPushToAccumulatorWithPrefix`). *[Perf]*
 * Fix `$sample` size coercion and validation to be wire protocol compatible. *[Bugfix]*
@@ -29,7 +30,7 @@
 * Support the `enum` keyword in `$jsonSchema` validators, requiring a value to equal one of the listed allowed values, both at the top level and for individual properties. *[Feature]*
 * Support the `oneOf` keyword in `$jsonSchema` validators, matching the documented semantics where a value must validate against exactly one of the listed subschemas, both at the top level and for individual properties. *[Feature]*
 
-### documentdb v0.115-0 (Unreleased) ###
+### documentdb v0.115-0 (Release skipped) ###
 * Fix `$min` and `$max` accumulators to skip null and missing values when non-null values are present, only returning null when all values are null or missing. Guarded by `enable_min_max_skip_null_values`, enabled by default. *[Bugfix]*
 * Optimize `$sample` over an Index Scan by avoiding heap reads for rows the reservoir discards (visible rows are counted via the visibility map). Applies to Index Scans without runtime filters over btree or regular RUM indexes. *[Perf]*
 * Fix `$exists` argument coercion so falsy non-boolean values (`null`, `undefined`, `0`) are treated as `$exists: false` and truthy non-boolean values as `$exists: true`, matching the documented truthiness semantics. Previously `$exists: null` behaved like `$exists: true`. *[Bugfix]*
@@ -42,7 +43,7 @@
 * Fix backend crash when serializing a SQL array that contains a NULL element. *[Bugfix]*
 * Fix memory usage in tokio-postgres Framed/BytesMut crate *[Bugfix/Perf]*
 
-### documentdb v0.114-0 (Unreleased) ###
+### documentdb v0.114-0 (July 16, 2026) ###
 * Add a `mode` field to the `compact` command spec to select between `full` (VACUUM FULL, the default and blocking) and `standard` (a non-blocking regular VACUUM). Only `full` is gated by the `documentdb.enableCompactVacuumFull` flag; the non-blocking `standard` mode always runs. *[Feature]*
 * Extend `enableNewNamespaceValidation` to block create/drop/rename/createIndex on reserved collections in `admin` and `local` databases, and complete the `config` reserved-collection list (added sharding-runtime names: `changelog`, `mongos`, `placementHistory`, `tags`, `transactions`, `locks`, `lockpings`, `migrations`, `migrationCoordinators`, `rangeDeletions`, `reshardingOperations`, `cache.collections`, `cache.databases`). *[Feature]*
 * Emit a btree `REUSE_PAGE` WAL marker before a RUM page is reused from the FSM, so streaming standbys resolve recovery conflicts before the page contents are overwritten. Mirrors nbtree's `_bt_allocbuf` behavior. Guarded by `documentdb_rum.enable_emit_reuse_page_on_recycle` feature flag, disabled by default while pending stabilization. *[Perf]*

@@ -19,6 +19,7 @@ function show_help {
     echo "Optional Arguments:"
     echo "  --version            The version of documentdb to build. Examples: [0.100.0, 0.101.0]"
     echo "  --test-clean-install Test installing the packages in a clean Docker container."
+    echo "  --no-dbgsym          DEB only: skip generation of the -dbgsym debug package. Use where the debug package would be discarded anyway."
     echo "  --output-dir         Relative path from the repo root of the directory where to drop the packages. The directory will be created if it doesn't exist. Default: packaging"
     echo "  -h, --help           Display this help message."
     exit 0
@@ -29,6 +30,7 @@ OS=""
 PG=""
 DOCUMENTDB_VERSION=""
 TEST_CLEAN_INSTALL=false
+NO_DBGSYM=false
 OUTPUT_DIR="packaging"  # Default value for output directory (relative to script_dir)
 PACKAGE_TYPE=""  # Will be set to "deb" or "rpm"
 
@@ -70,6 +72,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --test-clean-install)
             TEST_CLEAN_INSTALL=true
+            ;;
+        --no-dbgsym)
+            NO_DBGSYM=true
             ;;
         --output-dir)
             shift
@@ -167,19 +172,30 @@ mkdir -p "$abs_output_dir"
 
 # Build the Docker image while showing the output to the console
 if [[ "$PACKAGE_TYPE" == "deb" ]]; then
+    # noautodbgsym stops dh_strip from emitting the automatic -dbgsym package.
+    # It is the documented spelling of this build option (dh_strip also honours
+    # the historical "noddebs" alias). debuild preserves DEB_* variables through
+    # its environment sanitizing, so the value set here reaches dh inside the
+    # container; an empty value is a no-op.
+    DEB_BUILD_OPTIONS_VALUE=""
+    if [[ $NO_DBGSYM == true ]]; then
+        DEB_BUILD_OPTIONS_VALUE="noautodbgsym"
+    fi
     docker build -t "$TAG" -f "$DOCKERFILE" \
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg POSTGRES_VERSION="$PG" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
-    # Run the Docker container to build the packages
-    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" -v "$abs_output_dir:/output" "$TAG"
+    # Run the Docker container to build the packages. SOURCE_DATE_EPOCH is
+    # forwarded so the shipped changelog.gz does not carry each build's wall
+    # clock; see the pin in .github/workflows/build_deb_packages.yml.
+    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env DEB_BUILD_OPTIONS="$DEB_BUILD_OPTIONS_VALUE" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 elif [[ "$PACKAGE_TYPE" == "rpm" ]]; then
     docker build -t "$TAG" -f "$DOCKERFILE" \
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg POSTGRES_VERSION="$PG" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
     # Run the Docker container to build the packages
-    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" -v "$abs_output_dir:/output" "$TAG"
+    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 fi
 
 echo "Packages built successfully!!"
