@@ -89,6 +89,10 @@ RUN apt-get update && \
     echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/no-pass-ask && \
     apt-get purge -y wget gnupg2 lsb-release && \
     apt-get autoremove -y && \
+    if [ ! -e /usr/share/zoneinfo/EST ]; then \
+        apt-get install -y --no-install-recommends tzdata-legacy; \
+    fi && \
+    test -e /usr/share/zoneinfo/EST && \
     rm -rf \
     /etc/apt/keyrings/pgdg.asc \
     /etc/apt/sources.list.d/pgdg.list \

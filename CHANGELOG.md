@@ -1,3 +1,6 @@
+### documentdb v0.117-1 (September 8, 2026) ###
+* Include legacy timezone data in Debian-based runtime images so supported timezone identifiers such as `EST` work in date expressions. *[Bugfix]*
+
 ### documentdb v0.117-0 (September 8, 2026) ###
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*
 * Fix a backend crash when the with-expr `$min`, `$max`, `$first`, and `$last` accumulators ran under a parallel partial-aggregation plan: their transition state embeds pointers only valid in the process that built it, which became dangling when PostgreSQL copied the raw state across a parallel worker boundary. These accumulators are now declared parallel-unsafe, and parallel-safe internal-state variants (`bson*withexprinternal`) were added that transfer their state via serialize/deserialize functions. *[Bugfix]*

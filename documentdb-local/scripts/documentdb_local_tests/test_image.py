@@ -14,15 +14,16 @@ Scope: documentdb-local's own contract as a published image.
   - Data placed under `--data-path` must survive container recreation.
   - Authentication must be enforced (wrong password rejected).
   - The image must run as a non-root user.
+  - Runtime timezone data required by supported date expressions must be usable.
 
 Out of scope (by design):
 
-  - Wire-protocol / aggregation / CRUD / indexing / BSON correctness:
+  - General wire-protocol / aggregation / CRUD / indexing / BSON correctness:
     those are covered by the upstream functional-tests image referenced
     from `documentdb-local/functional-tests/config/image.yml`. The tests
     here use `mongosh` only as a vehicle to assert image-contract
-    properties (port binding, auth enforcement, data persistence),
-    never to assert engine semantics.
+    properties (port binding, auth enforcement, data persistence, required
+    runtime timezone data), never broad engine semantics.
   - Performance, clustering / replication, custom certificate fixture
     generation, telemetry endpoint behavior.
 
@@ -518,6 +519,34 @@ class DefaultContainerTests(_ContainerTestBase):
         self.assertEqual(
             _last_nonempty_line(result.stdout), "1",
             f"expected ping ok=1 as the last stdout line\n"
+            f"full stdout:\n{result.stdout}",
+        )
+
+    def test_legacy_est_timezone_data_is_usable(self):
+        """The image must supply legacy timezone data used by date operators."""
+        result = self._mongosh(r"""
+const row = db.runCommand({
+  aggregate: 1,
+  pipeline: [
+    {$documents: [{date: ISODate("2024-07-15T12:00:00Z")}]},
+    {$project: {
+      _id: 0,
+      est: {$hour: {date: "$date", timezone: "EST"}},
+      control: {$hour: {date: "$date", timezone: "Etc/GMT+5"}}
+    }}
+  ],
+  cursor: {}
+}).cursor.firstBatch[0];
+print(`${row.est},${row.control}`);
+""")
+        self.assertEqual(
+            result.returncode, 0,
+            f"legacy EST timezone evaluation failed\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertEqual(
+            _last_nonempty_line(result.stdout), "7,7",
+            "EST and Etc/GMT+5 must both resolve UTC noon to hour 7\n"
             f"full stdout:\n{result.stdout}",
         )
 
