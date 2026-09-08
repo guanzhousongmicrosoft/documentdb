@@ -1,5 +1,6 @@
 ### documentdb v0.117-1 (September 8, 2026) ###
 * Include legacy timezone data in Debian-based runtime images so supported timezone identifiers such as `EST` work in date expressions. *[Bugfix]*
+* Build Debian binary packages non-interactively for releases with nonzero revision numbers. *[Packaging]*
 
 ### documentdb v0.117-0 (September 8, 2026) ###
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*

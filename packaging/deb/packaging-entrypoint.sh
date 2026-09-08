@@ -23,8 +23,8 @@ fi
 # Keep the internal directory out of the Debian package
 sed -i '/internal/d' Makefile
 
-# Build the Debian package
-debuild -us -uc
+# Build binary packages only; no upstream source archive is staged.
+debuild -b -us -uc
 
 # Change to the root to make file renaming expression simpler
 cd /
