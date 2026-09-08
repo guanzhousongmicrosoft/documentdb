@@ -401,6 +401,78 @@ documentdb_detect_extended_rum() {
     fi
 }
 
+# ── Extension-creation guidance (shared) ────────────────────────────
+#
+# documentdb-tune writes documentdb.alternate_index_handler_name — a CLUSTER
+# scoped GUC — from a host-level control-file probe, but the access method it
+# names needs PER-DATABASE state that only CREATE EXTENSION
+# documentdb_extended_rum supplies, and CREATE EXTENSION documentdb CASCADE
+# does not pull it in. When the two disagree, every index creation in that
+# database fails with "Index access method extended_rum is not available".
+# So a tool telling an operator how to create the extension must name the
+# extended-RUM one too. Single-sourced here so those hints cannot drift.
+
+# documentdb_alternate_index_handler_extension <handler_name>: echo the
+# extension that must exist for <handler_name> to resolve, or nothing when the
+# handler needs none (the built-in documentdb_rum handler ships in
+# pg_documentdb itself).
+documentdb_alternate_index_handler_extension() {
+    case "$(trim_whitespace "${1:-}")" in
+        extended_rum) printf 'documentdb_extended_rum' ;;
+        *)            printf '' ;;
+    esac
+}
+
+# documentdb_create_extension_sql [extra_extension]: print the CREATE EXTENSION
+# statements, one per line, so a caller can feed them to psql. IF NOT EXISTS
+# keeps them safe to re-run on a partially created database.
+documentdb_create_extension_sql() {
+    printf 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;\n'
+    if [[ -n "${1:-}" ]]; then
+        printf 'CREATE EXTENSION IF NOT EXISTS %s CASCADE;\n' "$1"
+    fi
+    return 0
+}
+
+# documentdb_create_extension_command <pg_owner> <target_db> [extra_extension]:
+# echo the copy-pasteable psql command. Separate -c arguments keep each
+# statement in its own transaction.
+#
+# Callers: pg_documentdb_extended_rum errors out of _PG_init unless it is in
+# shared_preload_libraries, so print this only AFTER the restart instruction.
+documentdb_create_extension_command() {
+    local owner="${1:-postgres}"
+    local target_db="${2:-postgres}"
+    local extra="${3:-}"
+    local cmd
+    cmd="sudo -u ${owner} psql -d ${target_db} -v ON_ERROR_STOP=1"
+    cmd+=' -c "CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;"'
+    if [[ -n "${extra}" ]]; then
+        cmd+=" -c \"CREATE EXTENSION IF NOT EXISTS ${extra} CASCADE;\""
+    fi
+    printf '%s' "${cmd}"
+}
+
+# documentdb_read_alternate_index_handler <psql> <socket_dir> <port> <db>
+# [run_as_user]: echo the live documentdb.alternate_index_handler_name, or
+# nothing when it cannot be read. current_setting(..., true) yields an empty
+# string rather than an error when pg_documentdb is not preloaded. The live
+# value is used rather than a filesystem re-probe because it is what the
+# running cluster actually demands.
+documentdb_read_alternate_index_handler() {
+    local psql_bin="$1" socket_dir="$2" port="$3" target_db="$4" as_user="${5:-}"
+    local sql="SELECT coalesce(current_setting('documentdb.alternate_index_handler_name', true), '');"
+    local out=""
+    if [[ -n "${as_user}" ]] && declare -F run_as_user >/dev/null 2>&1; then
+        out="$(run_as_user "${as_user}" "${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -c "${sql}" 2>/dev/null || true)"
+    else
+        out="$("${psql_bin}" -h "${socket_dir}" -p "${port}" \
+            -d "${target_db}" -X -tA -c "${sql}" 2>/dev/null || true)"
+    fi
+    trim_whitespace "${out}"
+}
+
 # documentdb_tune_fragment_path <major> <cluster>: echo the per-cluster
 # fragment documentdb-tune writes on Debian split layouts (picked up by the
 # createcluster.d hook's include_if_exists). Shared so documentdb-setup can

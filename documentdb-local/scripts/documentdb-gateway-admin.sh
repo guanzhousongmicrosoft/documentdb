@@ -800,6 +800,14 @@ cmd_check() {
     fi
     log "PostgreSQL connectivity: OK"
 
+    # The cluster config may pin an alternate index access method, satisfied
+    # only by a per-database extension. Read the live GUC so the advice below
+    # names every extension this database needs.
+    local handler required_ext=""
+    handler="$(documentdb_read_alternate_index_handler "${psql_bin}" "${SOCKET_DIR}" \
+        "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}")"
+    required_ext="$(documentdb_alternate_index_handler_extension "${handler}")"
+
     log "Checking DocumentDB extension..."
     ext_check="$(run_as_user "${PG_OWNER}" "${psql_bin}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
         -d "${TARGET_DB}" -X -tA -c "SELECT 1 FROM pg_extension WHERE extname = 'documentdb';" 2>/dev/null || true)"
@@ -807,7 +815,27 @@ cmd_check() {
     if [[ "${ext_check}" == "1" ]]; then
         log "DocumentDB extension: loaded"
     else
-        log "DocumentDB extension: NOT loaded (run CREATE EXTENSION documentdb CASCADE;)"
+        log "DocumentDB extension: NOT loaded"
+        log "  Run: $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}")"
+    fi
+
+    # Reported separately: 'documentdb' being present says nothing about whether
+    # indexes work, and a database missing this extension fails every
+    # createIndexes.
+    if [[ -n "${required_ext}" ]]; then
+        local am_ext_check
+        am_ext_check="$(run_as_user "${PG_OWNER}" "${psql_bin}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
+            -d "${TARGET_DB}" -X -tA \
+            -c "SELECT 1 FROM pg_extension WHERE extname = '${required_ext}';" 2>/dev/null || true)"
+        if [[ "${am_ext_check}" == "1" ]]; then
+            log "Index access method '${handler}' (${required_ext}): available"
+        elif [[ "${ext_check}" == "1" ]]; then
+            log "Index access method '${handler}' (${required_ext}): MISSING"
+            log "  This cluster sets documentdb.alternate_index_handler_name = '${handler}',"
+            log "  but '${required_ext}' is not created in database '${TARGET_DB}'."
+            log "  Index creation will fail with \"Index access method ${handler} is not available\"."
+            log "  Run: $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}")"
+        fi
     fi
 }
 

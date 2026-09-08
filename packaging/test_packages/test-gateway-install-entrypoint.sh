@@ -949,6 +949,29 @@ verify_postgres_state() {
     fi
 }
 
+# A tuned cluster whose documentdb_extended_rum was never created looks healthy
+# in \dx but cannot create an index of any kind, so assert the behaviour rather
+# than only the catalog rows.
+verify_index_creation_works() {
+    local probe_db="documentdb_pkg_index_probe"
+    local index_spec='{"createIndexes": "probe_coll", "indexes": [{"key": {"n": 1}, "name": "n_1"}]}'
+    local index_ok="" probe_err=""
+
+    log "Verifying index creation works end-to-end."
+    create_temp_file probe_err "/tmp/documentdb-index-probe.XXXXXX.log"
+    # client_min_messages silences the "creating collection" NOTICE, and stderr
+    # is redirected to a file rather than merged into the captured value, so
+    # only the ok flag lands in it. statement_timeout bounds the wait on the
+    # background build, so a broken background-worker config fails the suite
+    # instead of hanging it.
+    if ! index_ok="$(run_psql "SET client_min_messages = warning; SET statement_timeout = '180s'; SELECT ok FROM documentdb_api.create_indexes_background('${probe_db}', '${index_spec}'::documentdb_core.bson);" 2>"${probe_err}")"; then
+        fail "createIndexes failed after a packaged install: $(cat "${probe_err}")"
+    fi
+    assert_eq "${index_ok}" "t" "create_indexes_background did not report ok=true (got: '${index_ok}'; stderr: $(cat "${probe_err}"))"
+
+    run_psql "SELECT documentdb_api.drop_database('${probe_db}');" >/dev/null 2>&1 || true
+}
+
 verify_gateway_crud() {
     local mongosh_log="/tmp/mongosh-smoke.log"
     local crud_script=""
@@ -2014,10 +2037,21 @@ verify_workflow_a_documentdb_tune_direct() {
 
     # --yes apply must write the managed block, then --restore must strip it
     # exactly back to the pre-apply state.
-    sudo documentdb-tune --pg-version "${PG_MAJOR}" --pgdata "${data_dir}" --yes >/dev/null 2>&1 \
+    local apply_out=""
+    apply_out="$(sudo documentdb-tune --pg-version "${PG_MAJOR}" --pgdata "${data_dir}" --yes 2>&1)" \
         || fail "documentdb-tune --yes apply failed"
     sudo grep -Fq '# >>> documentdb-setup managed configuration >>>' "${conf_file}" \
         || fail "documentdb-tune apply did not insert managed block into ${conf_file}"
+
+    # Writing the config is only half of Workflow A: documentdb-tune is the only
+    # tool that knows an extended-RUM cluster also needs documentdb_extended_rum,
+    # so assert the guidance, not just the file.
+    local tune_extended_rum_control
+    tune_extended_rum_control="$(pg_config --sharedir)/extension/documentdb_extended_rum.control"
+    if [[ -f "${tune_extended_rum_control}" ]]; then
+        printf '%s\n' "${apply_out}" | grep -Fq 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;' \
+            || fail "documentdb-tune wrote alternate_index_handler_name='extended_rum' but never tells the operator to create documentdb_extended_rum -- following it produces a database where every createIndexes fails: ${apply_out}"
+    fi
 
     sudo documentdb-tune --pg-version "${PG_MAJOR}" --pgdata "${data_dir}" --restore --yes >/dev/null 2>&1 \
         || fail "documentdb-tune --restore failed"
@@ -2204,6 +2238,7 @@ main() {
     verify_self_managed_postgres_persistence
     verify_live_cluster_readoption
     verify_postgres_state
+    verify_index_creation_works
     verify_tls_key_permissions
     verify_connection_file_ownership
     verify_gateway_check_connectivity
