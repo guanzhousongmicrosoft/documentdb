@@ -134,8 +134,25 @@ else
     esac
 fi
 
+# libbson is linked statically, so the RPM must ship no libbson files and
+# Provide no libbson capability -- both collide with EPEL's libbson, which
+# packaging/README.md tells users to enable. The spec's %install guards the
+# other half (no packaged .so may gain a DT_NEEDED on libbson). Checked inside
+# the publish loop so no RPM reaches /output unchecked.
 for rpm_file in ~/rpmbuild/RPMS/${RPM_ARCH}/*.rpm; do
     [ -e "$rpm_file" ] || continue
+    if rpm -qpl "$rpm_file" | grep -i libbson; then
+        echo "ERROR: $(basename "$rpm_file") packages the libbson files above." >&2
+        echo "       They collide with EPEL's libbson and nothing links them." >&2
+        exit 1
+    fi
+    if rpm -qp --provides "$rpm_file" | grep -i libbson; then
+        echo "ERROR: $(basename "$rpm_file") Provides the libbson capability" >&2
+        echo "       above, from a private build. Do not ship it." >&2
+        exit 1
+    fi
+    echo "libbson guard: $(basename "$rpm_file") is clean"
+
     base_rpm=$(basename "$rpm_file")
     mv "$rpm_file" "/output/${OS}-${base_rpm}"
 done

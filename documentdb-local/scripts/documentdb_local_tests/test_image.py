@@ -14,15 +14,16 @@ Scope: documentdb-local's own contract as a published image.
   - Data placed under `--data-path` must survive container recreation.
   - Authentication must be enforced (wrong password rejected).
   - The image must run as a non-root user.
+  - Runtime timezone data required by supported date expressions must be usable.
 
 Out of scope (by design):
 
-  - Wire-protocol / aggregation / CRUD / indexing / BSON correctness:
+  - General wire-protocol / aggregation / CRUD / indexing / BSON correctness:
     those are covered by the upstream functional-tests image referenced
     from `documentdb-local/functional-tests/config/image.yml`. The tests
     here use `mongosh` only as a vehicle to assert image-contract
-    properties (port binding, auth enforcement, data persistence),
-    never to assert engine semantics.
+    properties (port binding, auth enforcement, data persistence, required
+    runtime timezone data), never broad engine semantics.
   - Performance, clustering / replication, custom certificate fixture
     generation, telemetry endpoint behavior.
 
@@ -40,6 +41,8 @@ isolated so one class's failure doesn't cascade.
 
 from __future__ import annotations
 
+import gzip
+import json
 import os
 import pathlib
 import re
@@ -102,6 +105,20 @@ _SKIP_UNLESS_IMAGE = unittest.skipUnless(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _sample_data_counts(
+    sample_dir: pathlib.Path = pathlib.Path(__file__).resolve().parents[2] / "sample-data",
+) -> dict[str, int]:
+    counts = {}
+    for collection in ("stores", "ratings"):
+        source = sample_dir / f"StoreData.{collection}.json.gz"
+        with gzip.open(source, "rt", encoding="utf-8") as stream:
+            documents = json.load(stream)
+        if not isinstance(documents, list) or not documents:
+            raise ValueError(f"{source} must contain a non-empty document array")
+        counts[collection] = len(documents)
+    return counts
+
 
 def _docker(*args: str, check: bool = True, capture: bool = True,
             timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -449,6 +466,52 @@ class DefaultContainerTests(_ContainerTestBase):
             "in-container `whoami` reports root; expected a non-root user.",
         )
 
+    def test_image_reports_build_provenance(self):
+        """Provenance contract (issue #687): the image must self-identify.
+
+        Mechanism-level check that must hold for ARGLESS builds too (the
+        pre-merge image builds pass no provenance build args): the OCI labels
+        exist, /version.txt is well-formed with a REAL version (derived from
+        the installed extension package, never from a build arg), and the
+        entrypoint printed it at startup. Value-level checks for the
+        pipeline-passed args (revision == build sha, version == the resolved
+        release version, created non-empty) live in the publishing workflow's
+        smoke step — the only builder that passes them."""
+        for key in ("version", "revision", "source"):
+            label = _docker(
+                "inspect", "-f",
+                f'{{{{index .Config.Labels "org.opencontainers.image.{key}"}}}}',
+                self.image,
+            ).stdout.strip()
+            self.assertTrue(
+                label,
+                f"org.opencontainers.image.{key} label is missing/empty; the "
+                "provenance LABEL block in Dockerfile_documentdb_local was "
+                "dropped or renamed.",
+            )
+        version_txt = _docker(
+            "exec", self.container, "cat", "/version.txt", timeout=10,
+        ).stdout.strip()
+        self.assertRegex(
+            version_txt,
+            r"^\S+ \(commit \S+, built \S+, postgresql \d+\)$",
+            f"/version.txt is missing or malformed: {version_txt!r}",
+        )
+        # The version component comes from dpkg-query against the installed
+        # extension package (an unresolvable package fails the image build
+        # itself), so even an argless build must report a real version here;
+        # 'unknown' means the stamp regressed to trusting a build arg.
+        self.assertFalse(
+            version_txt.startswith("unknown "),
+            f"/version.txt version component is 'unknown': {version_txt!r}",
+        )
+        logs = _combined_logs(_docker("logs", self.container))
+        self.assertIn(
+            f"Release Version: {version_txt}", logs,
+            "startup banner did not print /version.txt; the entrypoint's "
+            "'Release Version:' line regressed.",
+        )
+
     def test_mongosh_binary_is_shipped_in_image(self):
         """The image must ship mongosh - we rely on it for in-container
         client work, and users follow our docs that assume it's there."""
@@ -472,6 +535,34 @@ class DefaultContainerTests(_ContainerTestBase):
         self.assertEqual(
             _last_nonempty_line(result.stdout), "1",
             f"expected ping ok=1 as the last stdout line\n"
+            f"full stdout:\n{result.stdout}",
+        )
+
+    def test_legacy_est_timezone_data_is_usable(self):
+        """The image must supply legacy timezone data used by date operators."""
+        result = self._mongosh(r"""
+const row = db.runCommand({
+  aggregate: 1,
+  pipeline: [
+    {$documents: [{date: ISODate("2024-07-15T12:00:00Z")}]},
+    {$project: {
+      _id: 0,
+      est: {$hour: {date: "$date", timezone: "EST"}},
+      control: {$hour: {date: "$date", timezone: "Etc/GMT+5"}}
+    }}
+  ],
+  cursor: {}
+}).cursor.firstBatch[0];
+print(`${row.est},${row.control}`);
+""")
+        self.assertEqual(
+            result.returncode, 0,
+            f"legacy EST timezone evaluation failed\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertEqual(
+            _last_nonempty_line(result.stdout), "7,7",
+            "EST and Etc/GMT+5 must both resolve UTC noon to hour 7\n"
             f"full stdout:\n{result.stdout}",
         )
 
@@ -974,7 +1065,8 @@ class BuiltInSampleDataTests(_ContainerTestBase):
 
     ENTRYPOINT_FLAGS = ["--init-data", "true"]
 
-    def test_sampledb_users_collection_has_documents(self):
+    def test_store_data_stores_collection_has_documents(self):
+        expected_count = _sample_data_counts()["stores"]
         # The readiness marker is emitted after init-data has run, but
         # keep a small retry loop as defense against any future change
         # to the entrypoint's init ordering.
@@ -982,18 +1074,48 @@ class BuiltInSampleDataTests(_ContainerTestBase):
         result = None
         while time.monotonic() < deadline:
             result = self._mongosh(
-                "db.getSiblingDB('sampledb').users.countDocuments({})",
+                "db.getSiblingDB('StoreData').stores.countDocuments({})",
             )
             if result.returncode == 0:
                 last = _last_nonempty_line(result.stdout)
-                if last.isdigit() and int(last) > 0:
+                if last.isdigit() and int(last) == expected_count:
                     return
             time.sleep(2)
         self.fail(
-            "sampledb.users is empty or unreadable after 30s; the "
-            "built-in sample-data scripts did not populate it.\n"
+            f"StoreData.stores did not reach the expected {expected_count} "
+            "documents from the sample file after 30s.\n"
             f"last mongosh stdout:\n{getattr(result, 'stdout', '')}\n"
             f"last mongosh stderr:\n{getattr(result, 'stderr', '')}"
+        )
+
+    def test_store_data_counts_and_extended_json_types(self):
+        result = self._mongosh(
+            f"const expected = {json.dumps(_sample_data_counts())};\n"
+            """
+            const database = db.getSiblingDB('StoreData');
+            const store = database.stores.findOne({_id: 'binary-test'});
+            const validTypes = store &&
+                store.logo && store.logo._bsontype === 'Binary' &&
+                store.signature && store.signature._bsontype === 'Binary' &&
+                store.storeOpeningDate instanceof Date &&
+                store.lastUpdated && store.lastUpdated._bsontype === 'Timestamp';
+            printjson({
+                stores: database.stores.countDocuments({}),
+                ratings: database.ratings.countDocuments({}),
+                validTypes
+            });
+            if (database.stores.countDocuments({}) !== expected.stores ||
+                database.ratings.countDocuments({}) !== expected.ratings ||
+                !validTypes) {
+                quit(1);
+            }
+            """
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"StoreData validation failed\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}",
         )
 
 
@@ -1269,10 +1391,14 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             name=name,
         )
 
-    def _user_count(self, container: str) -> str:
+    def _sample_counts(self, container: str) -> dict[str, int]:
         result = _mongosh_exec(
             container,
-            "db.getSiblingDB('sampledb').users.countDocuments({})",
+            "const database = db.getSiblingDB('StoreData');"
+            "print(JSON.stringify({"
+            "stores: database.stores.countDocuments({}),"
+            "ratings: database.ratings.countDocuments({})"
+            "}));",
             username=DEFAULT_USERNAME,
             password=self.password,
         )
@@ -1281,21 +1407,22 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             f"countDocuments failed\nstdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}",
         )
-        return _last_nonempty_line(result.stdout)
+        return json.loads(_last_nonempty_line(result.stdout))
 
     def test_second_boot_skips_seed_and_does_not_crash(self):
+        expected_counts = _sample_data_counts()
         self.volume = f"docdb-image-test-vol-{uuid.uuid4().hex[:8]}"
         first: str | None = None
         second: str | None = None
         try:
-            # First boot: seeds sampledb and writes the one-shot marker.
+            # First boot: seeds StoreData and writes the one-shot marker.
             first = self._start(
                 f"{CONTAINER_PREFIX}-restart-a-{uuid.uuid4().hex[:6]}"
             )
             _wait_for_ready(first)
             self.assertEqual(
-                self._user_count(first), "5",
-                "sampledb.users should have 5 docs after first-boot seeding",
+                self._sample_counts(first), expected_counts,
+                "StoreData counts should match the sample files after first-boot seeding",
             )
             _cleanup_container(first)
             first = None
@@ -1320,8 +1447,8 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
                 "second boot must not fail re-running the seed",
             )
             self.assertEqual(
-                self._user_count(second), "5",
-                "sampledb.users must still have exactly 5 docs (no "
+                self._sample_counts(second), expected_counts,
+                "StoreData counts must still match the sample files (no "
                 "duplicate-key crash, no data loss) on second boot",
             )
         finally:
@@ -1474,6 +1601,48 @@ print('custom restart marker placed');
         finally:
             _cleanup_container(first)
             _cleanup_container(second)
+
+
+@_SKIP_UNLESS_IMAGE
+class InvalidCustomInitTests(unittest.TestCase):
+    def _assert_init_fails(self, script: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="docdb-image-invalid-init-") as directory:
+            os.chmod(directory, 0o755)
+            path = pathlib.Path(directory) / "00-invalid.js"
+            path.write_text(script, encoding="utf-8")
+            path.chmod(0o644)
+            container = None
+            try:
+                container = _start_container(
+                    os.environ["DOCUMENTDB_LOCAL_IMAGE"],
+                    extra_run_args=["-v", f"{directory}:/init_doc_db.d:ro"],
+                    entrypoint_flags=[
+                        "--username", DEFAULT_USERNAME,
+                        "--password", _random_password(),
+                        "--init-data-path", "/init_doc_db.d",
+                        "--skip-init-data",
+                    ],
+                )
+                stopped = _docker("wait", container, timeout=DEFAULT_READY_TIMEOUT)
+                self.assertNotEqual(stopped.stdout.strip(), "0")
+                logs = _docker("logs", container)
+                combined = logs.stdout + logs.stderr
+                self.assertIn("Custom data initialization failed", combined)
+                self.assertNotIn(READY_LOG, combined)
+                self.assertNotIn("Custom data initialization completed.", combined)
+                marker_dir = f"{container}:/data/.documentdb-local"
+                _docker("cp", marker_dir, str(pathlib.Path(directory) / "markers"))
+                markers = pathlib.Path(directory) / "markers"
+                self.assertTrue((markers / "custom_data_attempted").is_file())
+                self.assertFalse((markers / "custom_data_succeeded").exists())
+            finally:
+                _cleanup_container(container)
+
+    def test_syntax_error_aborts_initialization(self):
+        self._assert_init_fails("const broken = ;\n")
+
+    def test_runtime_error_aborts_initialization(self):
+        self._assert_init_fails("throw new Error('intentional custom-init failure');\n")
 
 
 if __name__ == "__main__":

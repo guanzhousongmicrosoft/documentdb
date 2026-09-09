@@ -1607,10 +1607,17 @@ apply_managed_postgres_settings() {
     # uses identical managed-block markers so the two paths are
     # interchangeable from a postrm-cleanup standpoint.
     if command_exists documentdb-tune; then
-        local prev_mtime=""
+        # Track content rather than mtimes: back-to-back rewrites can share a
+        # second-granularity timestamp, while content-identical touches do not
+        # require a restart.
+        local prev_conf_hash=""
         if [[ -f "${config_file}" ]]; then
-            prev_mtime="$(stat -c %Y "${config_file}" 2>/dev/null || echo 0)"
+            prev_conf_hash="$(sha256sum "${config_file}" 2>/dev/null | awk '{print $1}')"
         fi
+        # Debian brownfield tuning changes the per-cluster fragment, not the
+        # live postgresql.conf after its include line has been installed.
+        local tune_fragment=""
+        local prev_fragment_hash=""
         log_verbose "Delegating postgresql.conf tuning to documentdb-tune."
 
         # On Debian brownfield,
@@ -1626,6 +1633,10 @@ apply_managed_postgres_settings() {
         local -a tune_args=()
         if [[ -n "${TARGET_CLUSTER}" && -d "/etc/postgresql/${PG_VERSION}/${TARGET_CLUSTER#*/}" ]]; then
             tune_args+=(--pg-version "${PG_VERSION}" --cluster "${TARGET_CLUSTER#*/}")
+            tune_fragment="$(documentdb_tune_fragment_path "${PG_VERSION}" "${TARGET_CLUSTER#*/}")"
+            if [[ -f "${tune_fragment}" ]]; then
+                prev_fragment_hash="$(sha256sum "${tune_fragment}" 2>/dev/null | awk '{print $1}')"
+            fi
             # Forward the wizard-verified socket dir + port. In brownfield
             # PG_SOCKET_DIR was overridden to the adopted instance's distro
             # socket (prepare_brownfield_instance) and PG_PORT to the port we
@@ -1668,12 +1679,21 @@ apply_managed_postgres_settings() {
                 documentdb-tune "${tune_args[@]}" >/dev/null; then
             die "documentdb-tune failed; see above for details."
         fi
-        local new_mtime=""
+        local new_conf_hash=""
         if [[ -f "${config_file}" ]]; then
-            new_mtime="$(stat -c %Y "${config_file}" 2>/dev/null || echo 0)"
+            new_conf_hash="$(sha256sum "${config_file}" 2>/dev/null | awk '{print $1}')"
         fi
-        if [[ "${prev_mtime}" != "${new_mtime}" ]]; then
+        if [[ "${prev_conf_hash}" != "${new_conf_hash}" ]]; then
             PG_CONFIG_CHANGED=true
+        fi
+        if [[ -n "${tune_fragment}" ]]; then
+            local new_fragment_hash=""
+            if [[ -f "${tune_fragment}" ]]; then
+                new_fragment_hash="$(sha256sum "${tune_fragment}" 2>/dev/null | awk '{print $1}')"
+            fi
+            if [[ "${prev_fragment_hash}" != "${new_fragment_hash}" ]]; then
+                PG_CONFIG_CHANGED=true
+            fi
         fi
 
         # Per-instance isolation settings (port, socket dir, listen
@@ -3141,6 +3161,8 @@ CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;
 -- ever advances the extension's default_version without shipping the
 -- contiguous documentdb--X--Y.sql upgrade path ("extension has no update
 -- path"). Every release must ship the matching upgrade script.
+-- ALTER EXTENSION does not upgrade dependencies automatically.
+ALTER EXTENSION documentdb_core UPDATE;
 ALTER EXTENSION documentdb UPDATE;
 SQL
 }

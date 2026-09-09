@@ -100,13 +100,13 @@ jobs:
       # Publish only for a real release. A dry run (workflow_dispatch with
       # create_release=false) builds the images and pushes nothing — the
       # gateway workflow honours this value on workflow_call.
-      push_images: ${{ startsWith(github.ref, 'refs/tags/') || inputs.create_release }}
+      push_images: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.create_release) }}
 
   create-release:
     name: Create GitHub Release
     needs: [extract-version, build-all-packages, build-gateway-images]
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.create_release)
 
     steps:
       - name: Checkout repository
@@ -190,9 +190,23 @@ jobs:
           cat changelog_excerpt.md
           echo "========================"
 
+      # The prerequisite commands are generated from the BEGIN/END:el-prereqs
+      # block in packaging/README.md rather than restated here, so the release
+      # body cannot drift from the commands nightly CI proves actually work
+      # (GitHub issue #75).
       - name: Append release footer (install, verify, support tier)
         run: |
           VERSION_DASH="${{ env.VERSION_DASH }}"
+
+          # Resolve BEFORE the heredoc and fail loudly. A failing command
+          # substitution INSIDE a heredoc does not trip `set -e` -- it silently
+          # expands to nothing, which would publish a release body with an empty
+          # prerequisite code block and no signal that anything went wrong.
+          EL_PREREQS="$(./packaging/extract-el-prereqs.sh)" || {
+            echo "::error::could not generate the RHEL prerequisite block from packaging/README.md"
+            exit 1
+          }
+
           cat >> changelog_excerpt.md <<EOF
 
           ---
@@ -206,6 +220,16 @@ jobs:
           \`\`\`
 
           **Repository-backed install (recommended):** see <https://documentdb.io> → Package Installation. Repository publication follows shortly after this release.
+
+          ### RHEL / Rocky / AlmaLinux: enable PGDG + EPEL + CRB first
+
+          The RPMs depend on PGDG's \`pgvector_N\`, \`pg_cron_N\` and \`postgis36_N\`. **CRB (CodeReady Builder) is disabled by default and is required** — \`postgis36_N\` pulls in \`gdal*-libs\`, which needs \`libqhull_r.so.7\`, and that library ships only in CRB. Without it \`dnf install\` fails dependency resolution with a wall of GDAL candidate lines that never mention the missing repository:
+
+          \`\`\`sh
+          ${EL_PREREQS}
+          \`\`\`
+
+          On EL8 replace \`EL-9\` with \`EL-8\` in the PGDG URL and use \`--set-enabled powertools\`; on arm64 replace \`x86_64\` with \`aarch64\`. See \`packaging/README.md\` for the full prerequisite and troubleshooting notes.
 
           ### First-party (Tier 1) targets
 
@@ -224,16 +248,142 @@ jobs:
           > **Pre-GA note:** in-place package upgrades from earlier releases are not supported yet. Install on a clean host, or remove the previous DocumentDB packages first.
           EOF
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.VERSION_DASH }}
-          name: ${{ env.RELEASE_NAME }}
-          body_path: changelog_excerpt.md
-          draft: true
-          prerelease: true
-          # The debug-symbols zip is optional; unmatched patterns are ignored
-          # by default (fail_on_unmatched_files is false).
-          files: |
-            ./bundle/*
-            ./documentdb-debug-symbols-*.zip
+      - name: Create or update draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TARGET: ${{ github.sha }}
+          ALLOW_MISSING_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && github.ref_type == 'branch' }}
+        run: |
+          set -euo pipefail
+
+          : "${VERSION_DASH:?VERSION_DASH is required}"
+          : "${RELEASE_NAME:?RELEASE_NAME is required}"
+          : "${RELEASE_REPOSITORY:?RELEASE_REPOSITORY is required}"
+          : "${RELEASE_TARGET:?RELEASE_TARGET is required}"
+          : "${ALLOW_MISSING_RELEASE_TAG:?ALLOW_MISSING_RELEASE_TAG is required}"
+          if [ "$ALLOW_MISSING_RELEASE_TAG" != "true" ] && [ "$ALLOW_MISSING_RELEASE_TAG" != "false" ]; then
+            echo "::error::ALLOW_MISSING_RELEASE_TAG must be 'true' or 'false', got '${ALLOW_MISSING_RELEASE_TAG}'."
+            exit 1
+          fi
+
+          TAG="v${VERSION_DASH}"
+          shopt -s nullglob
+          package_assets=(./bundle/*)
+          if [ "${#package_assets[@]}" -eq 0 ]; then
+            echo "::error::The verified package bundle is empty; refusing to create ${TAG}."
+            exit 1
+          fi
+          assets=("${package_assets[@]}")
+          debug_assets=(./documentdb-debug-symbols-*.zip)
+          assets+=("${debug_assets[@]}")
+
+          release_error="$(mktemp)"
+          trap 'rm -f "$release_error"' EXIT
+
+          if release_record="$(
+            gh api "repos/${RELEASE_REPOSITORY}/releases/tags/${TAG}" \
+              --jq '[.draft, .tag_name] | @tsv' 2>"$release_error"
+          )"; then
+            release_exists=true
+            IFS=$'\t' read -r is_draft existing_tag <<< "$release_record"
+            if [ "$existing_tag" != "$TAG" ]; then
+              echo "::error::Release lookup returned tag '${existing_tag}', expected '${TAG}'."
+              exit 1
+            fi
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release ${TAG} is already published; refusing to modify or replace it with a draft."
+              exit 1
+            fi
+          else
+            lookup_status=$?
+            if grep -Eq '\(HTTP 404\)([^0-9]|$)' "$release_error"; then
+              release_exists=false
+            else
+              echo "::error::Failed to inspect release ${TAG} in ${RELEASE_REPOSITORY}; refusing to treat an API or authentication error as a missing release."
+              cat "$release_error" >&2
+              exit "$lookup_status"
+            fi
+          fi
+
+          # Resolve the exact remote tag ref before either release mutation.
+          # `gh release create --target` does not move an existing tag and can
+          # recreate a deleted one, so neither option is proof of identity.
+          # The sole exception is an explicitly requested manual branch release:
+          # it may prepare a draft before the release tag is pushed.
+          : > "$release_error"
+          if existing_ref="$(
+            gh api "repos/${RELEASE_REPOSITORY}/git/ref/tags/${TAG}" \
+              --jq '.ref' 2>"$release_error"
+          )"; then
+            tag_exists=true
+            if [ "$existing_ref" != "refs/tags/${TAG}" ]; then
+              echo "::error::Tag lookup returned '${existing_ref}', expected 'refs/tags/${TAG}'."
+              exit 1
+            fi
+            # The commits endpoint peels annotated tags, but returns HTTP 422
+            # for a missing ref. Only the exact Git-ref endpoint above can
+            # distinguish an absent tag through its HTTP 404 response.
+            if ! existing_target="$(
+              gh api "repos/${RELEASE_REPOSITORY}/commits/refs/tags/${TAG}" \
+                --jq '.sha' 2>"$release_error"
+            )"; then
+              echo "::error::Failed to resolve the commit for remote tag ${TAG}."
+              cat "$release_error" >&2
+              exit 1
+            fi
+            if [ "$existing_target" != "$RELEASE_TARGET" ]; then
+              echo "::error::Remote tag ${TAG} targets '${existing_target}', expected release commit '${RELEASE_TARGET}'. Refusing to create, update, or retarget the release."
+              exit 1
+            fi
+          else
+            tag_status=$?
+            if grep -Eq '\(HTTP 404\)([^0-9]|$)' "$release_error"; then
+              if [ "$ALLOW_MISSING_RELEASE_TAG" != "true" ]; then
+                echo "::error::Required remote tag ${TAG} does not exist in ${RELEASE_REPOSITORY}; refusing to create or update a release."
+                exit 1
+              fi
+              tag_exists=false
+            else
+              echo "::error::Failed to resolve remote tag ${TAG} in ${RELEASE_REPOSITORY}; refusing to treat an API or authentication error as a missing tag."
+              cat "$release_error" >&2
+              exit "$tag_status"
+            fi
+          fi
+
+          verify_tag_args=()
+          if [ "$tag_exists" = "true" ]; then
+            verify_tag_args=(--verify-tag)
+          fi
+          if [ "$release_exists" = "true" ]; then
+            if ! gh release edit "$TAG" \
+              -R "$RELEASE_REPOSITORY" \
+              "${verify_tag_args[@]}" \
+              --target "$RELEASE_TARGET" \
+              --title "$RELEASE_NAME" \
+              --notes-file changelog_excerpt.md \
+              --draft \
+              --prerelease; then
+              echo "::error::Failed to update draft release ${TAG}."
+              exit 1
+            fi
+          else
+            if ! gh release create "$TAG" \
+              -R "$RELEASE_REPOSITORY" \
+              "${verify_tag_args[@]}" \
+              --target "$RELEASE_TARGET" \
+              --title "$RELEASE_NAME" \
+              --notes-file changelog_excerpt.md \
+              --draft \
+              --prerelease; then
+              echo "::error::Failed to create draft release ${TAG}."
+              exit 1
+            fi
+          fi
+
+          if ! gh release upload "$TAG" "${assets[@]}" \
+            -R "$RELEASE_REPOSITORY" \
+            --clobber; then
+            echo "::error::Failed to upload the verified release assets for ${TAG}."
+            exit 1
+          fi

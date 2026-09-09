@@ -37,9 +37,14 @@ RUN apt-get update && apt-get install -y \
     postgresql-${POSTGRES_VERSION} \
     postgresql-${POSTGRES_VERSION}-cron \
     postgresql-${POSTGRES_VERSION}-pgvector \
-    postgresql-${POSTGRES_VERSION}-postgis-3 \
     libipc-run-perl \
     $(if [ "${POSTGRES_VERSION}" -lt 18 ]; then echo "postgresql-${POSTGRES_VERSION}-rum"; else echo ""; fi)
+
+# Install the PGDG PostGIS package when available. On unsupported distro/PG
+# pairs, build it from source and register a dependency-only package stub.
+COPY scripts /tmp/install_setup
+COPY packaging/test_packages/deb/install-postgis.sh /tmp/install-postgis.sh
+RUN bash /tmp/install-postgis.sh ${POSTGRES_VERSION}
 
 WORKDIR /test-install
 

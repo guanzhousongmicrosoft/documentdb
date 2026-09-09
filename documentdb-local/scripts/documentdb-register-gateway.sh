@@ -691,8 +691,26 @@ do_setup() {
         ext_check="$(run_as_user "${PG_OWNER}" "${PSQL}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
             -d "${TARGET_DB}" -X -tA -c "SELECT 1 FROM pg_extension WHERE extname = 'documentdb';" 2>/dev/null || true)"
         if [[ "${ext_check}" != "1" ]]; then
+            # Name every extension the database needs, not just 'documentdb':
+            # that alone cannot create an index when the config pins an
+            # alternate handler. This runs post-tune/pre-restart, where the
+            # handler GUC does not exist yet, so resolve via
+            # documentdb_required_index_extension (which falls back to disk)
+            # rather than the raw GUC read.
+            local required_ext=""
+            required_ext="$(documentdb_required_index_extension "${PSQL}" "${SOCKET_DIR}" \
+                "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}" "${TARGET_PG_MAJOR}")"
+
             log "WARNING: The DocumentDB extension is not loaded in the '${TARGET_DB}' database."
-            log "Run:  sudo -u ${PG_OWNER} psql -d ${TARGET_DB} -c 'CREATE EXTENSION documentdb CASCADE;'"
+            if [[ -n "${required_ext}" ]]; then
+                # ${required_ext}'s library loads only from
+                # shared_preload_libraries, so pre-restart the recipe below
+                # errors out of _PG_init — and the "Then: reload" underneath
+                # cannot rescue it. Harmless for anyone who already restarted.
+                log "First: restart PostgreSQL if you have not done so since documentdb-tune ran"
+                log "       (${required_ext} loads only from shared_preload_libraries)."
+            fi
+            log "Run:  $(documentdb_create_extension_command "${PG_OWNER}" "${TARGET_DB}" "${required_ext}" "-h ${SOCKET_DIR} -p ${PG_PORT}")"
             log "Then: ${reload_cmd}"
         fi
     fi
