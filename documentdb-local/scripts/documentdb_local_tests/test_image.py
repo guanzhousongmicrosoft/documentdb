@@ -40,6 +40,8 @@ isolated so one class's failure doesn't cascade.
 
 from __future__ import annotations
 
+import gzip
+import json
 import os
 import pathlib
 import re
@@ -102,6 +104,20 @@ _SKIP_UNLESS_IMAGE = unittest.skipUnless(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _sample_data_counts(
+    sample_dir: pathlib.Path = pathlib.Path(__file__).resolve().parents[2] / "sample-data",
+) -> dict[str, int]:
+    counts = {}
+    for collection in ("stores", "ratings"):
+        source = sample_dir / f"StoreData.{collection}.json.gz"
+        with gzip.open(source, "rt", encoding="utf-8") as stream:
+            documents = json.load(stream)
+        if not isinstance(documents, list) or not documents:
+            raise ValueError(f"{source} must contain a non-empty document array")
+        counts[collection] = len(documents)
+    return counts
+
 
 def _docker(*args: str, check: bool = True, capture: bool = True,
             timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -1021,6 +1037,7 @@ class BuiltInSampleDataTests(_ContainerTestBase):
     ENTRYPOINT_FLAGS = ["--init-data", "true"]
 
     def test_store_data_stores_collection_has_documents(self):
+        expected_count = _sample_data_counts()["stores"]
         # The readiness marker is emitted after init-data has run, but
         # keep a small retry loop as defense against any future change
         # to the entrypoint's init ordering.
@@ -1032,18 +1049,19 @@ class BuiltInSampleDataTests(_ContainerTestBase):
             )
             if result.returncode == 0:
                 last = _last_nonempty_line(result.stdout)
-                if last.isdigit() and int(last) > 0:
+                if last.isdigit() and int(last) == expected_count:
                     return
             time.sleep(2)
         self.fail(
-            "StoreData.stores is empty or unreadable after 30s; the "
-            "built-in sample-data scripts did not populate it.\n"
+            f"StoreData.stores did not reach the expected {expected_count} "
+            "documents from the sample file after 30s.\n"
             f"last mongosh stdout:\n{getattr(result, 'stdout', '')}\n"
             f"last mongosh stderr:\n{getattr(result, 'stderr', '')}"
         )
 
     def test_store_data_counts_and_extended_json_types(self):
         result = self._mongosh(
+            f"const expected = {json.dumps(_sample_data_counts())};\n"
             """
             const database = db.getSiblingDB('StoreData');
             const store = database.stores.findOne({_id: 'binary-test'});
@@ -1057,8 +1075,8 @@ class BuiltInSampleDataTests(_ContainerTestBase):
                 ratings: database.ratings.countDocuments({}),
                 validTypes
             });
-            if (database.stores.countDocuments({}) !== 41505 ||
-                database.ratings.countDocuments({}) !== 2 ||
+            if (database.stores.countDocuments({}) !== expected.stores ||
+                database.ratings.countDocuments({}) !== expected.ratings ||
                 !validTypes) {
                 quit(1);
             }
@@ -1344,10 +1362,14 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             name=name,
         )
 
-    def _store_count(self, container: str) -> str:
+    def _sample_counts(self, container: str) -> dict[str, int]:
         result = _mongosh_exec(
             container,
-            "db.getSiblingDB('StoreData').stores.countDocuments({})",
+            "const database = db.getSiblingDB('StoreData');"
+            "print(JSON.stringify({"
+            "stores: database.stores.countDocuments({}),"
+            "ratings: database.ratings.countDocuments({})"
+            "}));",
             username=DEFAULT_USERNAME,
             password=self.password,
         )
@@ -1356,9 +1378,10 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             f"countDocuments failed\nstdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}",
         )
-        return _last_nonempty_line(result.stdout)
+        return json.loads(_last_nonempty_line(result.stdout))
 
     def test_second_boot_skips_seed_and_does_not_crash(self):
+        expected_counts = _sample_data_counts()
         self.volume = f"docdb-image-test-vol-{uuid.uuid4().hex[:8]}"
         first: str | None = None
         second: str | None = None
@@ -1369,8 +1392,8 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             )
             _wait_for_ready(first)
             self.assertEqual(
-                self._store_count(first), "41505",
-                "StoreData.stores should have 41,505 docs after first-boot seeding",
+                self._sample_counts(first), expected_counts,
+                "StoreData counts should match the sample files after first-boot seeding",
             )
             _cleanup_container(first)
             first = None
@@ -1395,8 +1418,8 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
                 "second boot must not fail re-running the seed",
             )
             self.assertEqual(
-                self._store_count(second), "41505",
-                "StoreData.stores must still have exactly 41,505 docs (no "
+                self._sample_counts(second), expected_counts,
+                "StoreData counts must still match the sample files (no "
                 "duplicate-key crash, no data loss) on second boot",
             )
         finally:

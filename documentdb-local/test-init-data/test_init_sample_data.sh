@@ -36,6 +36,26 @@ check_mongosh() {
     echo
 }
 
+load_expected_sample_counts() {
+    local counts
+    counts="$(SAMPLE_DATA_DIR="$PROJECT_ROOT/documentdb-local/sample-data" \
+        mongosh --quiet --nodb --eval '
+            const fs = require("fs");
+            const path = require("path");
+            const zlib = require("zlib");
+            const counts = ["stores", "ratings"].map(collection => {
+                const file = path.join(process.env.SAMPLE_DATA_DIR, `StoreData.${collection}.json.gz`);
+                const documents = JSON.parse(zlib.gunzipSync(fs.readFileSync(file)).toString("utf8"));
+                if (!Array.isArray(documents) || documents.length === 0) {
+                    throw new Error(`${file} must contain a non-empty document array`);
+                }
+                return documents.length;
+            });
+            print(counts.join(" "));
+        ')" || return 1
+    read -r EXPECTED_STORES EXPECTED_RATINGS <<< "$counts"
+}
+
 # Function to build the Docker image
 build_image() {
     echo "=== Building Docker Image ==="
@@ -343,11 +363,11 @@ test_environment_variable() {
     docker stop $ENV_CONTAINER_NAME 2>/dev/null || true
     docker rm $ENV_CONTAINER_NAME 2>/dev/null || true
     
-    if [ "$ENV_STORE_COUNT" = "41505" ]; then
+    if [ "$ENV_STORE_COUNT" = "$EXPECTED_STORES" ]; then
         echo "Environment variable test passed (found $ENV_STORE_COUNT stores)"
         return 0
     else
-        echo "Environment variable test failed (found $ENV_STORE_COUNT stores, expected 41505)"
+        echo "Environment variable test failed (found $ENV_STORE_COUNT stores, expected $EXPECTED_STORES)"
         return 1
     fi
 }
@@ -418,11 +438,11 @@ test_skip_init_data_false_environment_variable() {
     docker stop $LEGACY_ENV_CONTAINER_NAME 2>/dev/null || true
     docker rm $LEGACY_ENV_CONTAINER_NAME 2>/dev/null || true
 
-    if [ "$LEGACY_ENV_STORE_COUNT" = "41505" ]; then
+    if [ "$LEGACY_ENV_STORE_COUNT" = "$EXPECTED_STORES" ]; then
         echo "Legacy environment variable test passed (found $LEGACY_ENV_STORE_COUNT stores)"
         return 0
     else
-        echo "Legacy environment variable test failed (found $LEGACY_ENV_STORE_COUNT stores, expected 41505)"
+        echo "Legacy environment variable test failed (found $LEGACY_ENV_STORE_COUNT stores, expected $EXPECTED_STORES)"
         return 1
     fi
 }
@@ -431,6 +451,7 @@ test_skip_init_data_false_environment_variable() {
 main() {
     # Check prerequisites
     check_mongosh
+    load_expected_sample_counts
     
     # Cleanup any previous test runs
     cleanup
@@ -539,8 +560,6 @@ main() {
         EXPECTED_SKIP_ALIAS="PASS"
         EXPECTED_INVALID_VALUE="PASS"
         EXPECTED_LEGACY_ENV="PASS"
-        EXPECTED_STORES=41505
-        EXPECTED_RATINGS=2
         
         # Test results
         DEFAULT_OFF_PASS=$([[ "$DEFAULT_OFF_RESULT" == "0" ]] && echo "✅" || echo "❌")

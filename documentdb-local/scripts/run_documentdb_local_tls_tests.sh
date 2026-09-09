@@ -54,9 +54,22 @@ wait_for_ping() {
     return 1
 }
 
+sample_store_count_from_file() {
+    docker exec "$1" mongosh --quiet --nodb --eval '
+        const file = "/home/documentdb/gateway/sample-data/StoreData.stores.json.gz";
+        const documents = JSON.parse(require("zlib").gunzipSync(
+            require("fs").readFileSync(file)).toString("utf8"));
+        if (!Array.isArray(documents) || documents.length === 0) {
+            throw new Error(`${file} must contain a non-empty document array`);
+        }
+        print(documents.length);
+    '
+}
+
 wait_for_sample_data() {
     local container=$1
     local use_tls=$2
+    local expected_count=$3
     local args=()
     if [ "$use_tls" = "true" ]; then
         args=(--tls --tlsAllowInvalidCertificates)
@@ -73,7 +86,7 @@ wait_for_sample_data() {
             --quiet \
             --eval 'db.getSiblingDB("StoreData").stores.countDocuments()' 2>/dev/null || true)"
 
-        if [ "$count" = "41505" ]; then
+        if [ "$count" = "$expected_count" ]; then
             return 0
         fi
         sleep 2
@@ -90,7 +103,8 @@ echo "=== Test: Default mode (allowTLS - plain and TLS both accepted) ==="
 
 docker run -d --name "$DEFAULT_CONTAINER" "$IMAGE_NAME" --password mypassword --init-data true
 wait_for_ping "$DEFAULT_CONTAINER" true
-wait_for_sample_data "$DEFAULT_CONTAINER" true
+expected_store_count="$(sample_store_count_from_file "$DEFAULT_CONTAINER")"
+wait_for_sample_data "$DEFAULT_CONTAINER" true "$expected_store_count"
 
 echo "Test 1: Default mode - plain connection accepted..."
 docker exec "$DEFAULT_CONTAINER" mongosh \
@@ -127,7 +141,7 @@ count="$(docker exec "$DEFAULT_CONTAINER" mongosh \
     --tlsAllowInvalidCertificates \
     --quiet \
     --eval 'db.getSiblingDB("StoreData").stores.countDocuments()')"
-if [ "$count" = "41505" ]; then
+if [ "$count" = "$expected_store_count" ]; then
     echo "  PASSED (count=$count)"
 else
     echo "  FAILED: Sample data not found."
@@ -142,7 +156,8 @@ echo "=== Test: --tlsMode requireTLS ==="
 docker run -d --name "$ENFORCE_CONTAINER" "$IMAGE_NAME" \
     --password mypassword --tlsMode requireTLS --init-data true
 wait_for_ping "$ENFORCE_CONTAINER" true
-wait_for_sample_data "$ENFORCE_CONTAINER" true
+expected_store_count="$(sample_store_count_from_file "$ENFORCE_CONTAINER")"
+wait_for_sample_data "$ENFORCE_CONTAINER" true "$expected_store_count"
 
 echo "Test 4: --tlsMode requireTLS - TLS connection..."
 docker exec "$ENFORCE_CONTAINER" mongosh \
@@ -182,7 +197,7 @@ count="$(docker exec "$ENFORCE_CONTAINER" mongosh \
     --tlsAllowInvalidCertificates \
     --quiet \
     --eval 'db.getSiblingDB("StoreData").stores.countDocuments()')"
-if [ "$count" = "41505" ]; then
+if [ "$count" = "$expected_store_count" ]; then
     echo "  PASSED (count=$count)"
 else
     echo "  FAILED: Sample data not found."
