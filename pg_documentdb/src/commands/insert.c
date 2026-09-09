@@ -1674,6 +1674,7 @@ CreateLocalShardInsertPlan(MongoCollection *collection, Oid shardOid,
 	mt->plan.plan_rows = planRows;
 	mt->plan.plan_width = planWidth;
 	mt->nominalRelation = relationRelId;
+	mt->fdwPrivLists = list_make1(NIL);
 
 	/* Fill in the PlannedStmt */
 	stmt->commandType = CMD_INSERT;

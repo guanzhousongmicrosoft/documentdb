@@ -987,6 +987,63 @@ verify_postgres_state() {
     fi
 }
 
+# The gateway banner is the highest-traffic copy of the CREATE EXTENSION recipe
+# and the one copy that cannot source documentdb-tools-lib.sh, so it is a static
+# duplicate -- and it is what drifted last time, telling operators to run a
+# single CASCADE long after the tools knew an extended-RUM cluster needs two.
+# Asserted against the INSTALLED scriptlet, i.e. the shipped artifact.
+verify_install_banner_extension_hint() {
+    log "Verifying the gateway %post banner names both extensions."
+
+    local scripts=""
+    if ! scripts="$(rpm -q --scripts documentdb-gateway 2>/dev/null)" || [[ -z "${scripts}" ]]; then
+        record_skip "install-banner-extension-hint" "rpm -q --scripts documentdb-gateway returned nothing"
+        return 0
+    fi
+
+    # echo lines only: the scriptlet's own comments quote the single-statement
+    # form and would trip the negative check below.
+    local banner=""
+    banner="$(printf '%s\n' "${scripts}" | grep -E '^[[:space:]]*echo ' || true)"
+
+    printf '%s\n' "${banner}" | grep -Fq 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;' \
+        || fail "documentdb-gateway %post does not print the documentdb CREATE EXTENSION recipe"
+    printf '%s\n' "${banner}" | grep -Fq 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;' \
+        || fail "documentdb-gateway %post prints a CREATE EXTENSION recipe that omits documentdb_extended_rum -- an operator following the Workflow B banner ends up with a database where every createIndexes fails with \"Index access method extended_rum is not available\". Keep it in sync with documentdb_create_extension_command in documentdb-tools-lib.sh."
+
+    if printf '%s\n' "${banner}" | grep -Eq "CREATE EXTENSION documentdb CASCADE"; then
+        fail "documentdb-gateway %post still contains the pre-fix single-statement recipe 'CREATE EXTENSION documentdb CASCADE'"
+    fi
+
+    log "Gateway %post banner: both extensions named."
+}
+
+# A tuned cluster whose documentdb_extended_rum was never created looks healthy
+# in \dx but cannot create an index of any kind, so assert the behaviour rather
+# than only the catalog rows.
+verify_index_creation_works() {
+    local probe_db="documentdb_pkg_index_probe"
+    local index_spec='{"createIndexes": "probe_coll", "indexes": [{"key": {"n": 1}, "name": "n_1"}]}'
+    local index_row="" index_ok="" index_retval="" probe_err=""
+
+    log "Verifying index creation works end-to-end."
+    create_temp_file probe_err "/tmp/documentdb-index-probe.XXXXXX.log"
+    # stderr goes to a file rather than merged into the captured value, so only
+    # the result row lands there. statement_timeout bounds the call so a build
+    # that never completes fails the suite instead of hanging it.
+    if ! index_row="$(run_psql "SET client_min_messages = warning; SET statement_timeout = '180s'; SELECT ok, retval::text FROM documentdb_api.create_indexes_background('${probe_db}', '${index_spec}'::documentdb_core.bson);" 2>"${probe_err}")"; then
+        fail "createIndexes failed after a packaged install: $(cat "${probe_err}")"
+    fi
+    # ok=false is in-band: psql exits 0 and the reason lives in retval, so a
+    # message built from the ok flag alone names neither the access method nor
+    # the missing extension -- the one regression this test exists to catch.
+    index_ok="${index_row%%|*}"
+    index_retval="${index_row#*|}"
+    assert_eq "${index_ok}" "t" "create_indexes_background did not report ok=true (retval: ${index_retval}; stderr: $(cat "${probe_err}"))"
+
+    run_psql "SELECT documentdb_api.drop_database('${probe_db}');" >/dev/null 2>&1 || true
+}
+
 verify_gateway_crud() {
     local mongosh_log="/tmp/mongosh-smoke.log"
     local crud_script=""
@@ -1434,6 +1491,8 @@ main() {
     verify_self_managed_postgres_persistence
     verify_live_cluster_readoption
     verify_postgres_state
+    verify_install_banner_extension_hint
+    verify_index_creation_works
     verify_tls_key_permissions
     verify_gateway_crud
     verify_sample_data_absent

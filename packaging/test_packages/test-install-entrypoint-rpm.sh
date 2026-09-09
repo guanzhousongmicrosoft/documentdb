@@ -14,6 +14,12 @@ dnf install -y /tmp/documentdb.rpm
 
 echo "RPM package installed successfully!"
 
+# Report the package set up front so repository changes can be distinguished
+# from PGDG repository drift when a test image starts failing.
+echo "=== Installed PostgreSQL/PGDG packages ==="
+rpm -qa 'postgresql*' 'pgvector*' 'pg_cron*' 'postgis*' | sort
+echo "=========================================="
+
 # Assert the package installed what it claims to, BEFORE running anything that
 # could accidentally pass against a different tree.
 for f in /usr/pgsql-${POSTGRES_VERSION}/lib/pg_documentdb.so \
@@ -25,6 +31,51 @@ for f in /usr/pgsql-${POSTGRES_VERSION}/lib/pg_documentdb.so \
     fi
 done
 echo "✓ packaged extension artifacts present"
+
+# ── libbson co-installability ─────────────────────────────────────────────
+# libbson is linked statically, so the package must ship no libbson files and
+# Provide no libbson capability: both collide with EPEL's libbson, which this
+# image enables and packaging/README.md tells users to enable.
+echo "=== libbson co-installability ==="
+DOCDB_PKG="postgresql${POSTGRES_VERSION}-documentdb"
+
+if rpm -ql "${DOCDB_PKG}" | grep -i 'libbson'; then
+    echo "✗ package ships the libbson files above; they collide with EPEL's"
+    exit 1
+fi
+echo "✓ package ships no libbson files"
+
+if rpm -q --provides "${DOCDB_PKG}" | grep -i 'libbson'; then
+    echo "✗ package Provides the libbson capability above, from a private build"
+    exit 1
+fi
+echo "✓ package advertises no libbson Provides"
+
+# No libbson is installed yet, so a dynamic dependency shows up here either as
+# a resolved EPEL path or as "not found" -- one grep catches both.
+for so in $(rpm -ql "${DOCDB_PKG}" | grep '\.so$'); do
+    if ldd "${so}" 2>&1 | grep -i 'libbson'; then
+        echo "✗ ${so} links libbson dynamically but none is packaged"
+        exit 1
+    fi
+done
+echo "✓ no packaged .so needs a shared libbson"
+
+# Both transaction directions against the real EPEL package.
+if ! dnf install -y libbson; then
+    echo "✗ 'dnf install libbson' failed with ${DOCDB_PKG} installed"
+    exit 1
+fi
+echo "✓ EPEL libbson installs onto a host that already has ${DOCDB_PKG}"
+
+# --noautoremove so dnf collects nothing while the extension is briefly gone.
+dnf remove -y --noautoremove "${DOCDB_PKG}"
+if ! dnf install -y /tmp/documentdb.rpm; then
+    echo "✗ installing ${DOCDB_PKG} over an existing libbson failed"
+    exit 1
+fi
+echo "✓ ${DOCDB_PKG} installs onto a host that already has EPEL libbson"
+echo "=================================="
 
 # The RPM no longer ships a source tree (see the note in the spec's %install).
 # `make check` below therefore runs against the REPO COPY this test image was
@@ -67,15 +118,10 @@ else
     exit 1
 fi
 
-# Test libbson pkg-config
-if pkg-config --exists libbson-static-1.0; then
-    echo "✓ libbson-static-1.0 pkg-config available"
-else
-    echo "✗ libbson-static-1.0 pkg-config not found"
-    echo "Available pkg-config packages with 'bson':"
-    pkg-config --list-all | grep -i bson || echo "None found"
-    exit 1
-fi
+# The `pkg-config --exists libbson-static-1.0` check that used to sit here is
+# gone with the .pc that satisfied it. It guarded nothing: both component
+# Makefiles override the PGXS `check` target to run against the already-installed
+# extension, so nothing below recompiles C.
 
 # Test pg_regress
 PGXS=$($PG_CONFIG --pgxs)
@@ -86,6 +132,15 @@ else
     echo "✗ pg_regress not found at expected path: $PG_REGRESS_PATH"
     echo "Searching for pg_regress..."
     find /usr -name "pg_regress" 2>/dev/null | head -3
+    exit 1
+fi
+
+# pg_regress invokes diff for every expected-output comparison. Missing it
+# otherwise appears much later as a collection of misleading test failures.
+if command -v diff >/dev/null 2>&1; then
+    echo "✓ diff found at $(command -v diff)"
+else
+    echo "✗ diff not found; the test image must install diffutils (pg_regress needs it)"
     exit 1
 fi
 
@@ -110,14 +165,16 @@ chown -R documentdb:documentdb .
 # Switch to the documentdb user and run the tests
 echo "Running make check as documentdb user..."
 if ! su documentdb -c "export PG_CONFIG=/usr/pgsql-${POSTGRES_VERSION}/bin/pg_config && export PATH=/usr/pgsql-${POSTGRES_VERSION}/bin:\$PATH && make check"; then
-    echo "make check failed. Displaying postmaster.log if it exists:"
-    LOG_FILE="/usr/src/documentdb/pg_documentdb/src/test/regress/log/postmaster.log"
-    if [ -f "$LOG_FILE" ]; then
-        echo "=== Contents of $LOG_FILE ==="
-        cat "$LOG_FILE"
-        echo "==============================="
+    echo "make check failed. Displaying any postmaster.log found:"
+    FOUND_LOGS=$(find /usr/src/documentdb -type f -name postmaster.log 2>/dev/null)
+    if [ -n "$FOUND_LOGS" ]; then
+        for LOG_FILE in $FOUND_LOGS; do
+            echo "=== Contents of $LOG_FILE ==="
+            cat "$LOG_FILE"
+            echo "==============================="
+        done
     else
-        echo "Log file $LOG_FILE not found."
+        echo "No postmaster.log found under /usr/src/documentdb."
     fi
     exit 1
 fi

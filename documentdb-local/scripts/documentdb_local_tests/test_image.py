@@ -14,15 +14,16 @@ Scope: documentdb-local's own contract as a published image.
   - Data placed under `--data-path` must survive container recreation.
   - Authentication must be enforced (wrong password rejected).
   - The image must run as a non-root user.
+  - Runtime timezone data required by supported date expressions must be usable.
 
 Out of scope (by design):
 
-  - Wire-protocol / aggregation / CRUD / indexing / BSON correctness:
+  - General wire-protocol / aggregation / CRUD / indexing / BSON correctness:
     those are covered by the upstream functional-tests image referenced
     from `documentdb-local/functional-tests/config/image.yml`. The tests
     here use `mongosh` only as a vehicle to assert image-contract
-    properties (port binding, auth enforcement, data persistence),
-    never to assert engine semantics.
+    properties (port binding, auth enforcement, data persistence, required
+    runtime timezone data), never broad engine semantics.
   - Performance, clustering / replication, custom certificate fixture
     generation, telemetry endpoint behavior.
 
@@ -449,6 +450,52 @@ class DefaultContainerTests(_ContainerTestBase):
             "in-container `whoami` reports root; expected a non-root user.",
         )
 
+    def test_image_reports_build_provenance(self):
+        """Provenance contract (issue #687): the image must self-identify.
+
+        Mechanism-level check that must hold for ARGLESS builds too (the
+        pre-merge image builds pass no provenance build args): the OCI labels
+        exist, /version.txt is well-formed with a REAL version (derived from
+        the installed extension package, never from a build arg), and the
+        entrypoint printed it at startup. Value-level checks for the
+        pipeline-passed args (revision == build sha, version == the resolved
+        release version, created non-empty) live in the publishing workflow's
+        smoke step — the only builder that passes them."""
+        for key in ("version", "revision", "source"):
+            label = _docker(
+                "inspect", "-f",
+                f'{{{{index .Config.Labels "org.opencontainers.image.{key}"}}}}',
+                self.image,
+            ).stdout.strip()
+            self.assertTrue(
+                label,
+                f"org.opencontainers.image.{key} label is missing/empty; the "
+                "provenance LABEL block in Dockerfile_documentdb_local was "
+                "dropped or renamed.",
+            )
+        version_txt = _docker(
+            "exec", self.container, "cat", "/version.txt", timeout=10,
+        ).stdout.strip()
+        self.assertRegex(
+            version_txt,
+            r"^\S+ \(commit \S+, built \S+, postgresql \d+\)$",
+            f"/version.txt is missing or malformed: {version_txt!r}",
+        )
+        # The version component comes from dpkg-query against the installed
+        # extension package (an unresolvable package fails the image build
+        # itself), so even an argless build must report a real version here;
+        # 'unknown' means the stamp regressed to trusting a build arg.
+        self.assertFalse(
+            version_txt.startswith("unknown "),
+            f"/version.txt version component is 'unknown': {version_txt!r}",
+        )
+        logs = _combined_logs(_docker("logs", self.container))
+        self.assertIn(
+            f"Release Version: {version_txt}", logs,
+            "startup banner did not print /version.txt; the entrypoint's "
+            "'Release Version:' line regressed.",
+        )
+
     def test_mongosh_binary_is_shipped_in_image(self):
         """The image must ship mongosh - we rely on it for in-container
         client work, and users follow our docs that assume it's there."""
@@ -472,6 +519,34 @@ class DefaultContainerTests(_ContainerTestBase):
         self.assertEqual(
             _last_nonempty_line(result.stdout), "1",
             f"expected ping ok=1 as the last stdout line\n"
+            f"full stdout:\n{result.stdout}",
+        )
+
+    def test_legacy_est_timezone_data_is_usable(self):
+        """The image must supply legacy timezone data used by date operators."""
+        result = self._mongosh(r"""
+const row = db.runCommand({
+  aggregate: 1,
+  pipeline: [
+    {$documents: [{date: ISODate("2024-07-15T12:00:00Z")}]},
+    {$project: {
+      _id: 0,
+      est: {$hour: {date: "$date", timezone: "EST"}},
+      control: {$hour: {date: "$date", timezone: "Etc/GMT+5"}}
+    }}
+  ],
+  cursor: {}
+}).cursor.firstBatch[0];
+print(`${row.est},${row.control}`);
+""")
+        self.assertEqual(
+            result.returncode, 0,
+            f"legacy EST timezone evaluation failed\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertEqual(
+            _last_nonempty_line(result.stdout), "7,7",
+            "EST and Etc/GMT+5 must both resolve UTC noon to hour 7\n"
             f"full stdout:\n{result.stdout}",
         )
 

@@ -3238,13 +3238,57 @@ class Phase11wizardCorrectnessTests(unittest.TestCase):
         tune_path = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-tune.sh"
         tune = tune_path.read_text(encoding="utf-8")
         self.assertIn(
-            'CONFIG_TARGET="${cluster_dir}/documentdb.conf"',
+            'CONFIG_TARGET="$(documentdb_tune_fragment_path '
+            '"${PG_VERSION}" "${CLUSTER_NAME}")"',
             tune,
             "tune must write to /etc/postgresql-common/documentdb/N/C/documentdb.conf",
+        )
+        helper_result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{TOOLS_LIB}" && documentdb_tune_fragment_path 17 main',
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(helper_result.returncode, 0, helper_result.stderr)
+        self.assertEqual(
+            helper_result.stdout.strip(),
+            "/etc/postgresql-common/documentdb/17/main/documentdb.conf",
         )
         # The createcluster.d hook must point at the same filename.
         hook_path = OSS_ROOT / "documentdb-local" / "conf" / "99-documentdb.conf"
         self.assertIn("/documentdb.conf'", hook_path.read_text(encoding="utf-8"))
+
+    def test_delegated_tune_path_tracks_fragment_changes(self):
+        lib = TOOLS_LIB.read_text(encoding="utf-8")
+        self.assertIn("documentdb_tune_fragment_path()", lib)
+
+        setup = SETUP_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            'tune_fragment="$(documentdb_tune_fragment_path '
+            '"${PG_VERSION}" "${TARGET_CLUSTER#*/}")"',
+            setup,
+        )
+        self.assertIn("prev_fragment_hash", setup)
+        self.assertIn("new_fragment_hash", setup)
+        self.assertIn("prev_conf_hash", setup)
+        self.assertIn("new_conf_hash", setup)
+
+        tune = TUNE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            'CONFIG_TARGET="$(documentdb_tune_fragment_path '
+            '"${PG_VERSION}" "${CLUSTER_NAME}")"',
+            tune,
+        )
+        self.assertNotIn(
+            "/etc/postgresql-common/documentdb/${PG_VERSION}",
+            tune,
+            "tune must derive the fragment path from the shared helper",
+        )
 
     def test_tune_adds_include_line_for_existing_debian_clusters(self):
         """Issue 7 follow-up: tune must add the include_if_exists line
