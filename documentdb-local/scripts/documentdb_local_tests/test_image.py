@@ -1020,7 +1020,7 @@ class BuiltInSampleDataTests(_ContainerTestBase):
 
     ENTRYPOINT_FLAGS = ["--init-data", "true"]
 
-    def test_sampledb_users_collection_has_documents(self):
+    def test_store_data_stores_collection_has_documents(self):
         # The readiness marker is emitted after init-data has run, but
         # keep a small retry loop as defense against any future change
         # to the entrypoint's init ordering.
@@ -1028,7 +1028,7 @@ class BuiltInSampleDataTests(_ContainerTestBase):
         result = None
         while time.monotonic() < deadline:
             result = self._mongosh(
-                "db.getSiblingDB('sampledb').users.countDocuments({})",
+                "db.getSiblingDB('StoreData').stores.countDocuments({})",
             )
             if result.returncode == 0:
                 last = _last_nonempty_line(result.stdout)
@@ -1036,10 +1036,39 @@ class BuiltInSampleDataTests(_ContainerTestBase):
                     return
             time.sleep(2)
         self.fail(
-            "sampledb.users is empty or unreadable after 30s; the "
+            "StoreData.stores is empty or unreadable after 30s; the "
             "built-in sample-data scripts did not populate it.\n"
             f"last mongosh stdout:\n{getattr(result, 'stdout', '')}\n"
             f"last mongosh stderr:\n{getattr(result, 'stderr', '')}"
+        )
+
+    def test_store_data_counts_and_extended_json_types(self):
+        result = self._mongosh(
+            """
+            const database = db.getSiblingDB('StoreData');
+            const store = database.stores.findOne({_id: 'binary-test'});
+            const validTypes = store &&
+                store.logo && store.logo._bsontype === 'Binary' &&
+                store.signature && store.signature._bsontype === 'Binary' &&
+                store.storeOpeningDate instanceof Date &&
+                store.lastUpdated && store.lastUpdated._bsontype === 'Timestamp';
+            printjson({
+                stores: database.stores.countDocuments({}),
+                ratings: database.ratings.countDocuments({}),
+                validTypes
+            });
+            if (database.stores.countDocuments({}) !== 41505 ||
+                database.ratings.countDocuments({}) !== 2 ||
+                !validTypes) {
+                quit(1);
+            }
+            """
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"StoreData validation failed\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}",
         )
 
 
@@ -1315,10 +1344,10 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
             name=name,
         )
 
-    def _user_count(self, container: str) -> str:
+    def _store_count(self, container: str) -> str:
         result = _mongosh_exec(
             container,
-            "db.getSiblingDB('sampledb').users.countDocuments({})",
+            "db.getSiblingDB('StoreData').stores.countDocuments({})",
             username=DEFAULT_USERNAME,
             password=self.password,
         )
@@ -1334,14 +1363,14 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
         first: str | None = None
         second: str | None = None
         try:
-            # First boot: seeds sampledb and writes the one-shot marker.
+            # First boot: seeds StoreData and writes the one-shot marker.
             first = self._start(
                 f"{CONTAINER_PREFIX}-restart-a-{uuid.uuid4().hex[:6]}"
             )
             _wait_for_ready(first)
             self.assertEqual(
-                self._user_count(first), "5",
-                "sampledb.users should have 5 docs after first-boot seeding",
+                self._store_count(first), "41505",
+                "StoreData.stores should have 41,505 docs after first-boot seeding",
             )
             _cleanup_container(first)
             first = None
@@ -1366,8 +1395,8 @@ class SampleDataRestartIdempotencyTests(unittest.TestCase):
                 "second boot must not fail re-running the seed",
             )
             self.assertEqual(
-                self._user_count(second), "5",
-                "sampledb.users must still have exactly 5 docs (no "
+                self._store_count(second), "41505",
+                "StoreData.stores must still have exactly 41,505 docs (no "
                 "duplicate-key crash, no data loss) on second boot",
             )
         finally:
