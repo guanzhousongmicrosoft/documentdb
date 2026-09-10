@@ -19,6 +19,7 @@
 * Persist and manage custom roles through the data plane: `createRole`/`dropRole`/`rolesInfo` are backed by the roles catalog (keyed by role name). Guarded by `documentdb.enableRoleCrud` feature flag, disabled by default. *[Feature]*
 * Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
 * Keep ordered RUM scans reading a posting tree past a singleton leaf so visible matches in later leaves are not skipped. *[Bugfix]*
+* Fix a crash or wrong results in the no-sort `$firstN`/`$lastN` accumulators when a value's size is a multiple of 64 bytes. *[Bugfix]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Keep let-only single-document update selection stable when a cached candidate plan switches to generic execution. *[Bugfix]*
