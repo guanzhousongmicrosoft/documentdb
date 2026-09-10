@@ -21,6 +21,7 @@
 * Fix a gateway panic when the system connection budget exceeds the configured maximum connections. *[Bugfix]*
 * Fall back to a logical posting-tree sweep when inline RUM vacuum observes a concurrent root split, ensuring dead TIDs are removed from leaves allocated behind the disk-order cursor. *[Bugfix]*
 * Run the permission check for `find` and `aggregate` with `batchSize: 0`, which returned a cursor on collections the caller could not read. *[Bugfix/Security]*
+* Fix a crash or wrong results in the no-sort `$firstN`/`$lastN` accumulators when a value's size is a multiple of 64 bytes. *[Bugfix]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
