@@ -34,14 +34,6 @@ docdb_functional_tests/documentdb_tests/compatibility/tests/system/administratio
 # --- executes, so the engine still writes the line. Each defect is shared with
 # --- the other lanes, so the same entries appear in their skip list.
 
-# A $facet sub-pipeline re-enters distributed execution from a query already
-# running on a shard, which the planner refuses. File level rather than one
-# case: the engine log names a fixture database shared by every case in the
-# file, and the cases finish within seconds of each other, so the log cannot
-# say which one it is. A file entry also keeps covering it once a pin bump
-# re-strides the legs.
-docdb_functional_tests/documentdb_tests/compatibility/tests/core/operator/stages/facet/test_facet_errors.py
-
 # A non-inlined $lookup sub-pipeline leaves a correlated column out of the
 # GROUP BY it generates, so the query is rejected before it runs.
 docdb_functional_tests/documentdb_tests/compatibility/tests/core/operator/stages/lookup/test_lookup_verbose_let_wiring.py
