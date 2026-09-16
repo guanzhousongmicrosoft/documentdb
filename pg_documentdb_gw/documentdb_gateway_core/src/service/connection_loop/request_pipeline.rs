@@ -16,7 +16,7 @@ use tracing::field::Empty;
 
 use crate::{
     context::{ConnectionContext, RequestContext},
-    error::{DocumentDBError, Result},
+    error::{DocumentDBError, ErrorCode, Result},
     postgres::PgDataClient,
     protocol::{
         self, header::Header, MAX_PRE_AUTH_MESSAGE_SIZE_BYTES, MESSAGE_SIZE_EXCEEDED_ERROR,
@@ -176,7 +176,8 @@ where
     let requires_response =
         protocol::reader::requires_response_from_parsed_message(&message).unwrap_or(true);
     if usize::try_from(header.message_length()) != Ok(message_length) {
-        let error = DocumentDBError::bad_value(
+        let error = DocumentDBError::documentdb_error(
+            ErrorCode::InvalidLength,
             "Message body length does not match the declared message length.".to_owned(),
         );
         error_reply::reply_with_request_error(
@@ -395,7 +396,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        error::ErrorCode,
         postgres::DocumentDBDataClient,
         protocol::opcode::OpCode,
         responses::Response,
@@ -601,7 +601,7 @@ mod tests {
         let response = Bytes::from(writer);
 
         let (_, response_document) = decode_op_msg_response(&response);
-        assert_error_response(&response_document, ErrorCode::BadValue);
+        assert_error_response(&response_document, ErrorCode::InvalidLength);
     }
 
     #[tokio::test]
