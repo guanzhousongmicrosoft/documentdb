@@ -24,6 +24,8 @@
 * Fix a crash or wrong results in the no-sort `$firstN`/`$lastN` accumulators when a value's size is a multiple of 64 bytes. *[Bugfix]*
 * Prevent a backend crash by rejecting `$documents` directly inside a `$facet` sub-pipeline. *[Bugfix]*
 * Enforce `$facet` restrictions on `$collStats`, `$facet`, `$geoNear`, `$indexStats`, and `$planCacheStats` in nested `$lookup` and `$unionWith` pipelines while preserving parent-stage validation and valid collectionless pipelines. *[Bugfix]*
+* Keep ordered RUM scans reading a posting tree past a singleton leaf so visible matches in later leaves are not skipped. *[Bugfix]*
+* Fix ordered scalar-array (`$in`) index scans across multiple unsatisfiable ranges. Guarded by the default-on `documentdb.enable_ordered_saop_multi_range_skip_advance` setting. *[Bugfix]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
