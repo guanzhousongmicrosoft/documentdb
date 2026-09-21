@@ -28,6 +28,7 @@
 * Fix ordered scalar-array (`$in`) index scans across multiple unsatisfiable ranges. Guarded by the default-on `documentdb.enable_ordered_saop_multi_range_skip_advance` setting. *[Bugfix]*
 * Exit the gateway with an error instead of panicking when PostgreSQL is unreachable at startup, and stop the background-worker gateway instead of leaving it idle. *[Bugfix]*
 * Preserve UTF-8 string boundaries in trim expressions and string-to-binData conversions. *[Bugfix]*
+* Return retryable or specific error codes from the gateway for backend connection, transport, and pool failures and for malformed legacy wire-protocol requests instead of `InternalError`. *[Bugfix]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
