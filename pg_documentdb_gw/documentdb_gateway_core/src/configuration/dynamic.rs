@@ -76,6 +76,7 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
     fn equals_value(&self, key: &str, value: &str) -> bool;
     fn topology(&self) -> RawBson;
     fn enable_developer_explain(&self) -> bool;
+    // Determines the maximum number of connections used for the backend pools
     fn max_connections(&self) -> usize;
     fn allow_transaction_snapshot(&self) -> bool;
 
