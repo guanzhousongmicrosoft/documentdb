@@ -3769,6 +3769,13 @@ BuildSelectUpdateCandidateQuery(MongoCollection *collection, int64 shardKeyHash,
 	else if (!queryHasNonIdFilters ||
 			 collection->shardKey != NULL || setShardKeyValueFilter)
 	{
+		if (state->preparedQueryKey ==
+			QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION)
+		{
+			state->preparedQueryKey =
+				QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION_WITH_SHARD_KEY;
+		}
+
 		/* query match handles adding shard_key_value filter in general so we add shard_key_value here only
 		 * if needed
 		 */
@@ -3800,7 +3807,7 @@ BuildSelectUpdateCandidateQuery(MongoCollection *collection, int64 shardKeyHash,
 
 		state->argTypes[2] = TEXTOID;
 		state->argValues[2] = CStringGetTextDatum("");
-		state->argNulls[2] = 'n';
+		state->argNulls[2] = ' ';
 	}
 
 	/* set id filter value */

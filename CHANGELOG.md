@@ -20,6 +20,7 @@
 * Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
 
 ### documentdb v0.117-0 (Unreleased) ###
+* Keep let-only single-document update selection stable when a cached candidate plan switches to generic execution. *[Bugfix]*
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
 * Reject NaN `$bucketAuto` group values when `granularity` is specified instead of reporting an internal preferred-number-series error. *[Bugfix]*
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*
