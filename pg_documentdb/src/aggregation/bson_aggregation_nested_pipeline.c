@@ -55,6 +55,7 @@
 
 const int MaximumLookupPipelineDepth = 20;
 extern bool ForceNestedLookupPipelineAfterJoin;
+extern bool EnableLookupJoinIndexWithLinearPipeline;
 
 /*
  * Struct having parsed view of the
@@ -244,7 +245,35 @@ typedef struct InverseMatchArgs
 } InverseMatchArgs;
 
 
+typedef enum FacetRestrictionScope
+{
+	FacetRestrictionScope_DirectOnly,
+	FacetRestrictionScope_AllDescendants
+} FacetRestrictionScope;
+
+typedef struct FacetStageRule
+{
+	const char *stage;
+	FacetRestrictionScope scope;
+} FacetStageRule;
+
+static const FacetStageRule FacetStageRules[] = {
+	{ "$changeStream", FacetRestrictionScope_DirectOnly },
+	{ "$collStats", FacetRestrictionScope_AllDescendants },
+	{ "$documents", FacetRestrictionScope_DirectOnly },
+	{ "$facet", FacetRestrictionScope_AllDescendants },
+	{ "$geoNear", FacetRestrictionScope_AllDescendants },
+	{ "$indexStats", FacetRestrictionScope_AllDescendants },
+	{ "$merge", FacetRestrictionScope_DirectOnly },
+	{ "$out", FacetRestrictionScope_DirectOnly },
+	{ "$planCacheStats", FacetRestrictionScope_AllDescendants },
+	{ "$search", FacetRestrictionScope_DirectOnly }
+};
+
+
 static int ValidateFacet(const bson_value_t *facetValue);
+static const char * FindDisallowedFacetStage(const pgbsonelement *stageElement,
+											 FacetRestrictionScope scope);
 static Query * BuildFacetUnionAllQuery(int numStages, const bson_value_t *facetValue,
 									   CommonTableExpr *baseCte, QuerySource querySource,
 									   const bson_value_t *sortSpec,
@@ -1171,32 +1200,23 @@ ValidateFacet(const bson_value_t *facetValue)
 		EnsureTopLevelFieldValueType("$facet.pipeline", pipeline, BSON_TYPE_ARRAY);
 
 		numStages++;
-
 		bson_iter_t pipelineArray;
 		BsonValueInitIterator(pipeline, &pipelineArray);
-
-		/* These stages are not allowed when executing $facet */
 		while (bson_iter_next(&pipelineArray))
 		{
+			CHECK_FOR_INTERRUPTS();
 			pgbsonelement stageElement = GetPipelineStage(&pipelineArray, "facet", key);
-			const char *nestedPipelineStage = stageElement.path;
-			if (strcmp(nestedPipelineStage, "$collStats") == 0 ||
-				strcmp(nestedPipelineStage, "$facet") == 0 ||
-				strcmp(nestedPipelineStage, "$geoNear") == 0 ||
-				strcmp(nestedPipelineStage, "$indexStats") == 0 ||
-				strcmp(nestedPipelineStage, "$out") == 0 ||
-				strcmp(nestedPipelineStage, "$merge") == 0 ||
-				strcmp(nestedPipelineStage, "$planCacheStats") == 0 ||
-				strcmp(nestedPipelineStage, "$search") == 0 ||
-				strcmp(nestedPipelineStage, "$changeStream") == 0)
+			const char *disallowedStage = FindDisallowedFacetStage(&stageElement,
+																   FacetRestrictionScope_DirectOnly);
+			if (disallowedStage != NULL)
 			{
 				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION40600),
 								errmsg(
 									"%s cannot be utilized within an operators facet processing stage",
-									nestedPipelineStage),
+									disallowedStage),
 								errdetail_log(
 									"%s cannot be utilized within an operators facet processing stage",
-									nestedPipelineStage)));
+									disallowedStage)));
 			}
 		}
 	}
@@ -1209,6 +1229,73 @@ ValidateFacet(const bson_value_t *facetValue)
 	}
 
 	return numStages;
+}
+
+
+static const char *
+FindDisallowedFacetStage(const pgbsonelement *stageElement, FacetRestrictionScope scope)
+{
+	check_stack_depth();
+	for (size_t ruleIndex = 0; ruleIndex < lengthof(FacetStageRules); ruleIndex++)
+	{
+		const FacetStageRule *rule = &FacetStageRules[ruleIndex];
+		if ((scope == FacetRestrictionScope_DirectOnly ||
+			 rule->scope == FacetRestrictionScope_AllDescendants) &&
+			strcmp(stageElement->path, rule->stage) == 0)
+		{
+			return rule->stage;
+		}
+	}
+
+	/*
+	 * Recurse through $lookup and $unionWith only: $facet is rejected above,
+	 * $graphLookup has no pipeline, and $inverseMatch only allows $match,
+	 * $project and $limit. Arbitrary fields named "pipeline" are not sub-pipelines.
+	 * Keep stage-specific parsing and validation to preserve error precedence.
+	 *
+	 * If more general-purpose sub-pipeline stages are supported, extend this
+	 * traversal and consider a stage-to-extractor table separate from
+	 * FacetStageRules.
+	 */
+	bson_value_t pipeline = { 0 };
+	if (strcmp(stageElement->path, "$lookup") == 0)
+	{
+		LookupArgs lookupArgs = { 0 };
+		ParseLookupStage(&stageElement->bsonValue, &lookupArgs);
+		pipeline = lookupArgs.pipeline;
+	}
+	else if (strcmp(stageElement->path, "$unionWith") == 0)
+	{
+		StringView collectionFrom = { 0 };
+		ParseUnionWith(&stageElement->bsonValue, &collectionFrom, &pipeline);
+		if (pipeline.value_type == BSON_TYPE_ARRAY)
+		{
+			bool hasCollection = collectionFrom.length != 0;
+			ValidateUnionWithPipeline(&pipeline, hasCollection);
+		}
+	}
+
+	if (pipeline.value_type != BSON_TYPE_ARRAY)
+	{
+		return NULL;
+	}
+
+	bson_iter_t pipelineIter;
+	BsonValueInitIterator(&pipeline, &pipelineIter);
+	while (bson_iter_next(&pipelineIter))
+	{
+		CHECK_FOR_INTERRUPTS();
+		pgbsonelement nestedStage = GetPipelineStage(&pipelineIter, stageElement->path,
+													 "pipeline");
+		const char *disallowedStage = FindDisallowedFacetStage(&nestedStage,
+															   FacetRestrictionScope_AllDescendants);
+		if (disallowedStage != NULL)
+		{
+			return disallowedStage;
+		}
+	}
+
+	return NULL;
 }
 
 
@@ -2336,6 +2423,9 @@ ProcessLookupCoreWithLet(Query *query, AggregationPipelineBuildContext *context,
 	const Index joinQueryRteIndex = 3;
 
 	Query *rightQuery = optimizationArgs.rightBaseQuery;
+	TargetEntry *rightBaseDocumentEntry = linitial(rightQuery->targetList);
+	Var *rightBaseDocumentVar = IsA(rightBaseDocumentEntry->expr, Var) ?
+								(Var *) copyObject(rightBaseDocumentEntry->expr) : NULL;
 
 	/* Create a parse_state for this session */
 	ParseState *parseState = make_parsestate(NULL);
@@ -2361,6 +2451,7 @@ ProcessLookupCoreWithLet(Query *query, AggregationPipelineBuildContext *context,
 	/* Check if the pipeline can be pushed to the inner query (right collection)
 	 * If it can, then it's inlined. If not, we apply the pipeline post-join.
 	 */
+	AttrNumber rightQueryDocumentsOffset = InvalidAttrNumber;
 	if (lookupArgs->hasLookupMatch || optimizationArgs.nonInlinedMatchStage != NULL)
 	{
 		/* We can apply the optimization on this based on object_id if and only if
@@ -2409,6 +2500,31 @@ ProcessLookupCoreWithLet(Query *query, AggregationPipelineBuildContext *context,
 					newQuals = lappend(newQuals, zeroShardKeyFilter);
 					rightQuery->jointree->quals = (Node *) make_ands_explicit(newQuals);
 				}
+			}
+		}
+		else if (EnableLookupJoinIndexWithLinearPipeline &&
+				 lookupArgs->hasLookupMatch &&
+				 optimizationArgs.inlinedPipelineStages != NIL &&
+				 list_length(rightQuery->rtable) == 1 &&
+				 list_length(optimizationArgs.rightBaseQuery->rtable) == 1)
+		{
+			/* Inline stages can hide the indexed field from the join predicate.
+			 * Preserve the original document when they still read the same base relation.
+			 */
+			RangeTblEntry *entry = linitial(rightQuery->rtable);
+			RangeTblEntry *baseEntry = linitial(optimizationArgs.rightBaseQuery->rtable);
+			if (entry->rtekind == RTE_RELATION && baseEntry->rtekind == RTE_RELATION &&
+				entry->relid == baseEntry->relid && rightBaseDocumentVar != NULL)
+			{
+				rightBaseDocumentVar->varno = 1;
+				TargetEntry *documentEntry = makeTargetEntry(
+					(Expr *) rightBaseDocumentVar,
+					list_length(
+						rightQuery->targetList) +
+					1, "document", false);
+				rightQueryDocumentsOffset = documentEntry->resno;
+				rightQuery->targetList = lappend(rightQuery->targetList,
+												 documentEntry);
 			}
 		}
 
@@ -2486,6 +2602,7 @@ ProcessLookupCoreWithLet(Query *query, AggregationPipelineBuildContext *context,
 			/* add the WHERE bson_dollar_in(t2.document, t1.match) */
 			TargetEntry *currentRightEntry = linitial(rightQuery->targetList);
 			Var *rightVar = (Var *) currentRightEntry->expr;
+
 			int matchLevelsUp = 1;
 			Node *inClause;
 			if (optimizationArgs.isLookupJoinOnLeftId)
@@ -2525,6 +2642,16 @@ ProcessLookupCoreWithLet(Query *query, AggregationPipelineBuildContext *context,
 			}
 			else
 			{
+				if (rightQueryDocumentsOffset != InvalidAttrNumber)
+				{
+					Assert(list_length(rightQuery->targetList) ==
+						   rightQueryDocumentsOffset);
+					TargetEntry *rightDocumentsEntry = list_nth(
+						rightQuery->targetList, rightQueryDocumentsOffset - 1);
+					rightVar = (Var *) rightDocumentsEntry->expr;
+					rightQuery->targetList = list_make1(currentRightEntry);
+				}
+
 				Var *matchVar = makeVar(leftQueryRteIndex, newProjectorAttrNum,
 										BsonTypeId(),
 										-1,

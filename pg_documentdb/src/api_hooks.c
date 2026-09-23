@@ -29,10 +29,16 @@ extern bool EnablePlannerStatisticsNewCollections;
 
 IsMetadataCoordinator_HookType is_metadata_coordinator_hook = NULL;
 IsClusterInitialized_HookType is_cluster_initialized_hook = NULL;
+NotifyCollectionMetadataInvalidated_HookType
+	notify_collection_metadata_invalidated_hook = NULL;
+NotifyCollectionRelationInvalidated_HookType
+	notify_collection_relation_invalidated_hook = NULL;
 RunCommandOnMetadataCoordinator_HookType run_command_on_metadata_coordinator_hook = NULL;
 RunQueryWithCommutativeWrites_HookType run_query_with_commutative_writes_hook = NULL;
 RunMultiValueQueryWithCommutativeWrites_HookType
 	run_multi_value_query_with_commutative_writes_hook = NULL;
+AllowCommutativeWritesInCurrentTransaction_HookType
+	allow_commutative_writes_in_current_transaction_hook = NULL;
 RunQueryWithSequentialModification_HookType
 	run_query_with_sequential_modification_mode_hook = NULL;
 DistributePostgresTable_HookType distribute_postgres_table_hook = NULL;
@@ -81,8 +87,6 @@ GetShardIndexOids_HookType get_shard_index_oids_hook = NULL;
 UpdatePostgresIndex_HookType update_postgres_index_hook = NULL;
 GetOperationCancellationQuery_HookType get_operation_cancellation_query_hook = NULL;
 
-UserNameValidation_HookType
-	username_validation_hook = NULL;
 PasswordValidation_HookType
 	password_validation_hook = NULL;
 
@@ -139,6 +143,34 @@ IsClusterInitialized(void)
 	}
 
 	return true;
+}
+
+
+/*
+ * Notifies registered consumers that collection metadata was invalidated.
+ * No-op when no consumer is registered.
+ */
+void
+NotifyCollectionMetadataInvalidated(void)
+{
+	if (notify_collection_metadata_invalidated_hook != NULL)
+	{
+		notify_collection_metadata_invalidated_hook();
+	}
+}
+
+
+/*
+ * Notifies registered consumers that one relation was invalidated so they can
+ * discard state derived from it. No-op when none is registered.
+ */
+void
+NotifyCollectionRelationInvalidated(Oid relationId)
+{
+	if (notify_collection_relation_invalidated_hook != NULL)
+	{
+		notify_collection_relation_invalidated_hook(relationId);
+	}
 }
 
 
@@ -218,6 +250,19 @@ RunQueryWithCommutativeWrites(const char *query, int nargs, Oid *argTypes,
 	}
 
 	return ExtensionExecuteQueryViaSPI(query, readOnly, expectedSPIOK, isNull);
+}
+
+
+/*
+ * Enables commutative writes for the current transaction.
+ */
+void
+AllowCommutativeWritesInCurrentTransaction(void)
+{
+	if (allow_commutative_writes_in_current_transaction_hook != NULL)
+	{
+		allow_commutative_writes_in_current_transaction_hook();
+	}
 }
 
 
@@ -404,22 +449,6 @@ IsPasswordValid(const char *username, const char *password)
 	{
 		return password_validation_hook(username, password);
 	}
-	return true;
-}
-
-
-/*
- * Default username validation implementation
- * Returns true if username is valid, false otherwise
- */
-bool
-IsUsernameValid(const char *username)
-{
-	if (username_validation_hook != NULL)
-	{
-		return username_validation_hook(username);
-	}
-
 	return true;
 }
 

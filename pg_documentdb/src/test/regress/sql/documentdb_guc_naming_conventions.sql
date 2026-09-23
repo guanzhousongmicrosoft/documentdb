@@ -31,7 +31,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.disableExtendedRumExplainPlans'),
     ('documentdb.emitEnableOrderedIndexFalseInResponse'),
     ('documentdb.enableAddShardKeyOnlyOnPrimaryKeyFilters'),
-    ('documentdb.enableArrayFilterLogicalOperators'),
     ('documentdb.enableBackgroundWorker'),
     ('documentdb.enableBackgroundWorkerInitJobs'),
     ('documentdb.enableBackgroundWorkerJobs'),
@@ -44,7 +43,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableComparableTerms'),
     ('documentdb.enableCompositeIndexPlanner'),
     ('documentdb.enableCompositeParallelIndexScan'),
-    ('documentdb.enableCompositeReducedCorrelatedPrefixTrim'),
     ('documentdb.enableCompositeReducedCorrelatedTermsOnCommonSubPath'),
     ('documentdb.enableCompositeShardDocumentTerms'),
     ('documentdb.enableCompositeUniqueHash'),
@@ -53,13 +51,11 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableDataTableWithoutCreationTime'),
     ('documentdb.enableDeadIndexEntryMarkingByTTLTask'),
     ('documentdb.enableDebugQueryText'),
-    ('documentdb.enableDeleteOnePlanCacheOptimization'),
     ('documentdb.enableDistinctCustomScan'),
     ('documentdb.enableDistinctIndexPushdown'),
     ('documentdb.enableDistinctScanForGroupFirst'),
     ('documentdb.enableDollarSampleHeapSkipReservoirScan'),
     ('documentdb.enableDollarSampleReservoirScan'),
-    ('documentdb.enableDottedValueTextIndexTerms'),
     ('documentdb.enableDynamicCursorFastStartupScan'),
     ('documentdb.enableDynamicCursors'),
     ('documentdb.enableDynamicPersistentCursorsWithStats'),
@@ -74,13 +70,9 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableIndexMetadataGlobalTracking'),
     ('documentdb.enableIndexOnlyScanForFindProject'),
     ('documentdb.enableIndexPathKeySummarization'),
-    ('documentdb.enableInsertDuplicateInlineHandling'),
-    ('documentdb.enableLocalRetryTable'),
     ('documentdb.enableMultiIndexRumJoin'),
     ('documentdb.enableNativeColocation'),
-    ('documentdb.enableNewMinMaxAccumulators'),
     ('documentdb.enableNewNamespaceValidation'),
-    ('documentdb.enableNewWithExprAccumulators'),
     ('documentdb.enableNonBlockingUniqueIndexBuild'),
     ('documentdb.enableObjectIdFuncExprConversion'),
     ('documentdb.enableOrderByIdOnCostFunction'),
@@ -103,7 +95,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableSchemaEnforcementForCSFLE'),
     ('documentdb.enableSchemaValidation'),
     ('documentdb.enableSkipCommentFieldOnUpsert'),
-    ('documentdb.enableSkipDottedFieldIndexTerms'),
     ('documentdb.enableSortPushToAccumulatorWithPrefix'),
     ('documentdb.enableStatementTimeout'),
     ('documentdb.enableStrictAddToSetModifierValidation'),
@@ -124,7 +115,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableVectorHNSWIndex'),
     ('documentdb.enableVectorPreFilter'),
     ('documentdb.enableVectorPreFilterV2'),
-    ('documentdb.failOnGroupIdDuplicate'),
     ('documentdb.failOnNonEmptyGroupCountArg'),
     ('documentdb.forceBitmapScanForLookup'),
     ('documentdb.forceCollStatsDataCollection'),
@@ -213,3 +203,8 @@ SELECT
     ) AS stale_baseline_entries;
 
 DROP TABLE documentdb_guc_naming_baseline;
+
+SELECT count(*) = 0 AS retired_accumulator_gucs_absent
+FROM pg_settings
+WHERE lower(name) IN ('documentdb.enablenewminmaxaccumulators',
+                      'documentdb.enablenewwithexpraccumulators');

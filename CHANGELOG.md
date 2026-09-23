@@ -1,10 +1,35 @@
-### documentdb v0.118-0 (Unreleased) ###
+### documentdb v1.1-0 (Unreleased) ###
+* Allow unfiltered `$sample` queries to be pushed down to a `Sample Scan` when a dynamic cursor marker is present. Guarded by the `enable_sample_scan_pushdown_for_dynamic_cursor` feature flag. *[Bugfix/Perf]*
+* Prevent low-fill-factor rightmost RUM leaf splits from overflowing the right page when large index terms leave too little space under the requested split target. *[Bugfix]*
+* Retire the `enableSkipDottedFieldIndexTerms` feature flag and always skip index terms for non-array fields with dotted names. *[Refactor]*
+* Reclassify `isNativeAuthEnabled` as a long-term system configuration without changing its behavior or runtime name. *[Refactor]*
+* Retire the `enable_ordered_operator_scans` feature flag and retain ordered operator scans unconditionally. *[Refactor]*
+* Enable order-by pushdown for `$group` over multi-key composite ordered indexes by default when per-path metadata proves the grouped and ordered columns are scalar. *[Perf]*
+* Enable the field-pruning `$project` injection before `$unwind` (the `enableProjectPushUpBeforeUnwindWithGroup` feature flag) by default now that it has stabilized. *[Perf]*
+* Fall back to a logical posting-tree sweep when inline RUM vacuum observes a concurrent root split, ensuring dead TIDs are removed from leaves allocated behind the disk-order cursor. *[Bugfix]*
+* Support collation with `distinct` command *[Feature]*
+* Prevent a backend crash by rejecting `$documents` directly inside a `$facet` sub-pipeline. *[Bugfix]*
+* Enforce `$facet` restrictions on `$collStats`, `$facet`, `$geoNear`, `$indexStats`, and `$planCacheStats` in nested `$lookup` and `$unionWith` pipelines while preserving parent-stage validation and valid collectionless pipelines. *[Bugfix]*
+
+### documentdb v1.0-0 (Unreleased) ###
+* Release executable memory allocated for PCRE2 JIT-compiled regular expressions when their memory context resets. *[Bugfix]* (work item 5530914)
+* Prevent RUM vacuum from processing internal entry-tree and posting-tree roots as leaf pages after concurrent root splits. *[Bugfix]*
+* Restore vacuum cost delays and interrupt handling between RUM posting-tree leaf pages. *[Bugfix]*
+* Keep background index callers waiting after retryable failures, and report an error only after the request becomes terminal. *[Bugfix]*
+* Fix a backend crash when `$getField`, `$setField` or `$unsetField` were given an `input` document that constant-folds to a system variable, such as `{ "$redact": { "$getField": { "field": "f", "input": { "f": "$$PRUNE" } } } }`. The parse-time null-check evaluated the input without a lifetime tracker, so materializing a non-inline result dereferenced a null pointer and terminated the backend. *[Bugfix]*
+* Fix a lock-upgrade deadlock between two overlapping non-concurrent `dropIndexes` on the same collection by acquiring the final `AccessExclusiveLock` on the collection table up front instead of upgrading from `AccessShareLock`. *[Bugfix]*
+* Fix `$near`, `$nearSphere` and `$geoNear` failing with an internal wrong-order error on a `2dsphere` index. The index bound is derived from bounding boxes while the ordering is rechecked with an exact spherical distance, and the two disagree by a sub-micrometre amount for locations that are nearly coincident or that use longitude -180, which violated the ordering guarantee the scan relies on. The index bound now carries a small allowance so it stays a true lower bound. *[Bugfix]*
+* Allow `collMod` to convert an eligible existing single-field index into a TTL index when selected by name or key pattern. *[Bugfix]*
 * Allow nested `$lookup` stages to run after the parent equality join so enrichment applies only to matched foreign documents. Guarded by the default-off `documentdb.force_nested_lookup_pipeline_after_join` setting; unsupported query shapes may fail when it is enabled. *[Perf]*
 * Support collation with the `$stdDevPop`, `$stdDevSamp`, `$median` and `$percentile` `$group` accumulators. They only do arithmetic, so the collation is applied when their input expression is evaluated. *[Feature]*
 * Prevent index-only scans on collated indexes for all field-consuming projection and aggregation targets, while preserving them for constant-only targets such as `$count`. *[Bugfix]*
+* Enable targeted posting-tree pruning by default so vacuum takes brief posting-tree root cleanup locks for individual deletion attempts instead of holding one root lock across an entire pruning traversal. *[Perf]*
+* Enable RUM empty entry-leaf page pruning (`documentdb_rum.prune_rum_empty_pages`) by default. *[Perf]*
 * Apply collation to the symbol BSON type, so symbols compare and hash like the equivalent string under the active collation. *[Feature]*
 * Fix collation-aware hashing and index term generation for code with scope. *[Bugfix]*
 * Support collation with `count` command *[Feature]*
+* Persist and manage custom roles through the data plane: `createRole`/`dropRole`/`rolesInfo` are backed by the roles catalog (keyed by role name). Guarded by `documentdb.enableRoleCrud` feature flag, disabled by default. *[Feature]*
+* Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
 
 ### documentdb v0.117-0 (Unreleased) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
@@ -27,7 +52,7 @@
 * Prevent index-only scans from reading field values from collated indexes, whose shared entries cannot reconstruct each row's stored values. *[Bugfix]*
 * Refactor Gateway telemetry and metrics to be provider neutral *[Refactor]*
 
-### documentdb v0.116-0 (Unreleased) ###
+### documentdb v0.116-0 (August 20, 2026) ###
 * Rename the `$sample` EXPLAIN metric `Sample Heap Skips` to `Sample Heap Fetches`. *[Refactor]*
 * Enable pushing suffix sort keys into the accumulator in `$sortGroup` when group-by keys form a non-dotted prefix of the sort keys by default (`enableSortPushToAccumulatorWithPrefix`). *[Perf]*
 * Fix `$sample` size coercion and validation to be wire protocol compatible. *[Bugfix]*
@@ -38,8 +63,10 @@
 * Fix per-path multikey metadata so an array ancestor marks every indexed descendant, including fields absent from the document. *[Bugfix]*
 * Support the `enum` keyword in `$jsonSchema` validators, requiring a value to equal one of the listed allowed values, both at the top level and for individual properties. *[Feature]*
 * Support the `oneOf` keyword in `$jsonSchema` validators, matching the documented semantics where a value must validate against exactly one of the listed subschemas, both at the top level and for individual properties. *[Feature]*
+* Fix the gateway tearing down warm PostgreSQL connection pools: idle-pool cleanup evicted pools that were still serving requests (the last-used timestamp was written in seconds but compared as nanoseconds), and every authentication rebuilt the user's pool from scratch. A user's pool is now reused across re-authentication while the credential is unchanged, and replaced when it rotates. *[Bugfix/Perf]*
 
-### documentdb v0.115-0 (Unreleased) ###
+### documentdb v0.115-0 (August 20, 2026) [Release skipped] ###
+* The v0.115-0 release was skipped; these changes were included in v0.116-0.
 * Fix `$min` and `$max` accumulators to skip null and missing values when non-null values are present, only returning null when all values are null or missing. Guarded by `enable_min_max_skip_null_values`, enabled by default. *[Bugfix]*
 * Optimize `$sample` over an Index Scan by avoiding heap reads for rows the reservoir discards (visible rows are counted via the visibility map). Applies to Index Scans without runtime filters over btree or regular RUM indexes. *[Perf]*
 * Fix `$exists` argument coercion so falsy non-boolean values (`null`, `undefined`, `0`) are treated as `$exists: false` and truthy non-boolean values as `$exists: true`, matching the documented truthiness semantics. Previously `$exists: null` behaved like `$exists: true`. *[Bugfix]*

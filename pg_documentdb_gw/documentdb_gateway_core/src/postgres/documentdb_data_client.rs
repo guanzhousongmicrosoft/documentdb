@@ -149,12 +149,12 @@ impl DocumentDBDataClient {
 impl PgDataClient for DocumentDBDataClient {
     fn new_authorized(service_context: &ServiceContext, authorization: &AuthState) -> Result<Self> {
         let user = authorization.username()?;
-        let dynamic_configuration = service_context.dynamic_configuration();
+        let settings = authorization.data_pool_settings()?;
 
         let connection_pool = Some(
             service_context
                 .connection_pool_manager()
-                .get_data_pool(user, dynamic_configuration.as_ref())?,
+                .get_data_pool_with_settings(user, settings)?,
         );
 
         Ok(Self {
@@ -1422,6 +1422,158 @@ impl PgDataClient for DocumentDBDataClient {
                 .build(),
         )
         .await
+    }
+
+    async fn execute_grant_roles_to_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context.query_catalog().grant_roles_to_role(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::role_not_found,
+                "The specified role does not exist.",
+            )
+        })
+    }
+
+    async fn execute_grant_privileges_to_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context
+                .query_catalog()
+                .grant_privileges_to_role(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::role_not_found,
+                "The specified role does not exist.",
+            )
+        })
+    }
+
+    async fn execute_grant_roles_to_user(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context.query_catalog().grant_roles_to_user(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::user_not_found,
+                "The specified user does not exist.",
+            )
+        })
+    }
+
+    async fn execute_revoke_roles_from_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context
+                .query_catalog()
+                .revoke_roles_from_role(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::role_not_found,
+                "The specified role does not exist.",
+            )
+        })
+    }
+
+    async fn execute_revoke_privileges_from_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context
+                .query_catalog()
+                .revoke_privileges_from_role(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::role_not_found,
+                "The specified role does not exist.",
+            )
+        })
+    }
+
+    async fn execute_revoke_roles_from_user(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response> {
+        self.run_doc_only(
+            request_context,
+            connection_context,
+            self.service_context
+                .query_catalog()
+                .revoke_roles_from_user(),
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+        )
+        .await
+        .map_err(|e| {
+            remap_error(
+                e,
+                &SqlState::UNDEFINED_OBJECT,
+                DocumentDBError::user_not_found,
+                "The specified user does not exist.",
+            )
+        })
     }
 
     async fn execute_balancer_start(

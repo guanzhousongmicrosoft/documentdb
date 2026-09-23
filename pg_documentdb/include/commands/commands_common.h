@@ -12,6 +12,7 @@
 #define COMMANDS_COMMON_H
 
 #include <utils/elog.h>
+#include <utils/hsearch.h>
 #include <metadata/collection.h>
 #include <io/bson_core.h>
 #include <utils/documentdb_errors.h>
@@ -113,7 +114,6 @@ typedef struct WriteError
 	char *errmsg;
 } WriteError;
 
-
 bool FindShardKeyValueForDocumentId(MongoCollection *collection, const
 									bson_value_t *queryDoc,
 									bson_value_t *objectId,
@@ -125,12 +125,17 @@ bool FindShardKeyValueForDocumentId(MongoCollection *collection, const
 
 bool IsCommonSpecIgnoredField(const char *fieldName);
 void ValidateNamespaceStringForEmbeddedNull(const char *value, uint32_t length);
+void EnsureCollectionOwner(MongoCollection *collection);
 void ValidateOrExtractDatabaseNameFromSpec(bson_iter_t *iter, Datum *databaseNameDatum);
 void ValidateOrExtractDatabaseNameTextFromSpec(bson_iter_t *iter,
 											   text **databaseNameText);
 
-WriteError * GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx);
-bool TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage);
+WriteError * GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx,
+										MemoryContext requestContext,
+										HTAB **indexNameCache);
+bool TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
+							   MemoryContext requestContext,
+							   HTAB **indexNameCache);
 
 pgbson * GetObjectIdFilterFromQueryDocumentValue(const bson_value_t *queryDoc,
 												 bool *hasNonIdFields,

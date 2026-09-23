@@ -123,7 +123,7 @@ $cmd$);
 END;
 
 -- ======================================================================
--- SECTION 4: Delete predicate plans on sharded coll_delete_d with collation
+-- SECTION 4: Predicate plans on sharded coll_delete_d with collation
 -- ======================================================================
 
 SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_delete_d', '{"_id": "dog", "a":"dog"}');
@@ -141,7 +141,7 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_idx_dist_
                    "collation": {"locale": "en", "strength": 1} }] }', TRUE);
 END;
 
--- deleteMany predicate (collation-aware on the shard key field)
+-- Collation-aware shard-key predicate
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -153,7 +153,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- deleteOne predicate when no _id and no shard-key filter
+-- Predicate without an _id or shard-key filter
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -165,7 +165,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- deleteOne predicate with collation-aware shard key value filter
+-- Collation-aware shard-key value predicate
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -177,7 +177,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- deleteOne predicate with both _id and shard key filter
+-- Predicate with both _id and shard-key filters
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -190,7 +190,7 @@ $cmd$);
 END;
 
 -- ======================================================================
--- SECTION 5: Delete predicate plans on sharded single_field_d with collation
+-- SECTION 5: Predicate plans on sharded single_field_d with collation
 -- ======================================================================
 
 BEGIN;
@@ -345,5 +345,50 @@ SET LOCAL documentdb.enableExtendedExplainPlans TO on;
 SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
 EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('coll_q_idx_dist_explain_db',
     '{ "aggregate": "coll_graph_src_d", "pipeline": [ { "$graphLookup": { "from": "coll_graph_dst_d", "startWith": "$pet", "connectFromField": "name", "connectToField": "_id", "as": "destinations", "depthField": "depth" } } ],  "collation": { "locale": "en", "strength" : 1} }')
+$cmd$);
+END;
+
+-- ======================================================================
+-- SECTION: distinct with a collation-aware index across shards
+-- ======================================================================
+SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 1, "a": "cafe" }');
+SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 2, "a": "CAFE" }');
+SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 3, "a": "tea" }');
+SELECT documentdb_api.shard_collection(
+  'coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": "hashed" }', false);
+
+BEGIN;
+SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+SELECT documentdb_api_internal.create_indexes_non_concurrently(
+  'coll_q_idx_dist_explain_db',
+  '{ "createIndexes": "coll_distinct_d", "indexes": [ { "key": { "a": 1 }, "name": "idx_a_en_s1", "collation": { "locale": "en", "strength": 1 } } ] }',
+  TRUE);
+END;
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+SET LOCAL documentdb.enableExtendedExplainPlans TO on;
+SET LOCAL enable_seqscan TO off;
+SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
+EXPLAIN (COSTS OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_distinct(
+  'coll_q_idx_dist_explain_db',
+  '{ "distinct": "coll_distinct_d", "key": "a", "collation": { "locale": "en", "strength": 1 } }')
+$cmd$);
+END;
+
+-- An incompatible collation cannot borrow ordering from the strength-1 index.
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+SET LOCAL documentdb.enableExtendedExplainPlans TO on;
+SET LOCAL documentdb.enable_distinct_exists_filter_pushdown TO on;
+SET LOCAL enable_seqscan TO off;
+SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
+EXPLAIN (COSTS OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_distinct(
+  'coll_q_idx_dist_explain_db',
+  '{ "distinct": "coll_distinct_d", "key": "a", "collation": { "locale": "en", "strength": 2 } }')
 $cmd$);
 END;

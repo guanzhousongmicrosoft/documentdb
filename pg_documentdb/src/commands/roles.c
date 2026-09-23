@@ -8,8 +8,10 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-#include "miscadmin.h"
 #include "access/transam.h"
+#include "executor/spi.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/documentdb_errors.h"
 #include "utils/query_utils.h"
 #include "commands/commands_common.h"
@@ -25,6 +27,7 @@
 #include "utils/hashset_utils.h"
 #include "utils/role_utils.h"
 #include "metadata/collection.h"
+#include "utils/version_utils.h"
 #include "rbac_hooks.h"
 
 /*
@@ -32,7 +35,10 @@
  */
 #define IS_INHERITABLE_ROLE(roleName) \
 	(strcmp(roleName, ApiReadOnlyRole) == 0 || \
+	 strcmp(roleName, API_RBAC_READWRITE_ANYDB_ROLE) == 0 || \
 	 strcmp(roleName, ApiAdminRoleV2) == 0)
+
+#define DOCUMENTDB_DEFAULT_ROOT_ROLE "documentdb_root_role"
 
 /* GUC to enable user crud operations */
 extern bool EnableRoleCrud;
@@ -44,6 +50,11 @@ PG_FUNCTION_INFO_V1(command_create_role);
 PG_FUNCTION_INFO_V1(command_drop_role);
 PG_FUNCTION_INFO_V1(command_roles_info);
 PG_FUNCTION_INFO_V1(command_update_role);
+PG_FUNCTION_INFO_V1(command_grant_roles_to_role);
+PG_FUNCTION_INFO_V1(command_grant_privileges_to_role);
+PG_FUNCTION_INFO_V1(command_revoke_roles_from_role);
+PG_FUNCTION_INFO_V1(command_revoke_privileges_from_role);
+PG_FUNCTION_INFO_V1(documentdb_is_reserved_user);
 
 /*
  * Struct to hold createRole parameters
@@ -54,6 +65,24 @@ typedef struct
 	HTAB *parentRoles;
 	List *collectionPrivileges;
 } CreateRoleSpec;
+
+/*
+ * Struct to hold grantRolesToRole parameters
+ */
+typedef struct
+{
+	const char *roleName;
+	HTAB *grantedRoles;
+} GrantRolesToRoleSpec;
+
+/*
+ * Struct to hold revokeRolesFromRole parameters
+ */
+typedef struct
+{
+	const char *roleName;
+	HTAB *revokedRoles;
+} RevokeRolesFromRoleSpec;
 
 /*
  * Struct to hold rolesInfo parameters
@@ -80,18 +109,22 @@ typedef struct
  */
 typedef struct RoleParentEntry
 {
-	char internalRoleName[NAMEDATALEN];
-	char nativeRoleName[NAMEDATALEN];
+	/* Both views borrow storage that outlives the role inheritance hash table. */
+	StringView internalRoleName;
+	StringView nativeRoleName;
 	List *parentRoles;
 } RoleParentEntry;
 
-static void ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec);
-static void ParseRolesArray(bson_iter_t *rolesIter, CreateRoleSpec *createRoleSpec);
+static void ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec,
+								bool validateCommandContext);
+static void ParseRoleEntryDocument(bson_iter_t *roleEntryIter, const char **roleName,
+								   uint32_t *roleNameLength);
 static void ParsePrivilegesArray(bson_iter_t *privilegesIter,
-								 CreateRoleSpec *createRoleSpec);
+								 List **collectionPrivileges);
 static void ParseResourceDocument(bson_iter_t *privilegeDocIter, StringView *dbName,
 								  StringView *collectionName);
-static CustomPrivilegeAction ParseActionsArray(bson_iter_t *privilegeDocIter);
+static CustomPrivilegeAction ExtractUniqueActionsForResource(
+	bson_iter_t *privilegeDocIter);
 static void ParseDropRoleSpec(pgbson *dropRoleBson, DropRoleSpec *dropRoleSpec);
 static void ParseRolesInfoSpec(pgbson *rolesInfoBson, RolesInfoSpec *rolesInfoSpec);
 static void ParseRoleDefinition(bson_iter_t *iter, RolesInfoSpec *rolesInfoSpec);
@@ -102,7 +135,7 @@ static void ProcessAllRolesForRolesInfo(pgbson_array_writer *rolesArrayWriter,
 static void ProcessSpecificRolesForRolesInfo(pgbson_array_writer *rolesArrayWriter,
 											 RolesInfoSpec
 											 rolesInfoSpec, HTAB *roleInheritanceTable);
-static void WriteRoleResponse(const char *roleName,
+static void WriteRoleResponse(const RoleParentEntry *entry,
 							  pgbson_array_writer *rolesArrayWriter,
 							  RolesInfoSpec rolesInfoSpec,
 							  HTAB *roleInheritanceTable);
@@ -112,15 +145,24 @@ static const char * GetNativeRoleName(const char *internalRoleName);
 static void ParseRoleInheritanceResult(pgbson *rowBson, const char **childRole,
 									   List **parentRoles);
 static void FreeRoleInheritanceTable(HTAB *roleInheritanceTable);
-static void CollectInheritedRolesRecursive(const char *roleName,
-										   HTAB *roleInheritanceTable,
-										   HTAB *resultSet);
-static List * LookupAllInheritedRoles(const char *roleName, HTAB *roleInheritanceTable);
-static void GrantRoleInheritance(const char *parentRole, const char *targetRole);
-static void ValidateAndGrantInheritedRoles(const CreateRoleSpec *createRoleSpec);
+static void GrantRoleInheritance(const char *parentRole, const char *targetRole,
+								 bool allowCustomRoles);
+static void ParseGrantRolesToRoleSpec(pgbson *grantRolesBson,
+									  GrantRolesToRoleSpec *grantRolesSpec);
+static void ParseRevokeRolesFromRoleSpec(pgbson *revokeRolesBson,
+										 RevokeRolesFromRoleSpec *revokeRolesSpec);
+static void RevokeRoleInheritance(const char *parentRole, const char *targetRole);
+static void EnsureCustomRoleExists(const char *roleName);
+static void StoreCustomRoleToRoleCatalog(const char *roleName,
+										 pgbson *createRoleBson);
+static void DeleteCustomRoleFromRoleCatalog(const char *roleName);
 static CustomPrivilegeAction GetPrivilegeAction(const char *action);
 static void WriteRoles(List *parentRoles, pgbson_array_writer *rolesArrayWriter,
 					   HTAB *roleInheritanceTable, const char *childRoleName);
+static int RoleParentEntryListCellCompare(const ListCell *a, const ListCell *b);
+static pgbson * NormalizeRoleSpecForStorage(pgbson *createRoleBson, HTAB *rolesHash);
+static void UpdateCustomRoleInRoleCatalog(const char *roleName, HTAB *roles, bool
+										  isGrantRoles);
 
 /*
  * Parses a createRole spec, executes the createRole command, and returns the result.
@@ -133,6 +175,23 @@ command_create_role(PG_FUNCTION_ARGS)
 	Datum response = create_role(createRoleSpec);
 
 	PG_RETURN_DATUM(response);
+}
+
+
+/*
+ * Returns whether a login role is reserved for internal use.
+ */
+Datum
+documentdb_is_reserved_user(PG_FUNCTION_ARGS)
+{
+	char *roleName = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	PG_RETURN_BOOL(
+		strcmp(roleName, ApiBgWorkerRole) == 0 ||
+		strcmp(roleName, ApiRootRole) == 0 ||
+		strcmp(roleName, ApiReplicationRole) == 0 ||
+		strncmp(roleName, "documentdb_api", strlen("documentdb_api")) == 0 ||
+		strncmp(roleName, "documentdb_rbac", strlen("documentdb_rbac")) == 0);
 }
 
 
@@ -177,12 +236,76 @@ command_update_role(PG_FUNCTION_ARGS)
 
 
 /*
+ * Parses a grantRolesToRole spec, executes it, and returns the result.
+ */
+Datum
+command_grant_roles_to_role(PG_FUNCTION_ARGS)
+{
+	pgbson *grantRolesSpec = PG_GETARG_PGBSON(0);
+
+	Datum response = grant_roles_to_role(grantRolesSpec);
+
+	PG_RETURN_DATUM(response);
+}
+
+
+/*
+ * Parses a grantPrivilegesToRole spec, executes it, and returns the result.
+ */
+Datum
+command_grant_privileges_to_role(PG_FUNCTION_ARGS)
+{
+	pgbson *grantPrivilegesSpec = PG_GETARG_PGBSON(0);
+
+	Datum response = grant_privileges_to_role(grantPrivilegesSpec);
+
+	PG_RETURN_DATUM(response);
+}
+
+
+/*
+ * Parses a revokeRolesFromRole spec, executes it, and returns the result.
+ */
+Datum
+command_revoke_roles_from_role(PG_FUNCTION_ARGS)
+{
+	pgbson *revokeRolesSpec = PG_GETARG_PGBSON(0);
+
+	Datum response = revoke_roles_from_role(revokeRolesSpec);
+
+	PG_RETURN_DATUM(response);
+}
+
+
+/*
+ * Parses a revokePrivilegesFromRole spec, executes it, and returns the result.
+ */
+Datum
+command_revoke_privileges_from_role(PG_FUNCTION_ARGS)
+{
+	pgbson *revokePrivilegesSpec = PG_GETARG_PGBSON(0);
+
+	Datum response = revoke_privileges_from_role(revokePrivilegesSpec);
+
+	PG_RETURN_DATUM(response);
+}
+
+
+/*
  * create_role implements the core logic for createRole command
  */
 Datum
 create_role(pgbson *createRoleBson)
 {
 	if (!EnableRoleCrud)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg("The CreateRole command is currently unsupported."),
+						errdetail_log(
+							"The CreateRole command is currently unsupported.")));
+	}
+
+	if (!IsClusterVersionAtleast(DocDB_V0, 116, 0))
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
 						errmsg("The CreateRole command is currently unsupported."),
@@ -225,7 +348,11 @@ create_role(pgbson *createRoleBson)
 		.parentRoles = CreateStringViewHashSet(),
 		.collectionPrivileges = NIL
 	};
-	ParseCreateRoleSpec(createRoleBson, &createRoleSpec);
+	bool validateCommandContext = true;
+	ParseCreateRoleSpec(createRoleBson, &createRoleSpec, validateCommandContext);
+
+	EnsureRoleMembershipLimits(createRoleSpec.roleName, hash_get_num_entries(
+								   createRoleSpec.parentRoles));
 
 	/* Create the specified role in the database */
 	StringInfo createRoleInfo = makeStringInfo();
@@ -236,14 +363,18 @@ create_role(pgbson *createRoleBson)
 	bool isNull = false;
 	ExtensionExecuteQueryViaSPI(createRoleInfo->data, readOnly, SPI_OK_UTILITY, &isNull);
 
-	/* Validate and grant inherited roles to the new role */
-	ValidateAndGrantInheritedRoles(&createRoleSpec);
+	/* Validate and grant the parent roles to the new role */
+	bool allowCustomRoles = false;
+	ValidateAndGrantParentRoles(createRoleSpec.roleName, createRoleSpec.parentRoles,
+								allowCustomRoles);
 
-	if (createRoleSpec.collectionPrivileges != NIL)
-	{
-		GrantCollectionPrivilegesToRole(createRoleSpec.roleName,
-										createRoleSpec.collectionPrivileges);
-	}
+	GrantCollectionPrivilegesToRole(createRoleSpec.roleName,
+									createRoleSpec.collectionPrivileges);
+
+	createRoleBson = NormalizeRoleSpecForStorage(createRoleBson,
+												 createRoleSpec.parentRoles);
+
+	StoreCustomRoleToRoleCatalog(createRoleSpec.roleName, createRoleBson);
 
 	/* Cleanup */
 	hash_destroy(createRoleSpec.parentRoles);
@@ -260,7 +391,8 @@ create_role(pgbson *createRoleBson)
  * ParseCreateRoleSpec parses the createRole command parameters
  */
 static void
-ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec)
+ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec,
+					bool validateCommandContext)
 {
 	bson_iter_t createRoleIter;
 	PgbsonInitIterator(createRoleBson, &createRoleIter);
@@ -284,11 +416,16 @@ ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec)
 									"The 'createRole' field must not be left empty.")));
 			}
 
+			if (strlen(createRoleSpec->roleName) != strLength)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"'createRole' field contains invalid UTF-8 characters.")));
+			}
+
 			/*
-			 * A name at or beyond the identifier limit would not survive
-			 * intact, so the role would not carry the name that was asked
-			 * for. Reject it here rather than creating a role under a
-			 * different name than the one the command named.
+			 * Since PostgreSQL silently truncates long role name upon
+			 * creation, we explicitly reject it to avoid confusion.
 			 */
 			if (strLength >= NAMEDATALEN)
 			{
@@ -318,14 +455,16 @@ ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec)
 		else if (strcmp(key, "roles") == 0)
 		{
 			rolesFound = true;
-			ParseRolesArray(&createRoleIter, createRoleSpec);
+			ParseParentRolesArray(&createRoleIter, createRoleSpec->parentRoles);
 		}
 		else if (strcmp(key, "privileges") == 0)
 		{
 			privilegesFound = true;
-			ParsePrivilegesArray(&createRoleIter, createRoleSpec);
+			ParsePrivilegesArray(&createRoleIter,
+								 &createRoleSpec->collectionPrivileges);
 		}
-		else if (strcmp(key, "$db") == 0 && EnableRolesAdminDBCheck)
+		else if (strcmp(key, "$db") == 0 && EnableRolesAdminDBCheck &&
+				 validateCommandContext)
 		{
 			EnsureTopLevelFieldType(key, &createRoleIter, BSON_TYPE_UTF8);
 			uint32_t strLength = 0;
@@ -350,7 +489,7 @@ ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec)
 		}
 	}
 
-	if (!dbFound && EnableRolesAdminDBCheck)
+	if (!dbFound && EnableRolesAdminDBCheck && validateCommandContext)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 						errmsg("The required $db property is missing.")));
@@ -377,11 +516,15 @@ ParseCreateRoleSpec(pgbson *createRoleBson, CreateRoleSpec *createRoleSpec)
 
 
 /*
- * ParseRolesArray parses the "roles" array from the createRole command.
- * Extracts inherited built-in role names.
+ * ParseParentRolesArray parses a "roles" array and collects the role names it
+ * names into parentRoles.
+ *
+ * Each entry may be either a plain string or a document of the documented
+ * { role, db } shape. The document form is what drivers send, and the string
+ * form is accepted so that a spec written by hand stays valid.
  */
-static void
-ParseRolesArray(bson_iter_t *rolesIter, CreateRoleSpec *createRoleSpec)
+void
+ParseParentRolesArray(bson_iter_t *rolesIter, HTAB *parentRoles)
 {
 	if (bson_iter_type(rolesIter) != BSON_TYPE_ARRAY)
 	{
@@ -396,22 +539,49 @@ ParseRolesArray(bson_iter_t *rolesIter, CreateRoleSpec *createRoleSpec)
 
 	while (bson_iter_next(&rolesArrayIter))
 	{
-		if (bson_iter_type(&rolesArrayIter) != BSON_TYPE_UTF8)
+		uint32_t parentRoleNameLength = 0;
+		const char *parentRoleName = NULL;
+
+		if (bson_iter_type(&rolesArrayIter) == BSON_TYPE_UTF8)
+		{
+			parentRoleName = bson_iter_utf8(&rolesArrayIter, &parentRoleNameLength);
+		}
+		else if (bson_iter_type(&rolesArrayIter) == BSON_TYPE_DOCUMENT)
+		{
+			ParseRoleEntryDocument(&rolesArrayIter, &parentRoleName,
+								   &parentRoleNameLength);
+		}
+		else
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 							errmsg(
-								"Invalid inherited from role name provided.")));
+								"The role name in 'roles' must be a string.")));
 		}
 
-		uint32_t roleNameLength = 0;
-		const char *inheritedBuiltInRole = bson_iter_utf8(&rolesArrayIter,
-														  &roleNameLength);
-
-		if (roleNameLength == 0 || roleNameLength >= NAMEDATALEN)
+		if (parentRoleNameLength == 0 || parentRoleNameLength >= NAMEDATALEN)
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_ROLENOTFOUND),
-							errmsg("Role '%s' not found.",
-								   inheritedBuiltInRole)));
+							errmsg(
+								"The specified parent role '%s' does not exist.",
+								parentRoleName)));
+		}
+
+		/*
+		 * Only the documented role names and custom roles may be named here.
+		 * The names the extension provisions for its own use are rejected so
+		 * that naming one directly cannot stand in for the documented name it
+		 * backs, which would bypass the validation that name carries.
+		 */
+		if (ContainsReservedPgRoleNamePrefix(parentRoleName) ||
+			IsReservedInternalRoleName(parentRoleName))
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_ROLENOTFOUND),
+							errmsg(
+								"The specified value for the role is invalid: '%s'.",
+								parentRoleName),
+							errdetail_log(
+								"The specified value for the role is invalid: '%s'.",
+								parentRoleName)));
 		}
 
 		/*
@@ -419,18 +589,86 @@ ParseRolesArray(bson_iter_t *rolesIter, CreateRoleSpec *createRoleSpec)
 		 * command document outlives this hash, so the referenced bytes stay
 		 * valid for as long as the set is used.
 		 */
-		StringView inheritedRoleView =
-			CreateStringViewFromStringWithLength(inheritedBuiltInRole, roleNameLength);
-		hash_search(createRoleSpec->parentRoles, &inheritedRoleView, HASH_ENTER, NULL);
+		StringView parentRole = CreateStringViewFromStringWithLength(
+			parentRoleName, parentRoleNameLength);
+		hash_search(parentRoles, &parentRole, HASH_ENTER, NULL);
 	}
 }
 
 
 /*
- * ParsePrivilegesArray parses the privileges array from the createRole command.
+ * ParseRoleEntryDocument reads a { role, db } entry from a roles array and
+ * returns the role name it holds.
+ *
+ * The returned name points into the command document, which outlives every
+ * caller here, so it is not copied.
  */
 static void
-ParsePrivilegesArray(bson_iter_t *privilegesIter, CreateRoleSpec *createRoleSpec)
+ParseRoleEntryDocument(bson_iter_t *roleEntryIter, const char **roleName,
+					   uint32_t *roleNameLength)
+{
+	bson_iter_t roleDocIter;
+	bson_iter_recurse(roleEntryIter, &roleDocIter);
+
+	bool roleFound = false;
+
+	while (bson_iter_next(&roleDocIter))
+	{
+		const char *key = bson_iter_key(&roleDocIter);
+
+		if (strcmp(key, "role") == 0)
+		{
+			if (bson_iter_type(&roleDocIter) != BSON_TYPE_UTF8)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"The role name in 'roles' must be a string.")));
+			}
+
+			*roleName = bson_iter_utf8(&roleDocIter, roleNameLength);
+			roleFound = true;
+		}
+		else if (strcmp(key, "db") == 0 || strcmp(key, "$db") == 0)
+		{
+			if (bson_iter_type(&roleDocIter) != BSON_TYPE_UTF8)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg("'db' in a role entry must be a string.")));
+			}
+
+			uint32_t dbNameLength = 0;
+			const char *dbName = bson_iter_utf8(&roleDocIter, &dbNameLength);
+			ValidateNamespaceStringForEmbeddedNull(dbName, dbNameLength);
+			if (strcmp(dbName, "admin") != 0)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"Unsupported value specified for db. Only 'admin' is allowed.")));
+			}
+		}
+		else
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"The specified field '%s' is not supported in a role entry.",
+								key)));
+		}
+	}
+
+	if (!roleFound)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'role' is required in a role entry.")));
+	}
+}
+
+
+/*
+ * ParsePrivilegesArray parses a privileges array and appends each entry to
+ * collectionPrivileges.
+ */
+static void
+ParsePrivilegesArray(bson_iter_t *privilegesIter, List **collectionPrivileges)
 {
 	if (bson_iter_type(privilegesIter) != BSON_TYPE_ARRAY)
 	{
@@ -472,7 +710,7 @@ ParsePrivilegesArray(bson_iter_t *privilegesIter, CreateRoleSpec *createRoleSpec
 			else if (strcmp(privilegeKey, "actions") == 0)
 			{
 				actionsFound = true;
-				actions = ParseActionsArray(&privilegeDocIter);
+				actions = ExtractUniqueActionsForResource(&privilegeDocIter);
 			}
 			else
 			{
@@ -511,8 +749,7 @@ ParsePrivilegesArray(bson_iter_t *privilegesIter, CreateRoleSpec *createRoleSpec
 		collectionPrivilege->collectionName = collectionName;
 		collectionPrivilege->actions = actions;
 
-		createRoleSpec->collectionPrivileges = lappend(
-			createRoleSpec->collectionPrivileges, collectionPrivilege);
+		*collectionPrivileges = lappend(*collectionPrivileges, collectionPrivilege);
 	}
 }
 
@@ -559,6 +796,7 @@ ParseResourceDocument(bson_iter_t *privilegeDocIter,
 								errmsg("'db' in resource must not be empty.")));
 			}
 
+			ValidateNamespaceStringForEmbeddedNull(strValue, strLength);
 			*dbName = CreateStringViewFromStringWithLength(strValue, strLength);
 			dbFound = true;
 		}
@@ -573,12 +811,14 @@ ParseResourceDocument(bson_iter_t *privilegeDocIter,
 
 			uint32_t strLength = 0;
 			const char *strValue = bson_iter_utf8(&resourceIter, &strLength);
-			if (strValue == NULL || strLength == 0)
+			if (strValue == NULL)
 			{
 				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
-								errmsg("'collection' in resource must not be empty.")));
+								errmsg(
+									"'collection' in resource must be a string.")));
 			}
 
+			ValidateNamespaceStringForEmbeddedNull(strValue, strLength);
 			*collectionName = CreateStringViewFromStringWithLength(strValue, strLength);
 			collectionFound = true;
 		}
@@ -607,18 +847,25 @@ ParseResourceDocument(bson_iter_t *privilegeDocIter,
 	 * Privileges may target collections created later, so validate only the
 	 * namespace syntax here.
 	 */
-	ValidateDatabaseCollection(StringViewGetTextDatum(dbName),
-							   StringViewGetTextDatum(collectionName));
+	if (collectionName->length == 0)
+	{
+		ValidateDatabaseName(StringViewGetTextDatum(dbName));
+	}
+	else
+	{
+		ValidateDatabaseCollection(StringViewGetTextDatum(dbName),
+								   StringViewGetTextDatum(collectionName));
+	}
 }
 
 
 /*
- * ParseActionsArray parses the "actions" field from a privilege entry.
- * Returns a bitmask of CustomPrivilegeAction, so repeating an action is
+ * ExtractUniqueActionsForResource parses the "actions" field from a privilege
+ * entry. Returns a bitmask of CustomPrivilegeAction, so repeating an action is
  * inherently tolerated: setting a bit twice is the same as setting it once.
  */
 static CustomPrivilegeAction
-ParseActionsArray(bson_iter_t *privilegeDocIter)
+ExtractUniqueActionsForResource(bson_iter_t *privilegeDocIter)
 {
 	if (bson_iter_type(privilegeDocIter) != BSON_TYPE_ARRAY)
 	{
@@ -638,7 +885,15 @@ ParseActionsArray(bson_iter_t *privilegeDocIter)
 							errmsg("Each action must be a string.")));
 		}
 
-		const char *action = bson_iter_utf8(&actionsIter, NULL);
+		uint32_t actionLength = 0;
+		const char *action = bson_iter_utf8(&actionsIter, &actionLength);
+
+		if (actionLength == 0)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg("Action name cannot be empty.")));
+		}
+
 		actions |= GetPrivilegeAction(action);
 	}
 
@@ -666,12 +921,451 @@ update_role(pgbson *updateRoleBson)
 
 
 /*
+ * grant_roles_to_role implements the core logic for the grantRolesToRole
+ * command, which adds parent roles to an existing custom role.
+ */
+Datum
+grant_roles_to_role(pgbson *grantRolesBson)
+{
+	if (!EnableRoleCrud || !IsClusterVersionAtleast(DocDB_V0, 116, 0))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg("The GrantRolesToRole command is currently unsupported."),
+						errdetail_log(
+							"The GrantRolesToRole command is currently unsupported.")));
+	}
+
+	ReportFeatureUsage(FEATURE_ROLE_GRANT_ROLES_TO_ROLE);
+
+	if (!IsMetadataCoordinator())
+	{
+		if (!IsClusterVersionAtleast(DocDB_V1, 1, 0))
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+							errmsg(
+								"The GrantRolesToRole command is currently unsupported."),
+							errdetail_log(
+								"The GrantRolesToRole command is currently unsupported.")));
+		}
+
+		StringInfo grantRolesQuery = makeStringInfo();
+		appendStringInfo(grantRolesQuery,
+						 "SELECT %s.grant_roles_to_role(%s::%s.bson)",
+						 ApiSchemaNameV2,
+						 quote_literal_cstr(PgbsonToHexadecimalString(grantRolesBson)),
+						 CoreSchemaNameV2);
+		DistributedRunCommandResult result = RunCommandOnMetadataCoordinator(
+			grantRolesQuery->data);
+
+		if (!result.success)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
+							errmsg(
+								"Grant roles to role operation failed: %s",
+								text_to_cstring(result.response)),
+							errdetail_log(
+								"Grant roles to role operation failed: %s",
+								text_to_cstring(result.response))));
+		}
+
+		pgbson_writer finalWriter;
+		PgbsonWriterInit(&finalWriter);
+		PgbsonWriterAppendInt32(&finalWriter, "ok", 2, 1);
+		return PointerGetDatum(PgbsonWriterGetPgbson(&finalWriter));
+	}
+
+	GrantRolesToRoleSpec grantRolesSpec = {
+		.roleName = NULL,
+		.grantedRoles = CreateStringViewHashSet()
+	};
+	ParseGrantRolesToRoleSpec(grantRolesBson, &grantRolesSpec);
+
+	/*
+	 * Only a custom role may be modified. Built-in roles carry fixed
+	 * capabilities that the rest of the system relies on.
+	 */
+	EnsureCustomRoleExists(grantRolesSpec.roleName);
+
+	EnsureRoleMembershipLimits(grantRolesSpec.roleName, hash_get_num_entries(
+								   grantRolesSpec.grantedRoles));
+
+	bool allowCustomRoles = true;
+	ValidateAndGrantParentRoles(grantRolesSpec.roleName, grantRolesSpec.grantedRoles,
+								allowCustomRoles);
+
+	bool isGrantRoles = true;
+	UpdateCustomRoleInRoleCatalog(grantRolesSpec.roleName, grantRolesSpec.grantedRoles,
+								  isGrantRoles);
+
+	hash_destroy(grantRolesSpec.grantedRoles);
+
+	pgbson_writer finalWriter;
+	PgbsonWriterInit(&finalWriter);
+	PgbsonWriterAppendInt32(&finalWriter, "ok", 2, 1);
+	return PointerGetDatum(PgbsonWriterGetPgbson(&finalWriter));
+}
+
+
+/*
+ * ParseGrantRolesToRoleSpec parses the grantRolesToRole command parameters.
+ */
+static void
+ParseGrantRolesToRoleSpec(pgbson *grantRolesBson, GrantRolesToRoleSpec *grantRolesSpec)
+{
+	bson_iter_t grantRolesIter;
+	PgbsonInitIterator(grantRolesBson, &grantRolesIter);
+
+	bool dbFound = false;
+	bool rolesFound = false;
+
+	while (bson_iter_next(&grantRolesIter))
+	{
+		const char *key = bson_iter_key(&grantRolesIter);
+
+		if (strcmp(key, "grantRolesToRole") == 0)
+		{
+			EnsureTopLevelFieldType(key, &grantRolesIter, BSON_TYPE_UTF8);
+			uint32_t strLength = 0;
+			grantRolesSpec->roleName = bson_iter_utf8(&grantRolesIter, &strLength);
+
+			if (strLength == 0)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"The 'grantRolesToRole' field must not be left empty.")));
+			}
+
+			/*
+			 * PostgreSQL truncates identifiers, so a name that cannot be
+			 * stored is rejected rather than being allowed to resolve to a
+			 * different role that shares its prefix.
+			 */
+			if (strLength >= NAMEDATALEN)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_ROLENOTFOUND),
+								errmsg("The specified role '%s' does not exist.",
+									   grantRolesSpec->roleName)));
+			}
+		}
+		else if (strcmp(key, "roles") == 0)
+		{
+			rolesFound = true;
+			ParseParentRolesArray(&grantRolesIter, grantRolesSpec->grantedRoles);
+		}
+		else if (strcmp(key, "$db") == 0 && EnableRolesAdminDBCheck)
+		{
+			EnsureTopLevelFieldType(key, &grantRolesIter, BSON_TYPE_UTF8);
+			uint32_t strLength = 0;
+			const char *dbName = bson_iter_utf8(&grantRolesIter, &strLength);
+			ValidateNamespaceStringForEmbeddedNull(dbName, strLength);
+
+			dbFound = true;
+			if (strcmp(dbName, "admin") != 0)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"GrantRolesToRole must be called from 'admin' database.")));
+			}
+		}
+		else if (IsCommonSpecIgnoredField(key))
+		{
+			continue;
+		}
+		else
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg("The specified field '%s' is not supported.", key)));
+		}
+	}
+
+	if (!dbFound && EnableRolesAdminDBCheck)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("The required $db property is missing.")));
+	}
+
+	if (grantRolesSpec->roleName == NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'grantRolesToRole' is a required field.")));
+	}
+
+	if (!rolesFound)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'roles' is a required field.")));
+	}
+
+	if (hash_get_num_entries(grantRolesSpec->grantedRoles) == 0)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'roles' must not be empty.")));
+	}
+}
+
+
+/*
+ * revoke_roles_from_role implements the core logic for the revokeRolesFromRole
+ * command, which removes parent roles from an existing custom role.
+ */
+Datum
+revoke_roles_from_role(pgbson *revokeRolesBson)
+{
+	if (!EnableRoleCrud || !IsClusterVersionAtleast(DocDB_V0, 116, 0))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg(
+							"The RevokeRolesFromRole command is currently unsupported."),
+						errdetail_log(
+							"The RevokeRolesFromRole command is currently unsupported.")));
+	}
+
+	ReportFeatureUsage(FEATURE_ROLE_REVOKE_ROLES_FROM_ROLE);
+
+	if (!IsMetadataCoordinator())
+	{
+		if (!IsClusterVersionAtleast(DocDB_V1, 1, 0))
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+							errmsg(
+								"The RevokeRolesFromRole command is currently unsupported."),
+							errdetail_log(
+								"The RevokeRolesFromRole command is currently unsupported.")));
+		}
+
+		StringInfo revokeRolesQuery = makeStringInfo();
+		appendStringInfo(revokeRolesQuery,
+						 "SELECT %s.revoke_roles_from_role(%s::%s.bson)",
+						 ApiSchemaNameV2,
+						 quote_literal_cstr(PgbsonToHexadecimalString(revokeRolesBson)),
+						 CoreSchemaNameV2);
+		DistributedRunCommandResult result = RunCommandOnMetadataCoordinator(
+			revokeRolesQuery->data);
+
+		if (!result.success)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
+							errmsg(
+								"Revoke roles from role operation failed: %s",
+								text_to_cstring(result.response)),
+							errdetail_log(
+								"Revoke roles from role operation failed: %s",
+								text_to_cstring(result.response))));
+		}
+
+		pgbson_writer finalWriter;
+		PgbsonWriterInit(&finalWriter);
+		PgbsonWriterAppendInt32(&finalWriter, "ok", 2, 1);
+		return PointerGetDatum(PgbsonWriterGetPgbson(&finalWriter));
+	}
+
+	RevokeRolesFromRoleSpec revokeRolesSpec = {
+		.roleName = NULL,
+		.revokedRoles = CreateStringViewHashSet()
+	};
+	ParseRevokeRolesFromRoleSpec(revokeRolesBson, &revokeRolesSpec);
+
+	/*
+	 * Only a custom role may be modified. Built-in roles carry fixed
+	 * capabilities that the rest of the system relies on.
+	 */
+	EnsureCustomRoleExists(revokeRolesSpec.roleName);
+
+	ValidateAndRevokeParentRoles(revokeRolesSpec.roleName,
+								 revokeRolesSpec.revokedRoles);
+
+	bool isGrantRoles = false;
+	UpdateCustomRoleInRoleCatalog(revokeRolesSpec.roleName, revokeRolesSpec.revokedRoles,
+								  isGrantRoles);
+	hash_destroy(revokeRolesSpec.revokedRoles);
+
+	pgbson_writer finalWriter;
+	PgbsonWriterInit(&finalWriter);
+	PgbsonWriterAppendInt32(&finalWriter, "ok", 2, 1);
+	return PointerGetDatum(PgbsonWriterGetPgbson(&finalWriter));
+}
+
+
+/*
+ * ParseRevokeRolesFromRoleSpec parses the revokeRolesFromRole command
+ * parameters.
+ */
+static void
+ParseRevokeRolesFromRoleSpec(pgbson *revokeRolesBson,
+							 RevokeRolesFromRoleSpec *revokeRolesSpec)
+{
+	bson_iter_t revokeRolesIter;
+	PgbsonInitIterator(revokeRolesBson, &revokeRolesIter);
+
+	bool dbFound = false;
+	bool rolesFound = false;
+
+	while (bson_iter_next(&revokeRolesIter))
+	{
+		const char *key = bson_iter_key(&revokeRolesIter);
+
+		if (strcmp(key, "revokeRolesFromRole") == 0)
+		{
+			EnsureTopLevelFieldType(key, &revokeRolesIter, BSON_TYPE_UTF8);
+			uint32_t strLength = 0;
+			revokeRolesSpec->roleName = bson_iter_utf8(&revokeRolesIter, &strLength);
+
+			if (strLength == 0)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"The 'revokeRolesFromRole' field must not be left empty.")));
+			}
+
+			/*
+			 * PostgreSQL truncates identifiers, so a name that cannot be
+			 * stored is rejected rather than being allowed to resolve to a
+			 * different role that shares its prefix.
+			 */
+			if (strLength >= NAMEDATALEN)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_ROLENOTFOUND),
+								errmsg("The specified role '%s' does not exist.",
+									   revokeRolesSpec->roleName)));
+			}
+		}
+		else if (strcmp(key, "roles") == 0)
+		{
+			rolesFound = true;
+			ParseParentRolesArray(&revokeRolesIter, revokeRolesSpec->revokedRoles);
+		}
+		else if (strcmp(key, "$db") == 0)
+		{
+			EnsureTopLevelFieldType(key, &revokeRolesIter, BSON_TYPE_UTF8);
+			uint32_t strLength = 0;
+			const char *dbName = bson_iter_utf8(&revokeRolesIter, &strLength);
+			ValidateNamespaceStringForEmbeddedNull(dbName, strLength);
+
+			dbFound = true;
+			if (strcmp(dbName, "admin") != 0)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"RevokeRolesFromRole must be called from 'admin' database.")));
+			}
+		}
+		else if (IsCommonSpecIgnoredField(key))
+		{
+			continue;
+		}
+		else
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg("The specified field '%s' is not supported.", key)));
+		}
+	}
+
+	if (!dbFound)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("The required $db property is missing.")));
+	}
+
+	if (revokeRolesSpec->roleName == NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'revokeRolesFromRole' is a required field.")));
+	}
+
+	if (!rolesFound)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'roles' is a required field.")));
+	}
+
+	if (hash_get_num_entries(revokeRolesSpec->revokedRoles) == 0)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("'roles' must not be empty.")));
+	}
+}
+
+
+/*
+ * revoke_privileges_from_role is the entry point for the
+ * revokePrivilegesFromRole command. Removing resource-scoped privileges from a
+ * role is not implemented yet, so the command is always rejected.
+ */
+Datum
+revoke_privileges_from_role(pgbson *revokePrivilegesBson)
+{
+	ReportFeatureUsage(FEATURE_ROLE_REVOKE_PRIVILEGES_FROM_ROLE);
+
+	ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+					errmsg(
+						"The RevokePrivilegesFromRole command is currently unsupported."),
+					errdetail_log(
+						"The RevokePrivilegesFromRole command is currently unsupported.")));
+}
+
+
+/*
+ * grant_privileges_to_role is the entry point for the grantPrivilegesToRole
+ * command. Granting resource-scoped privileges to an existing role is not
+ * implemented yet, so the command is always rejected.
+ */
+Datum
+grant_privileges_to_role(pgbson *grantPrivilegesBson)
+{
+	ReportFeatureUsage(FEATURE_ROLE_GRANT_PRIVILEGES_TO_ROLE);
+
+	ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+					errmsg(
+						"The GrantPrivilegesToRole command is currently unsupported."),
+					errdetail_log(
+						"The GrantPrivilegesToRole command is currently unsupported.")));
+}
+
+
+/*
+ * EnsureCustomRoleExists reports an error unless roleName names an existing
+ * custom role. Built-in roles are rejected because their capabilities are
+ * fixed.
+ */
+static void
+EnsureCustomRoleExists(const char *roleName)
+{
+	if (IS_NATIVE_BUILTIN_ROLE(roleName))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("Cannot modify built-in role '%s'.", roleName)));
+	}
+
+	if (ContainsReservedPgRoleNamePrefix(roleName) ||
+		IsReservedInternalRoleName(roleName))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg("Role '%s' is reserved and cannot be modified.",
+							   roleName)));
+	}
+
+	if (!IsCustomRole(roleName))
+	{
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg("The specified role '%s' does not exist.", roleName)));
+	}
+}
+
+
+/*
  * drop_role implements the core logic for dropRole command
  */
 Datum
 drop_role(pgbson *dropRoleBson)
 {
 	if (!EnableRoleCrud)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg("DropRole command is not supported."),
+						errdetail_log("DropRole command is not supported.")));
+	}
+
+	if (!IsClusterVersionAtleast(DocDB_V0, 116, 0))
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
 						errmsg("DropRole command is not supported."),
@@ -709,20 +1403,39 @@ drop_role(pgbson *dropRoleBson)
 	DropRoleSpec dropRoleSpec = { NULL };
 	ParseDropRoleSpec(dropRoleBson, &dropRoleSpec);
 
+	if (IS_NATIVE_BUILTIN_ROLE(dropRoleSpec.roleName))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg(
+							"Cannot drop built-in role '%s'.",
+							dropRoleSpec.roleName)));
+	}
+
+	if (!IsCustomRole(dropRoleSpec.roleName))
+	{
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg(
+							"The specified role '%s' does not exist.",
+							dropRoleSpec.roleName)));
+	}
+
 	/*
 	 * Stored privileges are matched by resolving the role name, so they must
-	 * be removed while the role still resolves. Both statements run in this
-	 * transaction, so the cleanup and the drop commit or roll back together.
+	 * be removed while the role still resolves. Every statement here runs in
+	 * this transaction, so the cleanup and the drop commit or roll back
+	 * together.
 	 */
 	RemoveCollectionPrivileges(dropRoleSpec.roleName);
 
-	StringInfo dropUserInfo = makeStringInfo();
-	appendStringInfo(dropUserInfo, "DROP ROLE %s;", quote_identifier(
-						 dropRoleSpec.roleName));
+	DeleteCustomRoleFromRoleCatalog(dropRoleSpec.roleName);
+
+	StringInfo dropRoleQuery = makeStringInfo();
+	appendStringInfo(dropRoleQuery, "DROP ROLE %s",
+					 quote_identifier(dropRoleSpec.roleName));
 
 	bool readOnly = false;
 	bool isNull = false;
-	ExtensionExecuteQueryViaSPI(dropUserInfo->data, readOnly, SPI_OK_UTILITY,
+	ExtensionExecuteQueryViaSPI(dropRoleQuery->data, readOnly, SPI_OK_UTILITY,
 								&isNull);
 
 	pgbson_writer finalWriter;
@@ -771,17 +1484,9 @@ ParseDropRoleSpec(pgbson *dropRoleBson, DropRoleSpec *dropRoleSpec)
 			if (ContainsReservedPgRoleNamePrefix(roleNameValue) ||
 				IsReservedInternalRoleName(roleNameValue))
 			{
-				ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
-								errmsg(
-									"The specified role '%s' does not exist.",
-									roleNameValue)));
-			}
-
-			if (IS_NATIVE_BUILTIN_ROLE(roleNameValue))
-			{
 				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 								errmsg(
-									"Cannot drop built-in role '%s'.",
+									"Role '%s' is reserved and cannot be dropped.",
 									roleNameValue)));
 			}
 
@@ -833,6 +1538,13 @@ Datum
 roles_info(pgbson *rolesInfoBson)
 {
 	if (!EnableRoleCrud)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg("RolesInfo command is not supported."),
+						errdetail_log("RolesInfo command is not supported.")));
+	}
+
+	if (!IsClusterVersionAtleast(DocDB_V0, 116, 0))
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
 						errmsg("RolesInfo command is not supported."),
@@ -1056,7 +1768,6 @@ ParseRoleDocument(bson_iter_t *rolesArrayIter, RolesInfoSpec *rolesInfoSpec)
 
 			roleName = bson_iter_utf8(&roleDocIter, &roleNameLength);
 		}
-
 		/* db is required as part of every role document. */
 		else if (strcmp(roleKey, "db") == 0)
 		{
@@ -1138,23 +1849,30 @@ ProcessAllRolesForRolesInfo(pgbson_array_writer *rolesArrayWriter, RolesInfoSpec
 {
 	HASH_SEQ_STATUS status;
 	RoleParentEntry *entry;
+	List *sortedRoleEntries = NIL;
 
 	hash_seq_init(&status, roleInheritanceTable);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
-		const char *internalRoleName = entry->internalRoleName;
-		const char *nativeRoleName = entry->nativeRoleName;
-
-		/* Exclude built-in roles if not requested */
 		if (!rolesInfoSpec.showBuiltInRoles &&
-			IS_NATIVE_BUILTIN_ROLE(nativeRoleName))
+			IS_NATIVE_BUILTIN_ROLE(entry->nativeRoleName.string))
 		{
 			continue;
 		}
 
-		WriteRoleResponse(internalRoleName, rolesArrayWriter,
-						  rolesInfoSpec, roleInheritanceTable);
+		sortedRoleEntries = lappend(sortedRoleEntries, entry);
 	}
+
+	list_sort(sortedRoleEntries, RoleParentEntryListCellCompare);
+
+	ListCell *roleCell;
+	foreach(roleCell, sortedRoleEntries)
+	{
+		entry = lfirst(roleCell);
+		WriteRoleResponse(entry, rolesArrayWriter, rolesInfoSpec, roleInheritanceTable);
+	}
+
+	list_free(sortedRoleEntries);
 }
 
 
@@ -1171,102 +1889,27 @@ ProcessSpecificRolesForRolesInfo(pgbson_array_writer *rolesArrayWriter, RolesInf
 	{
 		const char *nativeRoleName = (const char *) lfirst(currentRoleName);
 
-		/* Convert native role name to internal for HTAB lookup */
-		const char *internalRoleName = GetInternalRoleName(nativeRoleName);
-
-		/* Check if the role exists in the inheritance table */
-		bool found = false;
-		hash_search(roleInheritanceTable, internalRoleName, HASH_FIND, &found);
-
-		/* If the role is not found, do not fail the request */
-		if (found)
-		{
-			WriteRoleResponse(internalRoleName, rolesArrayWriter,
-							  rolesInfoSpec, roleInheritanceTable);
-		}
-	}
-}
-
-
-/*
- * Recursively collect all inherited roles into the result hash set.
- * The hash set serves for both deduplication and collecting results.
- */
-static void
-CollectInheritedRolesRecursive(const char *internalRoleName, HTAB *roleInheritanceTable,
-							   HTAB *resultSet)
-{
-	bool found = false;
-	RoleParentEntry *entry = (RoleParentEntry *) hash_search(
-		roleInheritanceTable, internalRoleName, HASH_FIND, &found);
-
-	/*
-	 * Role may not be found if it's a system role (oid < FirstNormalObjectId)
-	 * that was referenced as a parent but not included in our inheritance table query.
-	 * This is expected behavior - silently skip such roles.
-	 */
-	if (!found)
-	{
-		ereport(WARNING, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						  errmsg(
-							  "Role '%s' not found.",
-							  internalRoleName)));
-	}
-
-	if (entry->parentRoles == NIL)
-	{
-		return;
-	}
-
-	ListCell *cell;
-	foreach(cell, entry->parentRoles)
-	{
-		char *parentName = (char *) lfirst(cell);
-
-		/*
-		 * Insert into resultSet; skip if already present. The key references
-		 * the name owned by the inheritance table, which outlives this set.
-		 */
-		bool alreadyExists = false;
-		StringView parentNameView = CreateStringViewFromString(parentName);
-		hash_search(resultSet, &parentNameView, HASH_ENTER, &alreadyExists);
-		if (alreadyExists)
+		if (IsReservedInternalRoleName(nativeRoleName))
 		{
 			continue;
 		}
 
-		CollectInheritedRolesRecursive(parentName, roleInheritanceTable, resultSet);
+		/* Convert native role name to internal for HTAB lookup */
+		const char *internalRoleName = GetInternalRoleName(nativeRoleName);
+		StringView internalRoleNameView = CreateStringViewFromString(internalRoleName);
+
+		/* Check if the role exists in the inheritance table */
+		bool found = false;
+		RoleParentEntry *entry = hash_search(roleInheritanceTable,
+											 &internalRoleNameView, HASH_FIND, &found);
+
+		/* If the role is not found, do not fail the request */
+		if (found)
+		{
+			WriteRoleResponse(entry, rolesArrayWriter, rolesInfoSpec,
+							  roleInheritanceTable);
+		}
 	}
-}
-
-
-/*
- * Look up all inherited roles (transitive closure) from the pre-built role
- * inheritance table using recursive traversal.
- *
- * Handles diamond inheritance (e.g., role A inherits B and C, both B and C
- * inherit D) by using a hash set that serves for both deduplication and
- * collecting results.
- */
-static List *
-LookupAllInheritedRoles(const char *internalRoleName, HTAB *roleInheritanceTable)
-{
-	HTAB *resultSet = CreateStringViewHashSet();
-
-	CollectInheritedRolesRecursive(internalRoleName, roleInheritanceTable, resultSet);
-
-	/* Convert hash set to list */
-	List *result = NIL;
-	HASH_SEQ_STATUS status;
-	StringView *entry;
-	hash_seq_init(&status, resultSet);
-	while ((entry = hash_seq_search(&status)) != NULL)
-	{
-		result = lappend(result, CreateStringFromStringView(entry));
-	}
-
-	hash_destroy(resultSet);
-	return result;
 }
 
 
@@ -1283,12 +1926,24 @@ WriteRoles(List *parentRoles, pgbson_array_writer *rolesArrayWriter,
 	foreach(roleCell, parentRoles)
 	{
 		const char *internalParentRole = (const char *) lfirst(roleCell);
+		StringView internalParentRoleView = CreateStringViewFromString(
+			internalParentRole);
 
 		/* Look up parent role in HTAB to get its native name */
 		bool parentFound = false;
-		RoleParentEntry *parentEntry = (RoleParentEntry *) hash_search(
-			roleInheritanceTable, internalParentRole, HASH_FIND, &parentFound);
-		if (!parentFound)
+		RoleParentEntry *parentEntry = hash_search(roleInheritanceTable,
+												   &internalParentRoleView, HASH_FIND,
+												   &parentFound);
+		const char *nativeParentRole = NULL;
+		if (parentFound)
+		{
+			nativeParentRole = parentEntry->nativeRoleName.string;
+		}
+		else if (strcmp(internalParentRole, API_RBAC_READWRITE_ANYDB_ROLE) == 0)
+		{
+			nativeParentRole = "readWriteAnyDatabase";
+		}
+		else
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
 							errmsg("Parent role '%s' of '%s' not found.",
@@ -1298,7 +1953,7 @@ WriteRoles(List *parentRoles, pgbson_array_writer *rolesArrayWriter,
 		pgbson_writer parentRoleWriter;
 		PgbsonArrayWriterStartDocument(rolesArrayWriter, &parentRoleWriter);
 		PgbsonWriterAppendUtf8(&parentRoleWriter, "role", 4,
-							   parentEntry->nativeRoleName);
+							   nativeParentRole);
 		PgbsonWriterAppendUtf8(&parentRoleWriter, "db", 2, "admin");
 		PgbsonArrayWriterEndDocument(rolesArrayWriter, &parentRoleWriter);
 	}
@@ -1309,44 +1964,35 @@ WriteRoles(List *parentRoles, pgbson_array_writer *rolesArrayWriter,
  * Primitive type properties include _id, role, db, isBuiltin.
  * privileges: supported privilege actions of this role if defined.
  * roles: 1st level directly inherited roles if defined.
- * allInheritedRoles: all recursively inherited roles if defined.
- * inheritedPrivileges: consolidated privileges of current role and all recursively inherited roles if defined.
  */
 static void
-WriteRoleResponse(const char *internalRoleName,
+WriteRoleResponse(const RoleParentEntry *entry,
 				  pgbson_array_writer *rolesArrayWriter,
 				  RolesInfoSpec rolesInfoSpec,
 				  HTAB *roleInheritanceTable)
 {
-	bool foundEntry = false;
-	RoleParentEntry *entry = (RoleParentEntry *) hash_search(
-		roleInheritanceTable, internalRoleName, HASH_FIND, &foundEntry);
-	if (!foundEntry)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg("Role '%s' not found.",
-							   internalRoleName)));
-	}
+	Assert(entry != NULL);
 
 	pgbson_writer roleDocumentWriter;
 	PgbsonArrayWriterStartDocument(rolesArrayWriter, &roleDocumentWriter);
 
-	const char *nativeRoleName = entry->nativeRoleName;
-	char *roleId = psprintf("admin.%s", nativeRoleName);
+	const StringView *nativeRoleName = &entry->nativeRoleName;
+	char *roleId = psprintf("admin.%.*s", (int) nativeRoleName->length,
+							nativeRoleName->string);
 	PgbsonWriterAppendUtf8(&roleDocumentWriter, "_id", 3, roleId);
 	pfree(roleId);
 
-	PgbsonWriterAppendUtf8(&roleDocumentWriter, "role", 4, nativeRoleName);
+	PgbsonWriterAppendUtf8(&roleDocumentWriter, "role", 4, nativeRoleName->string);
 	PgbsonWriterAppendUtf8(&roleDocumentWriter, "db", 2, "admin");
 	PgbsonWriterAppendBool(&roleDocumentWriter, "isBuiltIn", 9,
-						   IS_NATIVE_BUILTIN_ROLE(nativeRoleName));
+						   IS_NATIVE_BUILTIN_ROLE(nativeRoleName->string));
 
 	if (rolesInfoSpec.showPrivileges)
 	{
 		pgbson_array_writer privilegesArrayWriter;
 		PgbsonWriterStartArray(&roleDocumentWriter, "privileges", 10,
 							   &privilegesArrayWriter);
-		WritePrivileges(entry->internalRoleName, &privilegesArrayWriter);
+		WritePrivileges(&entry->internalRoleName, &privilegesArrayWriter);
 		PgbsonWriterEndArray(&roleDocumentWriter, &privilegesArrayWriter);
 	}
 
@@ -1354,78 +2000,10 @@ WriteRoleResponse(const char *internalRoleName,
 	pgbson_array_writer parentRolesArrayWriter;
 	PgbsonWriterStartArray(&roleDocumentWriter, "roles", 5, &parentRolesArrayWriter);
 	WriteRoles(entry->parentRoles, &parentRolesArrayWriter, roleInheritanceTable,
-			   internalRoleName);
+			   entry->internalRoleName.string);
 	PgbsonWriterEndArray(&roleDocumentWriter, &parentRolesArrayWriter);
 
-	List *allInheritedRoles = LookupAllInheritedRoles(internalRoleName,
-													  roleInheritanceTable);
-	pgbson_array_writer inheritedRolesArrayWriter;
-	PgbsonWriterStartArray(&roleDocumentWriter, "allInheritedRoles", 17,
-						   &inheritedRolesArrayWriter);
-	ListCell *roleCell;
-	foreach(roleCell, allInheritedRoles)
-	{
-		const char *inheritedInternalName = (const char *) lfirst(roleCell);
-
-		/* Look up inherited role in HTAB to get its native name */
-		bool inheritedFound = false;
-		RoleParentEntry *inheritedEntry = (RoleParentEntry *) hash_search(
-			roleInheritanceTable, inheritedInternalName, HASH_FIND, &inheritedFound);
-		if (!inheritedFound)
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-							errmsg(
-								"Inherited role '%s' of '%s' not found.",
-								inheritedInternalName, internalRoleName)));
-		}
-
-		pgbson_writer inheritedRoleWriter;
-		PgbsonArrayWriterStartDocument(&inheritedRolesArrayWriter, &inheritedRoleWriter);
-		PgbsonWriterAppendUtf8(&inheritedRoleWriter, "role", 4,
-							   inheritedEntry->nativeRoleName);
-		PgbsonWriterAppendUtf8(&inheritedRoleWriter, "db", 2, "admin");
-		PgbsonArrayWriterEndDocument(&inheritedRolesArrayWriter, &inheritedRoleWriter);
-	}
-	PgbsonWriterEndArray(&roleDocumentWriter, &inheritedRolesArrayWriter);
-
-	/* Write inherited privileges (privileges from all inherited roles) */
-	if (rolesInfoSpec.showPrivileges)
-	{
-		pgbson_array_writer inheritedPrivilegesArrayWriter;
-		PgbsonWriterStartArray(&roleDocumentWriter, "inheritedPrivileges", 19,
-							   &inheritedPrivilegesArrayWriter);
-
-		HTAB *privilegeLookupRoleNames = CreateStringViewHashSet();
-
-		StringView selfRoleView = {
-			.string = entry->internalRoleName,
-			.length = strlen(entry->internalRoleName)
-		};
-		hash_search(privilegeLookupRoleNames, &selfRoleView, HASH_ENTER, NULL);
-
-		foreach(roleCell, allInheritedRoles)
-		{
-			const char *inheritedInternalName = (const char *) lfirst(roleCell);
-			StringView inheritedRoleView = {
-				.string = inheritedInternalName,
-				.length = strlen(inheritedInternalName)
-			};
-			hash_search(privilegeLookupRoleNames, &inheritedRoleView, HASH_ENTER, NULL);
-		}
-
-		WriteMultipleRolePrivileges(privilegeLookupRoleNames,
-									&inheritedPrivilegesArrayWriter);
-		hash_destroy(privilegeLookupRoleNames);
-
-		PgbsonWriterEndArray(&roleDocumentWriter, &inheritedPrivilegesArrayWriter);
-	}
-
 	PgbsonArrayWriterEndDocument(rolesArrayWriter, &roleDocumentWriter);
-
-	if (allInheritedRoles != NIL)
-	{
-		list_free_deep(allInheritedRoles);
-	}
 }
 
 
@@ -1445,7 +2023,7 @@ WriteRoleResponse(const char *internalRoleName,
  * system roles.
  *
  * Hash Table Structure:
- * - Key: internal role name (char[NAMEDATALEN])
+ * - Key: internal role name (StringView)
  * - Value: RoleParentEntry struct containing:
  *   - internalRoleName: the internal role name stored in pg_roles table
  *   - nativeRoleName: the native role name displayed to user
@@ -1454,16 +2032,7 @@ WriteRoleResponse(const char *internalRoleName,
 static HTAB *
 BuildRoleInheritanceTable(void)
 {
-	HASHCTL hashCtl;
-	memset(&hashCtl, 0, sizeof(hashCtl));
-	hashCtl.keysize = NAMEDATALEN;
-	hashCtl.entrysize = sizeof(RoleParentEntry);
-	hashCtl.hcxt = CurrentMemoryContext;
-
-	HTAB *roleInheritanceTable = hash_create("RoleInheritanceTable",
-											 64,
-											 &hashCtl,
-											 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	HTAB *roleInheritanceTable = CreateStringViewHashMap(sizeof(RoleParentEntry));
 
 	/*
 	 * Query returns all built-in and custom roles with their direct parent roles, all in internal role names.
@@ -1472,7 +2041,7 @@ BuildRoleInheritanceTable(void)
 		"SELECT ARRAY_AGG(%s.row_get_bson(r)) FROM ("
 		"  SELECT "
 		"    child.rolname::text AS child_role, "
-		"    ARRAY_AGG(parent.rolname::text) "
+		"    ARRAY_AGG(parent.rolname::text ORDER BY parent.rolname) "
 		"      FILTER (WHERE parent.rolname IS NOT NULL AND parent.oid >= %d) AS parent_roles "
 		"  FROM pg_roles child "
 		"  LEFT JOIN pg_auth_members am ON am.member = child.oid "
@@ -1542,12 +2111,16 @@ BuildRoleInheritanceTable(void)
 		 * - ApiAdminRoleV2: internal role that maps to both readWriteAnyDatabase
 		 *   and clusterAdmin; we add separate entries for these at the end
 		 * - ApiAdminRole: legacy admin role
+		 * - The default root role when another root role mapping is active
 		 * - Privileged Action System Roles: internal roles for fine-grained access
 		 */
 		if (IS_SYSTEM_LOGIN_ROLE(childRole) ||
 			IS_CUSTOM_RBAC_ROLE(childRole) ||
+			strcmp(childRole, API_RBAC_READWRITE_ANYDB_ROLE) == 0 ||
 			strcmp(childRole, ApiAdminRoleV2) == 0 ||
-			strcmp(childRole, ApiAdminRole) == 0)
+			strcmp(childRole, ApiAdminRole) == 0 ||
+			(strcmp(childRole, DOCUMENTDB_DEFAULT_ROOT_ROLE) == 0 &&
+			 strcmp(childRole, ApiRootInternalRole) != 0))
 		{
 			if (parentRoles != NIL)
 			{
@@ -1557,7 +2130,8 @@ BuildRoleInheritanceTable(void)
 		}
 
 		bool found;
-		RoleParentEntry *entry = hash_search(roleInheritanceTable, childRole,
+		StringView childRoleView = CreateStringViewFromString(childRole);
+		RoleParentEntry *entry = hash_search(roleInheritanceTable, &childRoleView,
 											 HASH_ENTER, &found);
 
 		if (found)
@@ -1572,8 +2146,8 @@ BuildRoleInheritanceTable(void)
 		}
 		else
 		{
-			strlcpy(entry->internalRoleName, childRole, NAMEDATALEN);
-			strlcpy(entry->nativeRoleName, GetNativeRoleName(childRole), NAMEDATALEN);
+			entry->nativeRoleName = CreateStringViewFromString(
+				GetNativeRoleName(childRole));
 			entry->parentRoles = NIL;
 		}
 
@@ -1584,15 +2158,22 @@ BuildRoleInheritanceTable(void)
 			{
 				const char *parentRole = (const char *) lfirst(cell);
 
+				if (IS_CUSTOM_RBAC_ROLE(parentRole))
+				{
+					pfree(lfirst(cell));
+					continue;
+				}
+
 				/*
 				 * ApiAdminRoleV2 represents both readWriteAnyDatabase and clusterAdmin.
-				 * When we encounter it as a parent, add both ApiReadWriteRole and
-				 * ApiClusterAdminRole instead to properly represent the inheritance.
+				 * When we encounter it as a parent, add both documented backing
+				 * roles instead to properly represent the inheritance.
 				 */
 				if (strcmp(parentRole, ApiAdminRoleV2) == 0)
 				{
 					entry->parentRoles = lappend(entry->parentRoles,
-												 pstrdup(ApiReadWriteRole));
+												 pstrdup(
+													 API_RBAC_READWRITE_ANYDB_ROLE));
 					entry->parentRoles = lappend(entry->parentRoles,
 												 pstrdup(ApiClusterAdminRole));
 					pfree(lfirst(cell));
@@ -1607,22 +2188,23 @@ BuildRoleInheritanceTable(void)
 	}
 
 	bool found;
+	StringView readWriteRoleView = CreateStringViewFromString(
+		API_RBAC_READWRITE_ANYDB_ROLE);
 
-	RoleParentEntry *rwEntry = hash_search(roleInheritanceTable, ApiReadWriteRole,
+	RoleParentEntry *rwEntry = hash_search(roleInheritanceTable, &readWriteRoleView,
 										   HASH_ENTER, &found);
 	if (!found)
 	{
-		strlcpy(rwEntry->internalRoleName, ApiReadWriteRole, NAMEDATALEN);
-		strlcpy(rwEntry->nativeRoleName, "readWriteAnyDatabase", NAMEDATALEN);
+		rwEntry->nativeRoleName = CreateStringViewFromString("readWriteAnyDatabase");
 		rwEntry->parentRoles = NIL;
 	}
 
-	RoleParentEntry *caEntry = hash_search(roleInheritanceTable, ApiClusterAdminRole,
+	StringView clusterAdminRoleView = CreateStringViewFromString(ApiClusterAdminRole);
+	RoleParentEntry *caEntry = hash_search(roleInheritanceTable, &clusterAdminRoleView,
 										   HASH_ENTER, &found);
 	if (!found)
 	{
-		strlcpy(caEntry->internalRoleName, ApiClusterAdminRole, NAMEDATALEN);
-		strlcpy(caEntry->nativeRoleName, "clusterAdmin", NAMEDATALEN);
+		caEntry->nativeRoleName = CreateStringViewFromString("clusterAdmin");
 		caEntry->parentRoles = NIL;
 	}
 
@@ -1720,26 +2302,45 @@ FreeRoleInheritanceTable(HTAB *roleInheritanceTable)
 
 
 /*
- * ValidateAndGrantInheritedRoles validates all parent roles and grants them.
- * Enforces that readWriteAnyDatabase and clusterAdmin must be specified together.
+ * ValidateAndGrantParentRoles validates all parent roles and grants them to
+ * targetRoleName. Standalone readWriteAnyDatabase is allowed only when its
+ * backing role is available.
+ *
+ * allowCustomRoles widens what may be granted to include custom roles. Role
+ * creation keeps it false so that a new role's parents stay limited to the
+ * built-in roles, while the grant commands set it so an existing principal can
+ * be given a custom role.
  */
-static void
-ValidateAndGrantInheritedRoles(const CreateRoleSpec *createRoleSpec)
+void
+ValidateAndGrantParentRoles(const char *targetRoleName, HTAB *parentRoles,
+							bool allowCustomRoles)
 {
 	StringView readWriteRoleView = CreateStringViewFromString("readWriteAnyDatabase");
 	StringView clusterAdminRoleView = CreateStringViewFromString("clusterAdmin");
-	bool hasReadWrite = hash_search(createRoleSpec->parentRoles, &readWriteRoleView,
+	bool hasReadWrite = hash_search(parentRoles, &readWriteRoleView,
 									HASH_FIND, NULL) != NULL;
-	bool hasClusterAdmin = hash_search(createRoleSpec->parentRoles,
+	bool hasClusterAdmin = hash_search(parentRoles,
 									   &clusterAdminRoleView, HASH_FIND, NULL) != NULL;
 
-	if (hasReadWrite != hasClusterAdmin)
+	if (hasClusterAdmin && !hasReadWrite)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 						errmsg(
-							"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together."),
+							"Roles specified are invalid. 'clusterAdmin' must be specified with 'readWriteAnyDatabase'."),
 						errdetail_log(
-							"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together.")));
+							"Roles specified are invalid. 'clusterAdmin' must be specified with 'readWriteAnyDatabase'.")));
+	}
+
+	if (hasReadWrite && !hasClusterAdmin)
+	{
+		if (!IsReadWriteAnyDatabaseRoleAvailable())
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together."),
+							errdetail_log(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together.")));
+		}
 	}
 
 	/*
@@ -1750,12 +2351,12 @@ ValidateAndGrantInheritedRoles(const CreateRoleSpec *createRoleSpec)
 	if (hasReadWrite && hasClusterAdmin)
 	{
 		grantedApiAdminRole = true;
-		GrantRoleInheritance(ApiAdminRoleV2, createRoleSpec->roleName);
+		GrantRoleInheritance(ApiAdminRoleV2, targetRoleName, allowCustomRoles);
 	}
 
 	HASH_SEQ_STATUS status;
 	StringView *entry;
-	hash_seq_init(&status, createRoleSpec->parentRoles);
+	hash_seq_init(&status, parentRoles);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
 		const char *nativeRoleName = CreateStringFromStringView(entry);
@@ -1766,19 +2367,117 @@ ValidateAndGrantInheritedRoles(const CreateRoleSpec *createRoleSpec)
 		 * ApiAdminRoleV2, which provides both capabilities.
 		 */
 		if (grantedApiAdminRole &&
-			(strcmp(internalRoleName, ApiReadWriteRole) == 0 ||
+			(strcmp(internalRoleName, API_RBAC_READWRITE_ANYDB_ROLE) == 0 ||
 			 strcmp(internalRoleName, ApiClusterAdminRole) == 0))
 		{
 			continue;
 		}
 
-		GrantRoleInheritance(internalRoleName, createRoleSpec->roleName);
+		GrantRoleInheritance(internalRoleName, targetRoleName, allowCustomRoles);
 	}
 }
 
 
 /*
- * GetInternalRoleName maps native role names to internal role names.
+ * ValidateAndRevokeParentRoles validates all parent roles and revokes them
+ * from targetRoleName, mirroring how they are granted.
+ */
+void
+ValidateAndRevokeParentRoles(const char *targetRoleName, HTAB *parentRoles)
+{
+	StringView readWriteRoleView = CreateStringViewFromString("readWriteAnyDatabase");
+	StringView clusterAdminRoleView = CreateStringViewFromString("clusterAdmin");
+	Oid targetRoleOid = get_role_oid(targetRoleName, false);
+	bool hasReadWrite = hash_search(parentRoles, &readWriteRoleView,
+									HASH_FIND, NULL) != NULL;
+	bool hasClusterAdmin = hash_search(parentRoles,
+									   &clusterAdminRoleView, HASH_FIND, NULL) != NULL;
+
+	if (hasClusterAdmin && !hasReadWrite)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg(
+							"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together."),
+						errdetail_log(
+							"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together.")));
+	}
+
+	if (hasReadWrite && !hasClusterAdmin)
+	{
+		if (!IsReadWriteAnyDatabaseRoleAvailable())
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together."),
+							errdetail_log(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together.")));
+		}
+
+		if (is_member_of_role(targetRoleOid, get_role_oid(ApiAdminRoleV2, false)))
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together."),
+							errdetail_log(
+								"Roles specified are invalid. 'readWriteAnyDatabase' and 'clusterAdmin' must be specified together.")));
+		}
+	}
+
+	/*
+	 * The pair is granted as a single ApiAdminRoleV2 membership, so revoking
+	 * it once removes both capabilities.
+	 */
+	bool revokedApiAdminRole = false;
+	bool revokedReadWriteRole = false;
+	if (hasClusterAdmin && hasReadWrite)
+	{
+		revokedApiAdminRole = true;
+		RevokeRoleInheritance(ApiAdminRoleV2, targetRoleName);
+	}
+
+	if (hasReadWrite)
+	{
+		Oid readWriteAnyDatabaseRoleOid =
+			CollectionRbacReadWriteAnyDatabaseRoleOid();
+		if (OidIsValid(readWriteAnyDatabaseRoleOid) &&
+			is_member_of_role(targetRoleOid, readWriteAnyDatabaseRoleOid))
+		{
+			RevokeRoleInheritance(API_RBAC_READWRITE_ANYDB_ROLE, targetRoleName);
+			revokedReadWriteRole = true;
+		}
+	}
+
+	HASH_SEQ_STATUS status;
+	StringView *entry;
+	hash_seq_init(&status, parentRoles);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		const char *nativeRoleName = CreateStringFromStringView(entry);
+		const char *internalRoleName = GetInternalRoleName(nativeRoleName);
+
+		/* Even though we don't grant both roles for admin + readwrite pairing,
+		 * we still will see the readwrite any database role in the parent roles response.
+		 */
+		if (revokedApiAdminRole &&
+			strcmp(internalRoleName, ApiClusterAdminRole) == 0)
+		{
+			continue;
+		}
+
+		if ((revokedReadWriteRole || revokedApiAdminRole) &&
+			strcmp(internalRoleName, API_RBAC_READWRITE_ANYDB_ROLE) == 0)
+		{
+			continue;
+		}
+
+		RevokeRoleInheritance(internalRoleName, targetRoleName);
+	}
+}
+
+
+/*
+ * Maps user facing native role name to internal role name stored in pg_roles
+ * table.
  */
 static const char *
 GetInternalRoleName(const char *nativeRoleName)
@@ -1793,13 +2492,14 @@ GetInternalRoleName(const char *nativeRoleName)
 	}
 	else if (strcmp(nativeRoleName, "readWriteAnyDatabase") == 0)
 	{
-		return ApiReadWriteRole;
+		return API_RBAC_READWRITE_ANYDB_ROLE;
 	}
 	else if (strcmp(nativeRoleName, "root") == 0)
 	{
 		return ApiRootInternalRole;
 	}
 
+	/* Customer facing native role name is the same as the role name stored in pg_roles table */
 	return nativeRoleName;
 }
 
@@ -1819,7 +2519,8 @@ GetNativeRoleName(const char *internalRoleName)
 	{
 		return "readAnyDatabase";
 	}
-	else if (strcmp(internalRoleName, ApiReadWriteRole) == 0)
+	else if (strcmp(internalRoleName, ApiReadWriteRole) == 0 ||
+			 strcmp(internalRoleName, API_RBAC_READWRITE_ANYDB_ROLE) == 0)
 	{
 		return "readWriteAnyDatabase";
 	}
@@ -1828,6 +2529,7 @@ GetNativeRoleName(const char *internalRoleName)
 		return "root";
 	}
 
+	/* Customer facing native role name is the same as the role name stored in pg_roles table */
 	return internalRoleName;
 }
 
@@ -1837,10 +2539,27 @@ GetNativeRoleName(const char *internalRoleName)
  * Only allows inheriting from roles in IS_INHERITABLE_ROLE whitelist.
  */
 static void
-GrantRoleInheritance(const char *parentRole, const char *targetRole)
+GrantRoleInheritance(const char *parentRole, const char *targetRole,
+					 bool allowCustomRoles)
 {
-	if (!IS_INHERITABLE_ROLE(parentRole))
+	/*
+	 * A custom role is only reachable once the roles catalog exists, so the
+	 * membership lookup is gated on the version that introduces it.
+	 */
+	bool isGrantableCustomRole = allowCustomRoles &&
+								 IsClusterVersionAtleast(DocDB_V0, 116, 0) &&
+								 IsCustomRole(parentRole);
+
+	if (!IS_INHERITABLE_ROLE(parentRole) && !isGrantableCustomRole)
 	{
+		if (allowCustomRoles)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Granting the role '%s' is not supported.",
+								GetNativeRoleName(parentRole))));
+		}
+
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 						errmsg(
 							"Creating custom roles that inherit from '%s' is not supported.",
@@ -1856,6 +2575,38 @@ GrantRoleInheritance(const char *parentRole, const char *targetRole)
 					 quote_identifier(targetRole));
 
 	ExtensionExecuteQueryViaSPI(grantRoleInfo->data, readOnly, SPI_OK_UTILITY,
+								&isNull);
+}
+
+
+/*
+ * RevokeRoleInheritance removes a parent role from the target role. Only the
+ * roles that may be granted are accepted, so a membership the API never grants
+ * cannot be named here.
+ */
+static void
+RevokeRoleInheritance(const char *parentRole, const char *targetRole)
+{
+	bool isRevokableCustomRole = IsClusterVersionAtleast(DocDB_V0, 116, 0) &&
+								 IsCustomRole(parentRole);
+
+	if (!IS_INHERITABLE_ROLE(parentRole) && !isRevokableCustomRole)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+						errmsg(
+							"Revoking the role '%s' is not supported.",
+							GetNativeRoleName(parentRole))));
+	}
+
+	bool readOnly = false;
+	bool isNull = false;
+
+	StringInfo revokeRoleInfo = makeStringInfo();
+	appendStringInfo(revokeRoleInfo, "REVOKE %s FROM %s",
+					 quote_identifier(parentRole),
+					 quote_identifier(targetRole));
+
+	ExtensionExecuteQueryViaSPI(revokeRoleInfo->data, readOnly, SPI_OK_UTILITY,
 								&isNull);
 }
 
@@ -1886,4 +2637,194 @@ GetPrivilegeAction(const char *action)
 
 	ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 					errmsg("Unsupported action '%s'.", action)));
+}
+
+
+/*
+ * StoreCustomRoleToRoleCatalog stores the original createRole BSON document in the
+ * documentdb_api_catalog.roles table, which records the role as a custom role.
+ */
+static void
+StoreCustomRoleToRoleCatalog(const char *roleName, pgbson *createRoleBson)
+{
+	const char *query = FormatSqlQuery(
+		"INSERT INTO %s.roles (role_name, role_bson) "
+		"VALUES ($1, $2)",
+		ApiCatalogSchemaName);
+
+	int nargs = 2;
+	Oid argTypes[2] = { TEXTOID, BsonTypeId() };
+	Datum argValues[2] = {
+		CStringGetTextDatum(roleName),
+		PointerGetDatum(createRoleBson)
+	};
+
+	bool readOnly = false;
+	bool isNull = false;
+	ExtensionExecuteQueryWithArgsViaSPI(query, nargs, argTypes, argValues, NULL,
+										readOnly, SPI_OK_INSERT, &isNull);
+}
+
+
+static void
+UpdateCustomRoleInRoleCatalog(const char *roleName, HTAB *roles, bool isGrantRoles)
+{
+	Oid argTypes[2] = { TEXTOID, BsonTypeId() };
+	Datum argValues[2] = { CStringGetTextDatum(roleName), (Datum) 0 };
+	const char *query = FormatSqlQuery(
+		"SELECT role_bson FROM %s.roles WHERE role_name = $1",
+		ApiCatalogSchemaName);
+	bool isNull = false;
+	Datum result = ExtensionExecuteQueryWithArgsViaSPI(
+		query, 1, argTypes, argValues, NULL, false, SPI_OK_SELECT, &isNull);
+	if (isNull)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
+						errmsg("Role '%s' not found in role catalog.", roleName)));
+	}
+
+	pgbson *roleBson = DatumGetPgBson(result);
+	CreateRoleSpec createRoleSpec = {
+		.roleName = NULL,
+		.parentRoles = CreateStringViewHashSet(),
+		.collectionPrivileges = NIL
+	};
+
+	/*
+	 * The stored document is historical data that was already validated when the
+	 * role was created. Re-running the command-time '$db' checks here would make
+	 * grant and revoke fail for roles created while those checks were disabled.
+	 */
+	bool validateCommandContext = false;
+	ParseCreateRoleSpec(roleBson, &createRoleSpec, validateCommandContext);
+
+	HASH_SEQ_STATUS status;
+	StringView *entry;
+
+	hash_seq_init(&status, roles);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		if (isGrantRoles)
+		{
+			hash_search(createRoleSpec.parentRoles, entry, HASH_ENTER, NULL);
+		}
+		else
+		{
+			hash_search(createRoleSpec.parentRoles, entry, HASH_REMOVE, NULL);
+		}
+	}
+
+	pgbson *normalizedBson = NormalizeRoleSpecForStorage(roleBson,
+														 createRoleSpec.parentRoles);
+	hash_destroy(createRoleSpec.parentRoles);
+	pfree(roleBson);
+
+	argValues[1] = PointerGetDatum(normalizedBson);
+	const char *updateQuery = FormatSqlQuery(
+		"UPDATE %s.roles SET role_bson = $2 WHERE role_name = $1",
+		ApiCatalogSchemaName);
+	ExtensionExecuteQueryWithArgsViaSPI(
+		updateQuery, 2, argTypes, argValues, NULL, false, SPI_OK_UPDATE, &isNull);
+}
+
+
+/*
+ * DeleteCustomRoleFromRoleCatalog removes the role's entry from the
+ * documentdb_api_catalog.roles table.
+ */
+static void
+DeleteCustomRoleFromRoleCatalog(const char *roleName)
+{
+	const char *query = FormatSqlQuery(
+		"DELETE FROM %s.roles WHERE role_name = $1",
+		ApiCatalogSchemaName);
+
+	int nargs = 1;
+	Oid argTypes[1] = { TEXTOID };
+	Datum argValues[1] = { CStringGetTextDatum(roleName) };
+
+	bool readOnly = false;
+	bool isNull = false;
+	ExtensionExecuteQueryWithArgsViaSPI(query, nargs, argTypes, argValues, NULL,
+										readOnly, SPI_OK_DELETE, &isNull);
+}
+
+
+static int
+StringViewListCellCompare(const ListCell *a, const ListCell *b)
+{
+	StringView *svA = (StringView *) lfirst(a);
+	StringView *svB = (StringView *) lfirst(b);
+
+	return CompareStringView(svA, svB);
+}
+
+
+static int
+RoleParentEntryListCellCompare(const ListCell *a, const ListCell *b)
+{
+	RoleParentEntry *entryA = lfirst(a);
+	RoleParentEntry *entryB = lfirst(b);
+	bool entryAIsBuiltIn = IS_NATIVE_BUILTIN_ROLE(entryA->nativeRoleName.string);
+	bool entryBIsBuiltIn = IS_NATIVE_BUILTIN_ROLE(entryB->nativeRoleName.string);
+
+	if (entryAIsBuiltIn != entryBIsBuiltIn)
+	{
+		return entryAIsBuiltIn ? -1 : 1;
+	}
+
+	return CompareStringView(&entryA->nativeRoleName, &entryB->nativeRoleName);
+}
+
+
+static pgbson *
+NormalizeRoleSpecForStorage(pgbson *createRoleBson, HTAB *rolesHash)
+{
+	pgbson_writer writer;
+	PgbsonWriterInit(&writer);
+
+	bson_iter_t iter;
+	PgbsonInitIterator(createRoleBson, &iter);
+
+	while (bson_iter_next(&iter))
+	{
+		const char *key = bson_iter_key(&iter);
+		if (strcmp(key, "roles") == 0)
+		{
+			pgbson_array_writer rolesArrayWriter;
+			PgbsonWriterStartArray(&writer, key, strlen(key), &rolesArrayWriter);
+			HASH_SEQ_STATUS status;
+			StringView *entry;
+
+			hash_seq_init(&status, rolesHash);
+			List *sortedRoles = NIL;
+			while ((entry = hash_seq_search(&status)) != NULL)
+			{
+				sortedRoles = lappend(sortedRoles, entry);
+			}
+
+			list_sort(sortedRoles, StringViewListCellCompare);
+			ListCell *lc;
+			foreach(lc, sortedRoles)
+			{
+				StringView *sortedEntry = (StringView *) lfirst(lc);
+				pgbson_writer roleDocWriter;
+				PgbsonArrayWriterStartDocument(&rolesArrayWriter, &roleDocWriter);
+				PgbsonWriterAppendUtf8(&roleDocWriter, "role", 4,
+									   sortedEntry->string);
+				PgbsonWriterAppendUtf8(&roleDocWriter, "db", 2, "admin");
+				PgbsonArrayWriterEndDocument(&rolesArrayWriter, &roleDocWriter);
+			}
+
+			list_free(sortedRoles);
+
+			PgbsonWriterEndArray(&writer, &rolesArrayWriter);
+		}
+		else
+		{
+			PgbsonWriterAppendValue(&writer, key, strlen(key), bson_iter_value(&iter));
+		}
+	}
+
+	return PgbsonWriterGetPgbson(&writer);
 }

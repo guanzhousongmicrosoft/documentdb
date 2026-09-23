@@ -45,8 +45,8 @@
  #include "utils/string_view.h"
  #include "utils/utf8_utils.h"
 
-extern bool EnableCompositeReducedCorrelatedPrefixTrim;
 extern bool EnablePerPathMultiKeySortPushdown;
+extern bool EnableSkipSettingOrderScanDirectionForFullScanExpr;
 
 /* --------------------------------------------------------- */
 /* Data-types */
@@ -69,6 +69,7 @@ static void ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 										  const char *wildcardPath,
 										  int8_t sortOrder,
 										  ScanDirection *scanDirection,
+										  bool *requiresOrderedScan,
 										  VariableIndexBounds *indexBounds,
 										  const char *indexCollation,
 										  IndexMultiKeyStatus pathMultiKeyState);
@@ -136,6 +137,7 @@ static void AddMultiBoundaryForDollarRange(int32_t indexAttribute, const
 										   char *wildcardPath,
 										   pgbsonelement *queryElement,
 										   int8_t sortOrder, ScanDirection *scanDirection,
+										   bool *requiresOrderedScan,
 										   VariableIndexBounds *indexBounds,
 										   const char *indexCollation,
 										   IndexMultiKeyStatus pathMultiKeyState);
@@ -829,27 +831,6 @@ TrimSecondaryVariableBounds(VariableIndexBounds *variableBounds,
 	int32_t numPaths = runData->metaInfo->numIndexPaths;
 
 	/*
-	 * If prefix-group-aware trimming is disabled, fall back to the legacy
-	 * behavior: trim all variable bounds whose indexAttribute > 0.
-	 */
-	if (!EnableCompositeReducedCorrelatedPrefixTrim)
-	{
-		ListCell *cell;
-		foreach(cell, variableBounds->variableBoundsList)
-		{
-			CompositeIndexBoundsSet *set = (CompositeIndexBoundsSet *) lfirst(cell);
-			if (set->indexAttribute > 0)
-			{
-				runData->metaInfo->requiresRuntimeRecheck = true;
-				variableBounds->variableBoundsList = foreach_delete_current(
-					variableBounds->variableBoundsList, cell);
-				continue;
-			}
-		}
-		return;
-	}
-
-	/*
 	 * Build an htab mapping each dotted prefix to the lowest index attribute
 	 * among the bounds that are actually present in the query filter.
 	 * Only paths in the variable bounds list participate, so if b.d is
@@ -1208,6 +1189,7 @@ ParseOperatorStrategy(const char **indexPaths, uint32_t *indexPathLengths,
 					  pgbsonelement *queryElement,
 					  BsonIndexStrategy queryStrategy,
 					  ScanDirection *scanDirection,
+					  bool *requiresOrderedScan,
 					  VariableIndexBounds *indexBounds,
 					  const char *indexCollation,
 					  bool hasArrayPaths, uint32_t multiKeyBitMask,
@@ -1266,7 +1248,8 @@ ParseOperatorStrategy(const char **indexPaths, uint32_t *indexPathLengths,
 	}
 
 	ParseOperatorStrategyWithPath(i, queryElement, queryStrategy, wildcardPath,
-								  sortOrders[i], scanDirection, indexBounds,
+								  sortOrders[i], scanDirection,
+								  requiresOrderedScan, indexBounds,
 								  indexCollation, pathMultiKeyState);
 }
 
@@ -1305,6 +1288,7 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 							  const char *wildcardPath,
 							  int8_t sortOrder,
 							  ScanDirection *scanDirection,
+							  bool *requiresOrderedScan,
 							  VariableIndexBounds *indexBounds,
 							  const char *indexCollation,
 							  IndexMultiKeyStatus pathMultiKeyState)
@@ -1491,7 +1475,8 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 		case BSON_INDEX_STRATEGY_DOLLAR_RANGE:
 		{
 			AddMultiBoundaryForDollarRange(i, wildcardPath, queryElement,
-										   sortOrder, scanDirection, indexBounds,
+										   sortOrder, scanDirection,
+										   requiresOrderedScan, indexBounds,
 										   indexCollation, pathMultiKeyState);
 			break;
 		}
@@ -1574,6 +1559,7 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 		case BSON_INDEX_STRATEGY_DOLLAR_ORDERBY_INDEXTERM:
 		{
 			/* It's a full scan */
+			*requiresOrderedScan = true;
 			ParseSortOrderAndSetScanDirection(&queryElement->bsonValue, sortOrder,
 											  scanDirection);
 			break;
@@ -3060,6 +3046,7 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 							   const char *wildcardPath,
 							   pgbsonelement *queryElement,
 							   int8_t sortOrder, ScanDirection *scanDirection,
+							   bool *requiresOrderedScan,
 							   VariableIndexBounds *indexBounds,
 							   const char *indexCollation,
 							   IndexMultiKeyStatus pathMultiKeyState)
@@ -3071,6 +3058,11 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 	if (params->dedupState.value_type == BSON_TYPE_BINARY)
 	{
 		indexBounds->dedupState = params->dedupState;
+	}
+
+	if (params->numGroupKeyPaths > 0)
+	{
+		indexBounds->numGroupKeyPaths = params->numGroupKeyPaths;
 	}
 
 	if (params->isMergeSortInPrefixMarker)
@@ -3092,7 +3084,11 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 			sortValue.value_type = BSON_TYPE_INT32;
 			sortValue.value.v_int32 = params->orderScanDirection;
 
-			ParseSortOrderAndSetScanDirection(&sortValue, sortOrder, scanDirection);
+			*requiresOrderedScan = true;
+			if (!EnableSkipSettingOrderScanDirectionForFullScanExpr)
+			{
+				ParseSortOrderAndSetScanDirection(&sortValue, sortOrder, scanDirection);
+			}
 		}
 
 		return;
@@ -3193,12 +3189,14 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 
 				/* $elemMatch implies array semantics, so force the multi-key path. */
 				IndexMultiKeyStatus multiKeyHasArrays = IndexMultiKeyStatus_HasArrays;
+				bool requireOrderedScanIgnore = false;
 				if (isTopLevelPath)
 				{
 					/* Top level path conditions are mergable */
 					ParseOperatorStrategyWithPath(indexAttribute, &innerElemMatchElement,
 												  queryStrategy, wildcardPath,
 												  sortOrder, &scanDirIgnore,
+												  &requireOrderedScanIgnore,
 												  &localBounds, indexCollation,
 												  multiKeyHasArrays);
 				}
@@ -3207,7 +3205,9 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 					/* deduced child path conditions are not mergeable */
 					ParseOperatorStrategyWithPath(indexAttribute, &innerElemMatchElement,
 												  queryStrategy, wildcardPath,
-												  sortOrder, &scanDirIgnore, indexBounds,
+												  sortOrder, &scanDirIgnore,
+												  &requireOrderedScanIgnore,
+												  indexBounds,
 												  indexCollation,
 												  multiKeyHasArrays);
 				}

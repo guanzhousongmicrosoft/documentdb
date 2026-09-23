@@ -68,12 +68,22 @@ bool EnableBackgroundWorker = DEFAULT_ENABLE_BG_WORKER;
 #define DEFAULT_ENABLE_BG_WORKER_JOBS true
 bool EnableBackgroundWorkerJobs = DEFAULT_ENABLE_BG_WORKER_JOBS;
 
+#define DEFAULT_ENABLE_BG_WORKER_JOBS_IN_RECOVERY false
+bool EnableBackgroundWorkerJobsInRecovery =
+	DEFAULT_ENABLE_BG_WORKER_JOBS_IN_RECOVERY;
+
+#define DEFAULT_START_BG_WORKER_IN_RECOVERY false
+bool StartBackgroundWorkerInRecovery = DEFAULT_START_BG_WORKER_IN_RECOVERY;
+
 /* Added in v0.111, pending stabilization */
 #define DEFAULT_ENABLE_BG_WORKER_INIT_JOBS false
 bool EnableBackgroundWorkerInitJobs = DEFAULT_ENABLE_BG_WORKER_INIT_JOBS;
 
 #define DEFAULT_BG_WORKER_JOB_TIMEOUT_THRESHOLD_SEC 300
 int BackgroundWorkerJobTimeoutThresholdSec = DEFAULT_BG_WORKER_JOB_TIMEOUT_THRESHOLD_SEC;
+
+#define DEFAULT_ENABLE_LEGACY_JOBS_TIMEOUT true
+bool EnableLegacyJobsTimeout = DEFAULT_ENABLE_LEGACY_JOBS_TIMEOUT;
 
 #define DEFAULT_BG_DATABASE_NAME "postgres"
 char *BackgroundWorkerDatabaseName = DEFAULT_BG_DATABASE_NAME;
@@ -296,6 +306,22 @@ InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPref
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
+		psprintf("%s.enable_background_worker_jobs_in_recovery", newGucPrefix),
+		gettext_noop(
+			"Enable recovery-eligible background worker jobs while the server is in recovery."),
+		NULL, &EnableBackgroundWorkerJobsInRecovery,
+		DEFAULT_ENABLE_BG_WORKER_JOBS_IN_RECOVERY,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.start_background_worker_in_recovery", newGucPrefix),
+		gettext_noop(
+			"Start the background worker when the server reaches consistent recovery state."),
+		NULL, &StartBackgroundWorkerInRecovery,
+		DEFAULT_START_BG_WORKER_IN_RECOVERY,
+		PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
 		psprintf("%s.enableBackgroundWorkerInitJobs", newGucPrefix),
 		gettext_noop("Enable the execution of init background jobs."),
 		NULL, &EnableBackgroundWorkerInitJobs, DEFAULT_ENABLE_BG_WORKER_INIT_JOBS,
@@ -310,6 +336,12 @@ InitializeBackgroundJobConfigurations(const char *prefix, const char *newGucPref
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_legacy_jobs_timeout", newGucPrefix),
+		gettext_noop("Enable timeout cancellation for background worker jobs."),
+		NULL, &EnableLegacyJobsTimeout, DEFAULT_ENABLE_LEGACY_JOBS_TIMEOUT,
+		PGC_USERSET, 0, NULL, NULL, NULL);
 }
 
 

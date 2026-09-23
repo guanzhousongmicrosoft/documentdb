@@ -859,10 +859,9 @@ EXPLAIN (COSTS OFF, VERBOSE ON) DELETE FROM  documentdb_data.documents_2505 WHER
 (4 rows)
 
 COMMIT;
--- Test for deleteOne plan caching by enabling and disabling the config
+-- Test deleteOne plan caching correctness
 -- validate _id-only delete_one correctness, should still delete only one document
 begin;
-set local documentdb.enableDeleteOnePlanCacheOptimization to true;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6},"limit":1}]}');
                                          delete                                         
 ----------------------------------------------------------------------------------------
@@ -875,7 +874,6 @@ select count(*) from documentdb_api.collection('db', 'removeme') where document 
      0
 (1 row)
 
-set local documentdb.enableDeleteOnePlanCacheOptimization to false;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":7},"limit":1}]}');
                                          delete                                         
 ----------------------------------------------------------------------------------------
@@ -897,7 +895,6 @@ select count(*) from documentdb_api.collection('db', 'removeme');
 rollback;
 -- _id with other filters: should use full query matching
 begin;
-set local documentdb.enableDeleteOnePlanCacheOptimization to true;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6, "a":6},"limit":1}]}');
                                          delete                                         
 ----------------------------------------------------------------------------------------
@@ -910,7 +907,6 @@ select count(*) from documentdb_api.collection('db', 'removeme') where document 
      0
 (1 row)
 
-set local documentdb.enableDeleteOnePlanCacheOptimization to false;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":7, "a":7},"limit":1}]}');
                                          delete                                         
 ----------------------------------------------------------------------------------------
@@ -931,7 +927,6 @@ select count(*) from documentdb_api.collection('db', 'removeme');
 
 rollback;
 begin;
-set local documentdb.enableDeleteOnePlanCacheOptimization to true;
 -- delete_one empty query
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{},"limit":1}]}');
                                                                                                                                            delete                                                                                                                                           
@@ -947,7 +942,6 @@ select count(*) from documentdb_api.collection('db', 'removeme');
 
 rollback;
 begin;
-set local documentdb.enableDeleteOnePlanCacheOptimization to false;
 -- delete_one empty query
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{},"limit":1}]}');
                                                                                                                                            delete                                                                                                                                           
@@ -1295,6 +1289,48 @@ select count(*) from documentdb_api.collection('db', 'del_limit');
 
 rollback;
 select documentdb_api.drop_collection('db', 'del_limit');
+ drop_collection 
+-----------------
+ t
+(1 row)
+
+-- Deletes cannot violate a unique index and must not populate the name cache.
+select 1 from documentdb_api.insert_one('db', 'delete_index_name_cache', '{"_id":1,"a":1}');
+NOTICE:  creating collection
+ ?column? 
+----------
+        1
+(1 row)
+
+select 1 from documentdb_api.insert_one('db', 'delete_index_name_cache', '{"_id":2,"a":2}');
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT documentdb_api_internal.create_indexes_non_concurrently(
+    'db',
+    '{"createIndexes":"delete_index_name_cache","indexes":[
+        {"key":{"a":1},"name":"a_1","unique":true}
+    ]}',
+    true);
+                                                                                                   create_indexes_non_concurrently                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "1" }, "numIndexesAfter" : { "$numberInt" : "2" }, "createdCollectionAutomatically" : false, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
+(1 row)
+
+SET client_min_messages TO DEBUG1;
+select documentdb_api.delete('db', '{"delete":"delete_index_name_cache","ordered":false,"deletes":[
+    {"q":{"_id":1},"limit":1},
+    {"q":{"_id":2},"limit":1}
+]}');
+                                         delete                                         
+----------------------------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""2"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+RESET client_min_messages;
+select documentdb_api.drop_collection('db', 'delete_index_name_cache');
  drop_collection 
 -----------------
  t

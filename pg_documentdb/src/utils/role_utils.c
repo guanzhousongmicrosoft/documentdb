@@ -10,8 +10,6 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
-#include "access/transam.h"
-#include "catalog/pg_authid.h"
 #include "common/saslprep.h"
 #include "common/scram-common.h"
 #include "commands/commands_common.h"
@@ -19,6 +17,8 @@
 #include "libpq/scram.h"
 #include "metadata/metadata_cache.h"
 #include "utils/acl.h"
+#include "utils/syscache.h"
+#include "utils/catcache.h"
 #include "utils/documentdb_errors.h"
 #include "utils/documentdb_errors.h"
 #include "utils/feature_counter.h"
@@ -27,7 +27,7 @@
 #include "utils/query_utils.h"
 #include "utils/role_utils.h"
 #include "utils/string_view.h"
-#include "utils/syscache.h"
+#include "utils/version_utils.h"
 #include "api_hooks.h"
 #include "api_hooks_def.h"
 
@@ -35,6 +35,15 @@
 
 /* GUC that controls the blocked role prefix list, separated by , */
 extern char *BlockedRolePrefixList;
+
+/* GUC that controls enforcement of the always blocked role name prefixes */
+extern bool EnableFailureOnAlwaysBlockedRolePrefixes;
+
+/* GUC that controls the maximum number of roles allowed per role */
+extern int MaxRolesPerRole;
+
+/* GUC that controls standalone readWriteAnyDatabase assignment. */
+extern bool EnableReadWriteAnyDatabaseRoleEnforcement;
 
 static void WriteSinglePrivilegeDocument(const ConsolidatedPrivilege *privilege,
 										 pgbson_array_writer *privilegesArrayWriter);
@@ -45,11 +54,14 @@ static void ConsolidatePrivilege(List **consolidatedPrivileges,
 								 const Privilege *sourcePrivilege);
 static bool ComparePrivileges(const ConsolidatedPrivilege *privilege1,
 							  const Privilege *privilege2);
-static void ConsolidatePrivilegesForRole(const char *roleName,
+static void ConsolidatePrivilegesForRole(const StringView *roleName,
 										 List **consolidatedPrivileges);
 static void WritePrivilegeListToArray(List *consolidatedPrivileges,
 									  pgbson_array_writer *privilegesArrayWriter);
 static void DeepFreePrivileges(List *consolidatedPrivileges);
+static void GrantTablePrivileges(uint64 collectionId, bool includeRetryTable,
+								 const char *privilegesSqlQueryString,
+								 const char *roleName);
 
 /*
  * Static definitions for user privileges and roles
@@ -274,10 +286,10 @@ static const Privilege dropDatabasePrivileges[] = {
  * writes them to the provided BSON array writer.
  */
 void
-WritePrivileges(const char *internalRoleName,
+WritePrivileges(const StringView *internalRoleName,
 				pgbson_array_writer *privilegesArrayWriter)
 {
-	if (internalRoleName == NULL)
+	if (internalRoleName == NULL || internalRoleName->string == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
 						errmsg("Role name cannot be NULL.")));
@@ -313,14 +325,7 @@ WriteMultipleRolePrivileges(HTAB *rolesTable,
 	hash_seq_init(&status, rolesTable);
 	while ((roleEntry = hash_seq_search(&status)) != NULL)
 	{
-		/* Convert StringView to null-terminated string */
-		char *roleName = palloc(roleEntry->length + 1);
-		memcpy(roleName, roleEntry->string, roleEntry->length);
-		roleName[roleEntry->length] = '\0';
-
-		ConsolidatePrivilegesForRole(roleName, &consolidatedPrivileges);
-
-		pfree(roleName);
+		ConsolidatePrivilegesForRole(roleEntry, &consolidatedPrivileges);
 	}
 
 	WritePrivilegeListToArray(consolidatedPrivileges, privilegesArrayWriter);
@@ -329,12 +334,36 @@ WriteMultipleRolePrivileges(HTAB *rolesTable,
 
 
 /*
- * Check if the given name begins with any of the reserved pg role name
- * prefixes listed in the blocked role prefix list.
+ * Prefixes that name roles the extension provisions and manages for itself.
+ * These are always blocked, independent of the configured blocked prefix list,
+ * so that no configuration can expose them to the role and user commands.
+ */
+static const char *const AlwaysBlockedRoleNamePrefixes[] = {
+	"documentdb_api",
+	"documentdb_rbac"
+};
+
+
+/*
+ * Check if the given name begins with a prefix that is always blocked, or with
+ * any of the reserved pg role name prefixes listed in the blocked role prefix
+ * list.
  */
 bool
 ContainsReservedPgRoleNamePrefix(const char *name)
 {
+	if (EnableFailureOnAlwaysBlockedRolePrefixes)
+	{
+		for (size_t i = 0; i < lengthof(AlwaysBlockedRoleNamePrefixes); i++)
+		{
+			const char *blockedPrefix = AlwaysBlockedRoleNamePrefixes[i];
+			if (strncmp(name, blockedPrefix, strlen(blockedPrefix)) == 0)
+			{
+				return true;
+			}
+		}
+	}
+
 	/* Split the blocked role prefix list */
 	char *blockedRolePrefixList = pstrdup(BlockedRolePrefixList);
 	bool containsBlockedPrefix = false;
@@ -355,122 +384,168 @@ ContainsReservedPgRoleNamePrefix(const char *name)
 
 
 /*
+ * Grants baseline privileges on a collection's tables.
+ *
+ * Collection creation and sharding reach this unconditionally. It is a no-op
+ * when the baseline roles have not been created.
+ */
+void
+GrantCollectionPrivilegesToBaselineRoles(uint64 collectionId, bool includeRetryTable)
+{
+	if (CollectionRbacBaselineReadRoleOid() != InvalidOid)
+	{
+		GrantTablePrivileges(collectionId, includeRetryTable, "SELECT",
+							 API_RBAC_BASELINE_READ_ROLE);
+	}
+
+	if (CollectionRbacBaselineWriteRoleOid() != InvalidOid)
+	{
+		/*
+		 * The write role also carries SELECT because enforcement resolves a
+		 * range table entry to a single identity, and a filtered write needs
+		 * read access under that same identity.
+		 */
+		GrantTablePrivileges(collectionId, includeRetryTable,
+							 "SELECT, INSERT, UPDATE, DELETE",
+							 API_RBAC_BASELINE_WRITE_ROLE);
+	}
+}
+
+
+/*
+ * Grants table privileges on a collection's tables to a baseline group role.
+ *
+ * The table names are derived from the collection id here rather than taken
+ * from the caller, so the only text this builds a statement from is the fixed
+ * schema name, a numeric id, and the constants passed by the caller above.
+ */
+static void
+GrantTablePrivileges(uint64 collectionId, bool includeRetryTable,
+					 const char *privilegesSqlQueryString,
+					 const char *roleName)
+{
+	StringInfo query = makeStringInfo();
+	appendStringInfo(query, "GRANT %s ON TABLE %s.%s" UINT64_FORMAT,
+					 privilegesSqlQueryString, ApiDataSchemaName,
+					 DOCUMENT_DATA_TABLE_NAME_PREFIX, collectionId);
+	if (includeRetryTable)
+	{
+		appendStringInfo(query, ", %s.retry_" UINT64_FORMAT, ApiDataSchemaName,
+						 collectionId);
+	}
+	appendStringInfo(query, " TO %s", quote_identifier(roleName));
+
+	bool readOnly = false;
+	bool isNull = false;
+	ExtensionExecuteQueryViaSPI(query->data, readOnly, SPI_OK_UTILITY, &isNull);
+}
+
+
+/*
  * Consolidates privileges for a given role name into the provided list.
  * Ignores unknown roles silently.
  */
 static void
-ConsolidatePrivilegesForRole(const char *roleName, List **consolidatedPrivileges)
+ConsolidatePrivilegesForRole(const StringView *roleName, List **consolidatedPrivileges)
 {
-	if (roleName == NULL || consolidatedPrivileges == NULL)
+	if (roleName == NULL || roleName->string == NULL || consolidatedPrivileges == NULL)
 	{
 		return;
 	}
 
 	size_t sourcePrivilegeCount;
 
-	if (strcmp(roleName, ApiReadOnlyRole) == 0)
+	if (StringViewEqualsCString(roleName, ApiReadOnlyRole))
 	{
-		sourcePrivilegeCount = sizeof(readOnlyPrivileges) / sizeof(readOnlyPrivileges[0]);
+		sourcePrivilegeCount = lengthof(readOnlyPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, readOnlyPrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiReadWriteRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiReadWriteRole))
 	{
-		sourcePrivilegeCount = sizeof(readWritePrivileges) /
-							   sizeof(readWritePrivileges[0]);
+		sourcePrivilegeCount = lengthof(readWritePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, readWritePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiAdminRoleV2) == 0)
+	else if (StringViewEqualsCString(roleName, API_RBAC_READWRITE_ANYDB_ROLE))
 	{
-		sourcePrivilegeCount = sizeof(readWritePrivileges) /
-							   sizeof(readWritePrivileges[0]);
+		sourcePrivilegeCount = lengthof(readWritePrivileges);
+		ConsolidatePrivileges(consolidatedPrivileges, readWritePrivileges,
+							  sourcePrivilegeCount);
+	}
+	else if (StringViewEqualsCString(roleName, ApiAdminRoleV2))
+	{
+		sourcePrivilegeCount = lengthof(readWritePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, readWritePrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(clusterManagerPrivileges) /
-							   sizeof(clusterManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(clusterMonitorPrivileges) /
-							   sizeof(clusterMonitorPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterMonitorPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterMonitorPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(hostManagerPrivileges) /
-							   sizeof(hostManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(hostManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, hostManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(dropDatabasePrivileges) /
-							   sizeof(dropDatabasePrivileges[0]);
+		sourcePrivilegeCount = lengthof(dropDatabasePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, dropDatabasePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiClusterAdminRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiClusterAdminRole))
 	{
-		sourcePrivilegeCount = sizeof(clusterManagerPrivileges) /
-							   sizeof(clusterManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(clusterMonitorPrivileges) /
-							   sizeof(clusterMonitorPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterMonitorPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterMonitorPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(hostManagerPrivileges) /
-							   sizeof(hostManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(hostManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, hostManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(dropDatabasePrivileges) /
-							   sizeof(dropDatabasePrivileges[0]);
+		sourcePrivilegeCount = lengthof(dropDatabasePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, dropDatabasePrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiUserAdminRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiUserAdminRole))
 	{
-		sourcePrivilegeCount = sizeof(userAdminPrivileges) /
-							   sizeof(userAdminPrivileges[0]);
+		sourcePrivilegeCount = lengthof(userAdminPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, userAdminPrivileges,
 							  sourcePrivilegeCount);
 	}
-	else if (strcmp(roleName, ApiRootRole) == 0)
+	else if (StringViewEqualsCString(roleName, ApiRootRole))
 	{
-		sourcePrivilegeCount = sizeof(readWritePrivileges) /
-							   sizeof(readWritePrivileges[0]);
+		sourcePrivilegeCount = lengthof(readWritePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, readWritePrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(dbAdminPrivileges) /
-							   sizeof(dbAdminPrivileges[0]);
+		sourcePrivilegeCount = lengthof(dbAdminPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, dbAdminPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(userAdminPrivileges) /
-							   sizeof(userAdminPrivileges[0]);
+		sourcePrivilegeCount = lengthof(userAdminPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, userAdminPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(clusterMonitorPrivileges) /
-							   sizeof(clusterMonitorPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterMonitorPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterMonitorPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(clusterManagerPrivileges) /
-							   sizeof(clusterManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(clusterManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, clusterManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(hostManagerPrivileges) /
-							   sizeof(hostManagerPrivileges[0]);
+		sourcePrivilegeCount = lengthof(hostManagerPrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, hostManagerPrivileges,
 							  sourcePrivilegeCount);
 
-		sourcePrivilegeCount = sizeof(dropDatabasePrivileges) /
-							   sizeof(dropDatabasePrivileges[0]);
+		sourcePrivilegeCount = lengthof(dropDatabasePrivileges);
 		ConsolidatePrivileges(consolidatedPrivileges, dropDatabasePrivileges,
 							  sourcePrivilegeCount);
 	}
@@ -748,53 +823,95 @@ IsReservedInternalRoleName(const char *name)
 
 
 /*
- * IsCustomRole determines whether the given name identifies a custom role.
+ * IsReservedRoleName reports whether a name is one that the role and user
+ * commands must never accept: a blocked prefix, a name the extension
+ * provisions for its own use, or a documented built-in role name.
+ *
+ * PostgreSQL keeps roles and users in a single namespace, so the same set of
+ * names is reserved for both.
+ */
+bool
+IsReservedRoleName(const char *name)
+{
+	return ContainsReservedPgRoleNamePrefix(name) ||
+		   IsReservedInternalRoleName(name) ||
+		   IS_NATIVE_BUILTIN_ROLE(name);
+}
+
+
+/*
+ * Returns whether standalone readWriteAnyDatabase assignment is available.
+ */
+bool
+IsReadWriteAnyDatabaseRoleAvailable(void)
+{
+	return EnableReadWriteAnyDatabaseRoleEnforcement &&
+		   CollectionRbacReadWriteAnyDatabaseRoleOid() != InvalidOid;
+}
+
+
+/*
+ * IsCustomRole verifies that a given role has an entry in the roles table.
+ *
+ * The roles catalog table is only created at cluster version 0.116-0, so
+ * callers must gate this call behind an IsClusterVersionAtleast(DocDB_V0, 116,
+ * 0) check.
  */
 bool
 IsCustomRole(const char *roleName)
 {
-	/*
-	 * Apply the same naming restrictions create_role applies when choosing a
-	 * custom role name, so a name that could never have been created as a
-	 * custom role is never treated as one.
-	 */
-	if (roleName == NULL ||
-		ContainsReservedPgRoleNamePrefix(roleName) ||
-		IsReservedInternalRoleName(roleName) ||
-		IS_NATIVE_BUILTIN_ROLE(roleName))
+	Oid roleOid = get_role_oid(roleName, true);
+	if (!OidIsValid(roleOid))
 	{
 		return false;
 	}
 
-	/*
-	 * Roles below FirstNormalObjectId are created during cluster bootstrap:
-	 * the cluster superuser and the PostgreSQL predefined roles such as
-	 * pg_read_all_data. Several of those are NOLOGIN, so the oid bound is what
-	 * separates them from a genuine custom role.
-	 */
+	const char *query = FormatSqlQuery(
+		"SELECT 1 FROM %s.roles WHERE role_name = $1",
+		ApiCatalogSchemaName);
+
+	int nargs = 1;
+	Oid argTypes[1] = { TEXTOID };
+	Datum argValues[1] = { CStringGetTextDatum(roleName) };
+
+	bool readOnly = true;
+	bool isNull = false;
+	ExtensionExecuteQueryWithArgsViaSPI(query, nargs, argTypes, argValues, NULL,
+										readOnly, SPI_OK_SELECT, &isNull);
+
+	return !isNull;
+}
+
+
+void
+EnsureRoleMembershipLimits(const char *roleName, int64 numRolesToAdd)
+{
 	bool missingOk = true;
 	Oid roleOid = get_role_oid(roleName, missingOk);
-	if (!OidIsValid(roleOid) || roleOid < FirstNormalObjectId)
+
+	int64 numMembers = 0;
+	if (!OidIsValid(roleOid))
 	{
-		return false;
+		numMembers = 0;
+	}
+	else
+	{
+		CatCList *memlist = SearchSysCacheList1(AUTHMEMMEMROLE,
+												ObjectIdGetDatum(roleOid));
+		numMembers = memlist->n_members;
+		ReleaseSysCacheList(memlist);
 	}
 
-	HeapTuple roleTuple = SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleOid));
-	if (!HeapTupleIsValid(roleTuple))
+	if ((numMembers + numRolesToAdd) > MaxRolesPerRole)
 	{
-		return false;
+		/*
+		 * This count includes only direct memberships.
+		 */
+		ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						errmsg(
+							"Role \"%s\" has reached the maximum number of allowed memberships.",
+							roleName)));
 	}
-
-	/*
-	 * create_role creates roles without LOGIN while create_user creates login
-	 * roles, so a role that can log in is a user rather than a custom role.
-	 * Treating a user as a custom role would let one user be granted
-	 * membership in another and silently inherit that user's privileges.
-	 */
-	bool canLogin = ((Form_pg_authid) GETSTRUCT(roleTuple))->rolcanlogin;
-	ReleaseSysCache(roleTuple);
-
-	return !canLogin;
 }
 
 

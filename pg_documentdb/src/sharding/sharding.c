@@ -32,11 +32,11 @@
 #include "utils/guc_utils.h"
 #include "utils/version_utils.h"
 #include "utils/list_utils.h"
+#include "utils/role_utils.h"
 #include "index_am/index_am_extend_create.h"
 #include "index_am/index_am_utils.h"
 #include "metadata/index.h"
 #include "commands/retryable_writes.h"
-#include "rbac_hooks.h"
 
 extern bool EnableNativeColocation;
 extern int ShardingMaxChunks;
@@ -1460,6 +1460,8 @@ ShardCollectionCore(ShardCollectionArgs *args)
 								args->databaseName, args->collectionName)));
 		}
 	}
+
+	EnsureCollectionOwner(collection);
 
 	if (collection->shardKey == NULL &&
 		args->shardingMode != ShardCollectionMode_Shard)

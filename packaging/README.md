@@ -19,6 +19,69 @@ below, which is the authoritative statement of the CI scope); other OS/PG
 combinations are exposed by the build scripts below for community packagers and
 validation runs.
 
+## Clean-host installer
+
+`packaging/install.sh` bootstraps a new installation from the signed package
+repositories on these hosts:
+
+| Distribution | Architectures | PostgreSQL |
+|---|---|---|
+| Ubuntu 24.04 LTS | amd64, arm64 | 17, 18 |
+| EL9 family, including RHEL, Rocky Linux, AlmaLinux, and CentOS Stream | amd64 (x86_64), arm64 (aarch64) | 17, 18 |
+
+Full setup requires a running systemd environment and root or `sudo` access.
+This includes clean systemd-enabled containers. `--packages-only` does not
+require systemd because it does not configure or start an instance. "Clean"
+means no conflicting DocumentDB packages, repository configuration, setup
+state, or residual data; it does not require a dedicated physical or virtual
+machine.
+
+Download the installer before executing it:
+
+```sh
+curl -fsSLo documentdb-install.sh \
+  https://github.com/documentdb/documentdb/releases/latest/download/install.sh &&
+sh documentdb-install.sh
+```
+
+Direct piping is also compatible:
+
+```sh
+curl -fsSL \
+  https://github.com/documentdb/documentdb/releases/latest/download/install.sh |
+sh
+```
+
+PostgreSQL 18 is the default. An interactive PostgreSQL 17 install is:
+
+```sh
+sh documentdb-install.sh --pg-major 17
+```
+
+For unattended setup, provide a protected password file and acknowledge the
+listener behavior:
+
+```sh
+sh documentdb-install.sh \
+  --yes \
+  --pg-major 18 \
+  --admin-user admin \
+  --admin-password-file /secure/path/admin-password \
+  --listen-port 10260 \
+  --accept-external-listen
+```
+
+Use `--dry-run` to preview operations, `--packages-only` to install packages
+without configuring an instance, and `--no-enable` to configure the new
+instance without starting or enabling its gateway.
+
+The installer selects the repositories required for the detected operating
+system and verifies trusted signing keys before installing packages. It does
+not replace conflicting repository or key configuration. An already configured
+setup is not overwritten, and brownfield or otherwise conflicting package,
+configuration, or data state is refused. This bootstrap makes no upgrade or
+repair promise.
+
 ## What CI builds (package-production tiers)
 
 First-party CI does **not** build the full distro × PG-major cartesian product.
@@ -33,7 +96,10 @@ majors), the build is tiered:
   and **RHEL/Rocky 9** (RPM), for **amd64 + arm64**. The install/start E2E
   (install → `documentdb-setup` → wire protocol) runs on **every cell of that
   matrix**, not just the paved-road default — a combination we ship is a
-  combination we installed and started at least once.
+  combination we installed and started at least once. The package workflows
+  also invoke `install.sh` against signed temporary repositories in clean
+  systemd containers on native amd64 and arm64 runners. Pull requests gate on
+  both architectures, and full/release runs cover both PostgreSQL majors.
 - **Tier 2 / 3 — build on demand (not built by CI).** Every other supported
   combination — **PostgreSQL 15/16**, **Debian 11/12/13**, **Ubuntu 22.04**,
   **RHEL/Rocky 8** — is produced by running the version-parametric build scripts
@@ -196,6 +262,37 @@ This script checks:
 ./packaging/build_packages.sh --os rhel8 --pg 17 --test-clean-install
 ```
 
+### Test failure diagnostics
+
+The `--test-clean-install` container runs with `docker run --rm`, so on failure
+it copies its diagnostics (`regression.diffs`, `regression.out`, server logs)
+into a directory bind-mounted from the host. Set `TEST_ARTIFACTS_DIR` to keep
+those files somewhere specific; otherwise a temporary directory is used, which
+is archived to a `test-diagnostics-*.tar.gz` next to it on failure and removed
+on success. On Azure Pipelines the tarball is additionally published as a
+pipeline artifact; anywhere else it simply stays on disk at the path printed in
+the log.
+
+A failed run also reads the host kernel ring buffer, which is where a backend
+SIGSEGV leaves its faulting instruction pointer. That buffer is host-wide, so
+it is never archived as-is: it is captured outside the artifacts directory and
+narrowed to records that match a crash pattern and that fall inside this run's
+time window. The window is the container's start time, taken from
+`/proc/uptime` just before it launches and given a few seconds of margin to
+absorb the skew between that clock and the one printk stamps records with.
+Only those lines are written to `dmesg-crash-records.txt`, and the file is
+created only when something matched; matches outside the window are reported
+as a count instead, so an all-clear is never confused with an out-of-window
+crash. When the window cannot be established at all, matching lines are
+printed to the log, clearly labelled, but are neither archived nor raised as
+errors for the run.
+
+A time window is a heuristic, not proof of ownership. On a hosted agent that
+runs one job per VM it is sufficient, but on a shared or self-hosted agent a
+concurrent workload's records can fall inside the window too, so treat the
+`out of memory` and `killed process` matches in particular as leads rather
+than verdicts.
+
 ## Output
 
 Packages can be found at the `packages` directory by default, but it can be configured with the `--output-dir` option.
@@ -307,3 +404,73 @@ To build the DEB:
 `documentdb-gateway` runtime package) and exits with a clear prerequisite
 error otherwise. This keeps the boundary explicit: tools mutate
 PostgreSQL on behalf of an already-installed gateway.
+
+## Where the DocumentDB defaults live
+
+Each value has one owner. Where a copy is unavoidable, the last column names
+the test that holds it equal to the owner, so a change to the owner that misses
+a copy fails CI instead of drifting.
+
+### How a value travels
+
+There are two surfaces, and they share values only through
+`documentdb-local/scripts/documentdb-tools-lib.sh`.
+
+**Container image.** `documentdb_local_settings.sh` declares each setting the
+entrypoint takes as a flag once (flag, env var, default, type); the bare flags
+(`--skip-init-data`, `--disable-extended-rum`) and the operator-only env knobs
+(`DOCUMENTDB_PG_READY_*`, `DOCUMENTDB_FORCE_OWNERSHIP_REPAIR`,
+`DOCUMENTDB_ALLOW_DEFAULT_PASSWORD`) are handled in the entrypoint itself. The Dockerfile `ENV` block mirrors
+the defaults. `emulator_entrypoint.sh` parses flags into the same env vars,
+applies defaults and validates from the table, then hands values on: ports and
+credentials to `scripts/start_oss_server.sh` as arguments, the resolved ports to
+a state file that `healthcheck.sh` reads, seed-data arguments to
+`init_documentdb_data.sh`, and the gateway port, PostgreSQL port, certificate
+paths and `EnforceTls` into a jq-edited copy of `SetupConfiguration.json` that
+the gateway binary reads. The image's PostgreSQL settings block is written by
+`scripts/utils.sh` at initdb time, not by the library.
+
+**Host packages.** `documentdb-setup` owns the wizard defaults and reads the
+shared ones from the library. It persists what it chose to
+`/etc/documentdb/local/N/setup.conf`, renders the PostgreSQL block through
+`documentdb-tune` (which calls the library's renderer), and registers the
+gateway through `documentdb-register-gateway`, which writes the gateway env
+file and the `pg-url` file that the systemd unit hands to the gateway binary.
+`documentdb-gateway-admin`, the PostgreSQL service script and `reset` read the
+persisted files back.
+
+**Gateway binary.** Reads the JSON file, then env vars on top (env wins), then
+its compiled defaults. It has no per-setting command-line flag.
+
+### Owners
+
+| Value | Default | Owner | Copies, and what pins them |
+| --- | --- | --- | --- |
+| Image settings the entrypoint takes as flags: gateway port, PostgreSQL port `9712`, username, password, data path, seed-data path, init-data, create-user, start-pg, allow-external-connections, log level, TLS mode, cert/key path, TOAST compression | see the table | `documentdb-local/scripts/documentdb_local_settings.sh` | The Dockerfile `ENV` block mirrors every default except the password and the TOAST value (`ImageDefaultPinTests`); its `OWNER`, `PG_VERSION_USED` and `PATH` lines are image facts, not table rows. `emulator_entrypoint.sh`, `healthcheck.sh`, `init_documentdb_data.sh` and `documentdb_prepare_data_directory.sh` source the table (same test). The shipped `SetupConfiguration.json` and the gateway's compiled defaults also spell `10260` and `9712`; the entrypoint always overwrites both in the JSON it hands the gateway |
+| Gateway port | `10260` | `DOCUMENTDB_DEFAULT_GATEWAY_PORT` in `documentdb-tools-lib.sh` | The image table's row (`ImageDefaultPinTests`); `standalone/build-meta-deb.sh` reads it from the library at build time for its post-install hint |
+| TOAST compression default | `lz4` | `DOCUMENTDB_DEFAULT_TOAST_COMPRESSION` in `documentdb-tools-lib.sh` | The image table's row (`ImageDefaultPinTests`, `test_container_entrypoint_shares_the_same_default`) |
+| PostgreSQL settings block (`cron.*`, `documentdb.*`, `default_toast_compression`, the extended-RUM overlay) | see the renderer | `render_documentdb_pg_conf` in `documentdb-tools-lib.sh` | `documentdb-setup` and `documentdb-tune` call it; `documentdb.conf.sample` is generated from it by `generate-conf-sample.sh` (`test_generated_sample_matches_its_generator`); the wizard's live-value restart check reads its output (`RenderedValueTests`) |
+| Required `shared_preload_libraries` | `pg_cron, pg_documentdb_core, pg_documentdb` (+ `pg_documentdb_extended_rum`) | `GetDocumentDBBasePreloadLibraries` in `scripts/preload_libraries.sh`, reached through `documentdb_required_preload_libraries` | None. The tools packages install the file beside the library (`test_the_shared_files_the_library_needs_are_actually_packaged`; the deb build fails on its own if the file is missing) |
+| Per-major PostgreSQL port | `9700 + major` | `DOCUMENTDB_PG_PORT_BASE_PER_MAJOR` in `documentdb-tools-lib.sh` | None. `documentdb-setup --help` and its port-in-use error interpolate it |
+| Distro PostgreSQL defaults for an adopted instance: port, OS user, socket directory | `5432`, `postgres`, `/var/run/postgresql` else `/run/postgresql` | `DOCUMENTDB_DISTRO_PG_PORT`, `DOCUMENTDB_DISTRO_PG_OWNER`, `documentdb_distro_pg_socket_dir` in `documentdb-tools-lib.sh` | None in `documentdb-setup`, `documentdb-register-gateway` and `documentdb-gateway-admin`. `documentdb-tune` keeps its own socket rule (by distro, not by what exists) because its value lands in the managed block and a change would force a restart |
+| Gateway JSON connection fields stripped on hosts | six field names | none: three pinned copies | `documentdb-setup`'s per-major cleanup and the jq and python branches of `gateway/strip-setup-config.sh` cannot read one another (the gateway package build stages no library), so `GatewayJsonStripFieldsTests` holds all three equal |
+| Managed-block markers | | `DOCUMENTDB_MANAGED_BLOCK_START` / `_END` in `documentdb-tools-lib.sh` | The postrm cleanup in `standalone/build-standalone-deb.sh` and `rpm/spec/documentdb-local.spec` spells them again, unpinned: postrm runs after the library may already be removed, and the marker is on-disk ABI (renaming it orphans every existing block), so it never changes |
+| Paved-road PostgreSQL major | `18` | `PUBLIC_ALIAS_PG_MAJOR` in `documentdb-setup.sh` | `standalone/build-meta-deb.sh`, `build_extra_packages.sh` and `rpm/spec/documentdb-local-meta.spec` (`test_public_alias_major_agrees_with_meta_build_defaults`) |
+| Image PostgreSQL settings block | | `SetupPostgresConfigurations` in `scripts/utils.sh` (extension-owned) | None. It differs from the host block on purpose (no `cron.use_background_workers`, `ssl = off`) and is not rendered by the library |
+
+Two defaults differ between the surfaces on purpose. The image allows plain
+connections (`EnforceTls` false unless `--tlsMode requireTLS`); the packages
+never write `EnforceTls`, so the gateway's compiled default enforces TLS. The
+image runs one cluster on `9712`; the packages run one per major on
+`9700 + major`.
+
+Not in this table: OS account names, the `/etc`, `/var/lib`, `/run` and
+`/var/log` roots, the persisted state-file keys and the systemd unit names.
+Those are not defaults but a contract between installed files, written where
+they are used, because changing one is a migration of every existing install.
+
+To change a default: edit the owner, run
+`documentdb_local_tests/test_configuration_registry.py`, and fix whichever copy
+it names. To add an image setting: add a row to `documentdb_local_settings.sh`
+and its mirror line to the Dockerfile `ENV` block. To add a value the host
+tools share: add it to `documentdb-tools-lib.sh` and add a row here.

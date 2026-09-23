@@ -60,7 +60,7 @@ pub trait PgDataClient: Send + Sync {
         // from the same configuration the pool would have used, so a connection
         // built without a pool is never left without a client-side bound.
         let command_deadline = self.connection_pool().map_or_else(
-            |_| command_deadline_for(self.service_context().setup_configuration()),
+            |_| command_deadline_for(self.service_context().dynamic_configuration().as_ref()),
             ConnectionPool::command_deadline,
         );
 
@@ -76,6 +76,15 @@ pub trait PgDataClient: Send + Sync {
     /// # Errors
     /// Returns an error if no pool is available for this client.
     fn connection_pool(&self) -> Result<&ConnectionPool>;
+
+    /// Returns the maximum request timeout for data operations.
+    fn max_request_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.service_context()
+                .dynamic_configuration()
+                .max_request_timeout_sec(),
+        )
+    }
 
     fn request_options(&self, command_timeout_ms: Option<u64>) -> RequestOptions {
         RequestOptions::new(
@@ -373,6 +382,42 @@ pub trait PgDataClient: Send + Sync {
         connection_context: &ConnectionContext,
     ) -> Result<Response>;
 
+    async fn execute_grant_roles_to_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
+    async fn execute_grant_privileges_to_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
+    async fn execute_grant_roles_to_user(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
+    async fn execute_revoke_roles_from_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
+    async fn execute_revoke_privileges_from_role(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
+    async fn execute_revoke_roles_from_user(
+        &self,
+        request_context: &RequestContext<'_>,
+        connection_context: &ConnectionContext,
+    ) -> Result<Response>;
+
     // TODO: This is a temporary solution to get the index build ID from the create indexes response.
     // it's a processing logic, not a data client logic, but for sake of simplicity, we put it here.
     // It should be refactored later to a more appropriate place related to the processing
@@ -487,16 +532,14 @@ pub trait PgDataClient: Send + Sync {
         let request = request_context.request();
         let command_timeout_ms = request.max_time_ms().map(i64::cast_unsigned);
         let req_opts = self.request_options(command_timeout_ms);
+        let dynamic_configuration = self.service_context().dynamic_configuration();
 
         run_request_with_retries(
             source,
             query_options,
             req_opts,
-            Duration::from_secs(
-                self.service_context()
-                    .setup_configuration()
-                    .postgres_command_timeout_secs(),
-            ),
+            self.max_request_timeout(),
+            dynamic_configuration.as_ref(),
             request_context,
             run_func,
         )

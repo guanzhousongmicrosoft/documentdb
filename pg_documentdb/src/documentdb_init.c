@@ -30,6 +30,7 @@
 #include "infrastructure/cursor_store.h"
 #include "infrastructure/job_management.h"
 #include "background_worker/background_worker_job.h"
+#include "background_worker/background_worker_private.h"
 #include "utils/error_utils.h"
 #include "utils/roaring_bitmap_utils.h"
 
@@ -44,6 +45,7 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 /* In single node mode, we always inline write operations */
 bool DefaultInlineWriteOperations = true;
 bool ShouldUpgradeDataTables = true;
+extern bool EnableSkipUseQueryTextData;
 
 /* --------------------------------------------------------- */
 /* Forward declaration */
@@ -150,7 +152,9 @@ InitializeDocumentDBBackgroundWorker(char *libraryName, char *gucPrefix,
 
 	/* set up common data for the worker */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_start_time = StartBackgroundWorkerInRecovery ?
+							BgWorkerStart_ConsistentState :
+							BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = 10;
 	worker.bgw_main_arg = Int32GetDatum(0);
 	worker.bgw_notify_pid = 0;
@@ -223,6 +227,11 @@ InitializeBackgroundWorkerJobAllowedCommands(void)
 		.name = "build_index_background", .schema = ApiInternalSchemaName
 	};
 	RegisterBackgroundWorkerJobAllowedCommand(buildIndexConcurrently);
+
+	BackgroundWorkerJobCommand cursorDirectoryCleanup = {
+		.name = "cursor_directory_cleanup", .schema = ApiInternalSchemaNameV2
+	};
+	RegisterBackgroundWorkerJobAllowedCommand(cursorDirectoryCleanup);
 }
 
 
@@ -233,6 +242,7 @@ void
 RegisterDocumentDBBackgroundWorkerJobs(void)
 {
 	RegisterIndexBuildBackgroundWorkerJobs();
+	RegisterCursorCleanupBackgroundWorkerJob();
 }
 
 
@@ -252,6 +262,7 @@ DocumentDBSharedMemoryRequest(void)
 	RequestAddinShmemSpace(SharedFeatureCounterShmemSize());
 	RequestAddinShmemSpace(VersionCacheShmemSize());
 	RequestAddinShmemSpace(FileCursorShmemSize());
+	RequestAddinShmemSpace(BackgroundWorkerJobStatsShmemSize());
 }
 
 
@@ -262,6 +273,7 @@ DocumentDBSharedMemoryInit(void)
 	SharedFeatureCounterShmemInit();
 	InitializeVersionCache();
 	InitializeFileCursorShmem();
+	InitializeBackgroundWorkerJobStatsShmem();
 
 	if (prev_shmem_startup_hook != NULL)
 	{
@@ -280,6 +292,18 @@ DocumentDBTransactionCallback(XactEvent event, void *arg)
 		{
 			ConnMgrTryCancelActiveConnection();
 			DeletePendingCursorFiles();
+
+			/* HACK: A statement that aborted mid-execution may have left the
+			 * backend global text query state pointing at freed per-query
+			 * memory. Clear it so a later statement reading text-score metadata
+			 * does not dereference freed memory. This is a stopgap until the
+			 * global is removed in favor of threading text-score metadata
+			 * through the plan as explicit arguments (bson_orderby_meta). */
+			if (EnableSkipUseQueryTextData)
+			{
+				ResetQueryTextData();
+			}
+
 			break;
 		}
 
@@ -300,6 +324,17 @@ DocumentDBSubTransactionCallback(SubXactEvent event, SubTransactionId mySubid,
 		case SUBXACT_EVENT_ABORT_SUB:
 		{
 			ConnMgrTryCancelActiveConnection();
+
+			/* HACK: A statement that aborted inside a subtransaction (for
+			 * example a PL/pgSQL block with an EXCEPTION handler, or a
+			 * ROLLBACK TO SAVEPOINT) may have left the backend global text
+			 * query state pointing at freed per-query memory while the outer
+			 * transaction survives. Clear it here for the same reason as the
+			 * top-level abort path above. */
+			if (EnableSkipUseQueryTextData)
+			{
+				ResetQueryTextData();
+			}
 			break;
 		}
 

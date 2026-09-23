@@ -18,6 +18,10 @@ use crate::{
 };
 
 pub const POSTGRES_RECOVERY_KEY: &str = "IsPostgresInRecovery";
+pub const MAX_REQUEST_TIMEOUT_DEFAULT_SEC: u64 = 120;
+pub const MAX_REQUEST_TIMEOUT_SEC_KEY: &str = "max_request_timeout_sec";
+pub const TRANSACTION_TIMEOUT_DEFAULT_SEC: u64 = 30;
+pub const TRANSACTION_TIMEOUT_SEC_KEY: &str = "transaction_timeout_sec";
 
 /// The deployed `documentdb` extension version parsed from the cluster topology,
 /// expressed as `major.minor-build` (for example, `1.114-0`).
@@ -71,12 +75,16 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
     fn get_u64(&self, key: &str, default: u64) -> u64;
     fn equals_value(&self, key: &str, value: &str) -> bool;
     fn topology(&self) -> RawBson;
-    fn enable_developer_explain(&self) -> bool;
     fn max_connections(&self) -> usize;
     fn allow_transaction_snapshot(&self) -> bool;
+    fn enable_request_metrics(&self) -> bool;
 
     // Needed to downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any;
+
+    fn max_request_timeout_sec(&self) -> u64;
+
+    fn transaction_timeout_sec(&self) -> u64;
 
     /// Returns the `DocumentDB` instance identifier surfaced in explain output as
     /// `instanceName`, or `None` when it is not configured. Reads the
@@ -94,7 +102,7 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
     }
 
     fn enable_write_procedures(&self) -> bool {
-        self.get_bool("enableWriteProcedures", false)
+        self.get_bool("enableWriteProcedures", true)
     }
 
     fn enable_write_procedures_with_batch_commit(&self) -> bool {
@@ -251,6 +259,7 @@ mod tests {
     use bson::{rawdoc, RawArrayBuf};
 
     use super::*;
+    use crate::testing::TestDynamicConfiguration;
 
     fn topology_with_versions(versions: &[&str]) -> RawBson {
         let mut arr = RawArrayBuf::new();
@@ -260,6 +269,13 @@ mod tests {
         RawBson::Document(rawdoc! {
             "documentdb_versions": arr,
         })
+    }
+
+    #[test]
+    fn write_procedures_enabled_by_default() {
+        let config = TestDynamicConfiguration::default();
+
+        assert!(config.enable_write_procedures());
     }
 
     #[test]

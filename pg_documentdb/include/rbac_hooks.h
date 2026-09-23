@@ -3,7 +3,7 @@
  *
  * include/rbac_hooks.h
  *
- * Hook definitions for collection-scoped role privileges. These hooks let the
+ * Hook definitions for resource-scoped role privileges. These hooks let the
  * hosting extension layer persist the privileges a role is granted on a
  * resource, and hold the native relation privileges that reaching the
  * authorization path requires.
@@ -15,6 +15,8 @@
 #define EXTENSION_RBAC_HOOKS_H
 
 #include <nodes/pg_list.h>
+#include <nodes/parsenodes.h>
+#include <nodes/plannodes.h>
 #include <utils/acl.h>
 
 #include "utils/string_view.h"
@@ -53,15 +55,12 @@ typedef void (*RemoveCollectionPrivileges_HookType)(const char *roleName);
 extern RemoveCollectionPrivileges_HookType
 	remove_collection_privileges_hook;
 
-typedef void (*GrantCollectionPrivilegesToBaselineRoles_HookType)(uint64 collectionId,
-																  bool
-																  includeRetryTable);
-extern GrantCollectionPrivilegesToBaselineRoles_HookType
-	grant_collection_privileges_to_baseline_roles_hook;
 
 /*
  * Persists collection-scoped privileges for a newly created role.
- * Errors when no implementation is registered.
+ * An empty list is a no-op when no implementation is registered, and is
+ * passed through when one is registered. Nonempty lists error without an
+ * implementation.
  */
 void GrantCollectionPrivilegesToRole(const char *roleName, List *collectionPrivileges);
 
@@ -72,17 +71,31 @@ void GrantCollectionPrivilegesToRole(const char *roleName, List *collectionPrivi
  */
 void RemoveCollectionPrivileges(const char *roleName);
 
+/* Runs optional work after a collection is created. */
+void PostCreateCollection(uint64 collectionId);
+
 /*
- * Grants baseline privileges on a collection's tables.
+ * Records, on a plan built without the planner, the identity a relation's
+ * permission record should be checked against, and marks the plan role
+ * dependent.
  *
- * The collection is identified by id rather than by table name so that the
- * names are derived here and a caller cannot supply one, keeping externally
- * supplied text out of the resulting GRANT statements.
+ * A plan returned without running the planner carries a permission record that
+ * nothing has had the chance to evaluate. Every other statement has that record
+ * settled while planning, so this hands the ones that skip the planner to
+ * whichever layer settles it.
  *
- * includeRetryTable is false when the collection has no dedicated retry table.
- * No-op when no implementation is registered.
+ * The record is read from the plan's own permission list, so a caller does not
+ * need a Query. No-op when no implementation is registered, which leaves the
+ * record checked against the invoking role.
  */
-void GrantCollectionPrivilegesToBaselineRoles(uint64 collectionId,
-											  bool includeRetryTable);
+void ApplyCollectionAccessIdentityToPlan(RangeTblEntry *rte, PlannedStmt *stmt);
+
+
+bool RequireBaseCollectionRteInMetadataQueries(void);
+
+struct FromExpr;
+void UpdateJoinTreeForCollectionsQuery(struct FromExpr *fromExpr, List *rtes);
+
+const char * GetCollectionsStringFilter(void);
 
 #endif

@@ -12,8 +12,10 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/resowner.h"
+#include "utils/role_utils.h"
 #include "lib/stringinfo.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "utils/typcache.h"
 #include "parser/parse_type.h"
 #include "nodes/makefuncs.h"
@@ -31,6 +33,7 @@
 #include "utils/version_utils_private.h"
 #include "utils/data_table_utils.h"
 #include "api_hooks.h"
+#include "distributed_schema_operations.h"
 
 extern char *ApiExtensionName;
 extern char *ApiGucPrefix;
@@ -53,7 +56,6 @@ extern char * GetIndexQueueName(void);
 static char * GetClusterInitializedVersion(void);
 static void DistributeCrudFunctions(void);
 static void CreateIndexBuildsTable(bool includeOptions, bool includeDropCommandType);
-static void CreateValidateDbNameTrigger(void);
 static void AlterDefaultDatabaseObjects(void);
 static char * UpdateClusterMetadata(void);
 static void CreateReferenceTable(const char *tableName);
@@ -65,15 +67,18 @@ static void DropLegacyChangeStream(void);
 static void TriggerInvalidateClusterMetadata(void);
 static void AddCollectionsTableViewDefinition(void);
 static void AddCollectionsTableValidationColumns(void);
-static void CreateExtensionVersionsTrigger(void);
 static bool VersionEquals(ExtensionVersion versionA, ExtensionVersion versionB);
 static void GetInstalledVersion(ExtensionVersion *installedVersion);
 static void ParseVersionString(ExtensionVersion *extensionVersion, char *versionString);
 static bool SetupCluster(bool isInitialize);
 static void SetPermissionsForReadOnlyRole(void);
 static void SetPermissionsForReadWriteRole(void);
+static void GrantClusterDataReadToRbacApiAccessRole(void);
 static void CheckAndReplicateReferenceTable(const char *schema, const char *tableName);
 static void UpdateChangesTableOwnerToAdminRole(void);
+static bool MetadataColumnExists(const char *tableName, const char *columnName);
+static void ExecuteMetadataColumnAlter(const char *query, const char *tableName,
+									   const char *columnName);
 static bool RunUpgradeActions(ExtensionVersion installedVersion, ExtensionVersion
 							  lastUpgradeVersion);
 static void AddMetadataCollectionOptionsColumn(void);
@@ -395,7 +400,16 @@ RunUpgradeActions(ExtensionVersion installedVersion, ExtensionVersion lastUpgrad
 		 * Migrate the roles reference table primary key from role_oid to
 		 * role_name.
 		 */
-		AlterRolesTablePrimaryKey();
+		if (MetadataColumnExists("roles", "role_oid"))
+		{
+			AlterRolesTablePrimaryKey();
+		}
+	}
+
+	if (ShouldRunSetupForVersion(&versions, DocDB_V0, 117, 3) ||
+		ShouldRunSetupForVersion(&versions, DocDB_V1, 0, 1))
+	{
+		GrantClusterDataReadToRbacApiAccessRole();
 	}
 
 	/* we call the post setup cluster hook to allow the extension to do any additional setup */
@@ -528,36 +542,49 @@ CreateIndexBuildsTable(bool includeOptions, bool includeDropCommandType)
 static void
 AddMetadataCollectionOptionsColumn(void)
 {
-	bool readOnly = false;
-	bool isNull = false;
 	StringInfo queryStr = makeStringInfo();
 	appendStringInfo(queryStr,
 					 "ALTER TABLE %s.collections "
 					 "ADD COLUMN IF NOT EXISTS options %s.bson DEFAULT NULL",
 					 ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(queryStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(queryStr->data, "collections", "options");
 }
 
 
-/*
- * Create validate_dbname trigger on the collections table.
- */
-static void
-CreateValidateDbNameTrigger(void)
+static bool
+MetadataColumnExists(const char *tableName, const char *columnName)
 {
-	bool isNull = false;
-	bool readOnly = false;
+	bool missingOk = true;
+	Oid namespaceOid = get_namespace_oid(ApiCatalogSchemaName, missingOk);
+	if (namespaceOid == InvalidOid)
+	{
+		return false;
+	}
 
-	StringInfo cmdStr = makeStringInfo();
-	appendStringInfo(cmdStr,
-					 "CREATE OR REPLACE TRIGGER collections_trigger_validate_dbname "
-					 "BEFORE INSERT OR UPDATE ON %s.collections "
-					 "FOR EACH ROW EXECUTE FUNCTION "
-					 "%s.trigger_validate_dbname();", ApiCatalogSchemaName,
-					 ApiCatalogToApiInternalSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	Oid relationOid = get_relname_relid(tableName, namespaceOid);
+	return relationOid != InvalidOid &&
+		   get_attnum(relationOid, columnName) != InvalidAttrNumber;
+}
+
+
+static void
+ExecuteMetadataColumnAlter(const char *query, const char *tableName,
+						   const char *columnName)
+{
+	int gucLevel = 0;
+	if (MetadataColumnExists(tableName, columnName))
+	{
+		gucLevel = NewGUCNestLevel();
+		SetGUCLocally("client_min_messages", "WARNING");
+	}
+
+	bool isNull = false;
+	ExtensionExecuteQueryViaSPI(query, false, SPI_OK_UTILITY, &isNull);
+
+	if (gucLevel != 0)
+	{
+		RollbackGUCChange(gucLevel);
+	}
 }
 
 
@@ -666,15 +693,11 @@ AlterDefaultDatabaseObjects(void)
 static void
 AddCollectionsTableViewDefinition(void)
 {
-	bool isNull = false;
-	bool readOnly = false;
-
 	StringInfo cmdStr = makeStringInfo();
 	appendStringInfo(cmdStr,
 					 "ALTER TABLE %s.collections ADD IF NOT EXISTS view_definition "
 					 "%s.bson default null;", ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "view_definition");
 }
 
 
@@ -684,25 +707,38 @@ AddCollectionsTableViewDefinition(void)
 static void
 AddCollectionsTableValidationColumns(void)
 {
-	bool isNull = false;
-	bool readOnly = false;
-
 	StringInfo cmdStr = makeStringInfo();
+
 	appendStringInfo(cmdStr,
 					 "ALTER TABLE %s.collections "
-					 "ADD COLUMN IF NOT EXISTS validator %s.bson DEFAULT null, "
-					 "ADD COLUMN IF NOT EXISTS validation_level text DEFAULT null CONSTRAINT validation_level_check CHECK (validation_level IN ('off', 'strict', 'moderate')), "
-					 "ADD COLUMN IF NOT EXISTS validation_action text DEFAULT null CONSTRAINT validation_action_check CHECK (validation_action IN ('warn', 'error'));",
+					 "ADD COLUMN IF NOT EXISTS validator %s.bson DEFAULT null;",
 					 ApiCatalogSchemaName, CoreSchemaName);
-	ExtensionExecuteQueryViaSPI(cmdStr->data, readOnly, SPI_OK_UTILITY,
-								&isNull);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validator");
+
+	resetStringInfo(cmdStr);
+	appendStringInfo(cmdStr,
+					 "ALTER TABLE %s.collections "
+					 "ADD COLUMN IF NOT EXISTS validation_level text DEFAULT null "
+					 "CONSTRAINT validation_level_check "
+					 "CHECK (validation_level IN ('off', 'strict', 'moderate'));",
+					 ApiCatalogSchemaName);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validation_level");
+
+	resetStringInfo(cmdStr);
+	appendStringInfo(cmdStr,
+					 "ALTER TABLE %s.collections "
+					 "ADD COLUMN IF NOT EXISTS validation_action text DEFAULT null "
+					 "CONSTRAINT validation_action_check "
+					 "CHECK (validation_action IN ('warn', 'error'));",
+					 ApiCatalogSchemaName);
+	ExecuteMetadataColumnAlter(cmdStr->data, "collections", "validation_action");
 }
 
 
 /*
  * Creates trigger for updates or deletes in the cluster_data table from the catalog schema.
  */
-static void
+void
 CreateExtensionVersionsTrigger(void)
 {
 	bool isNull = false;
@@ -710,7 +746,7 @@ CreateExtensionVersionsTrigger(void)
 
 	StringInfo cmdStr = makeStringInfo();
 	appendStringInfo(cmdStr,
-					 "CREATE TRIGGER %s_versions_trigger "
+					 "CREATE OR REPLACE TRIGGER %s_versions_trigger "
 					 "AFTER UPDATE OR DELETE ON "
 					 "%s.%s_cluster_data "
 					 "FOR STATEMENT EXECUTE FUNCTION "
@@ -994,6 +1030,25 @@ SetPermissionsForReadWriteRole(void)
 	ExtensionExecuteQueryViaSPI(cmdStr->data, false, SPI_OK_UTILITY,
 								&isNull);
 	resetStringInfo(cmdStr);
+}
+
+
+/*
+ * Restore API access to cluster metadata after the table is distributed.
+ */
+static void
+GrantClusterDataReadToRbacApiAccessRole(void)
+{
+	bool isNull = false;
+	bool readOnly = false;
+
+	ExtensionExecuteQueryViaSPI(
+		FormatSqlQuery(
+			"GRANT SELECT ON TABLE %s.%s_cluster_data TO %s",
+			ApiDistributedSchemaName,
+			ExtensionObjectPrefix,
+			quote_identifier(API_RBAC_API_ACCESS_ROLE)),
+		readOnly, SPI_OK_UTILITY, &isNull);
 }
 
 

@@ -6,6 +6,12 @@ SET search_path TO documentdb_api, documentdb_core, documentdb_api_catalog, docu
 -- this pin when the flag is retired.
 SET documentdb.enableDistinctScanForGroupFirst TO off;
 
+-- enableProjectPushUpBeforeUnwindWithGroup is enabled by default starting in v118.
+-- Pin it off here so the $unwind -> $group cases in this suite keep exercising the
+-- plan shape without the injected field-pruning $project. Remove this pin when the
+-- flag is retired.
+SET documentdb.enableProjectPushUpBeforeUnwindWithGroup TO off;
+
 -- Use composite op class so RUM index supports the distinct skip-tids optimization
 SET documentdb.defaultUseCompositeOpClass TO on;
 
@@ -16,8 +22,6 @@ SELECT documentdb_api.drop_collection('db', 'setup_sentinel');
 
 SET documentdb.next_collection_id TO 20000;
 SET documentdb.next_collection_index_id TO 20000;
-SET documentdb.enableNewMinMaxAccumulators TO off;
-SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- Setup: create collection with repeated values for field "x"
 SELECT documentdb_api.insert_one('db', 'grp_dist', '{ "_id": 1, "x": "a", "y": 10 }', NULL);

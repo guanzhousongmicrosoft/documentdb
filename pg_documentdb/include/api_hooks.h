@@ -3,7 +3,7 @@
  *
  * include/api_hooks.h
  *
- * Exports related to hooks for the public API surface that enable distribution.
+ * Exports related to extension hooks for the public API surface.
  *
  *-------------------------------------------------------------------------
  */
@@ -33,6 +33,19 @@ bool IsMetadataCoordinator(void);
  * background worker jobs. Defaults to true when no hook is set.
  */
 bool IsClusterInitialized(void);
+
+
+/*
+ * Invoked after collection metadata is invalidated so registered consumers can
+ * refresh state derived from it. No-op when no consumer is registered.
+ */
+void NotifyCollectionMetadataInvalidated(void);
+
+/*
+ * Invoked when a specific relation is invalidated so registered consumers can
+ * discard state derived from that relation. No-op when none is registered.
+ */
+void NotifyCollectionRelationInvalidated(Oid relationId);
 
 
 /*
@@ -66,6 +79,11 @@ void RunMultiValueQueryWithCommutativeWrites(const char *query, SPIPlanPtr plan,
 											 int nargs, Oid *argTypes,
 											 Datum *argValues, char *argNulls,
 											 bool readOnly, long maxTupleCount);
+
+/*
+ * Enables commutative writes for the current transaction when supported.
+ */
+void AllowCommutativeWritesInCurrentTransaction(void);
 
 
 /*
@@ -148,11 +166,6 @@ const pgbson * GetUserInfoFromExternalIdentityProvider(const char *userName);
  */
 bool IsPasswordValid(const char *username, const char *password);
 
-/*
- * Default username validation implementation
- * Returns true if username is valid, false otherwise
- */
-bool IsUsernameValid(const char *username);
 
 /*
  * Hook for handling colocation of tables

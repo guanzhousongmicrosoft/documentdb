@@ -320,9 +320,6 @@ SELECT documentdb_api.drop_user('{"dropUser":"test_user_injection_attack", "$db"
 SELECT documentdb_api.drop_user('{"dropUser":"readOnlyUser", "$db":"admin"}');
 SELECT documentdb_api.drop_user('{"dropUser":"adminUser", "$db":"admin"}');
 
--- Reset the max user limit to 500
-SET documentdb.maxUserLimit TO 500;
-
 -- ***** Regression: readWriteAnyDatabase-only users must count toward the user limit *****
 -- The user count previously only considered members of the admin and read-only
 -- roles, so a user granted only readWriteAnyDatabase was never counted and could
@@ -355,6 +352,16 @@ SELECT documentdb_api.drop_user('{"dropUser":"rwLimitUser3", "$db":"admin"}');
 SET documentdb.maxUserLimit TO 500;
 RESET documentdb.enable_readwrite_any_database_role_enforcement;
 
+-- ***** Role membership limit for createUser *****
+-- The minimum limit allows each user to receive one role. It limits roles per
+-- user, not the number of users that may share the same parent role.
+SET documentdb.max_roles_per_role TO 1;
+SELECT documentdb_api.create_user('{"createUser":"membershipLimitUser1", "pwd":"test_password", "roles":[{"role":"readAnyDatabase","db":"admin"}], "$db":"admin"}');
+SELECT documentdb_api.create_user('{"createUser":"membershipLimitUser2", "pwd":"test_password", "roles":[{"role":"readAnyDatabase","db":"admin"}], "$db":"admin"}');
+SELECT documentdb_api.drop_user('{"dropUser":"membershipLimitUser1", "$db":"admin"}');
+SELECT documentdb_api.drop_user('{"dropUser":"membershipLimitUser2", "$db":"admin"}');
+RESET documentdb.max_roles_per_role;
+
 -- ***** Role-combination gating for createUser *****
 -- Only the exact accepted built-in role combinations map to a PG role. Any
 -- other combination is rejected rather than silently reduced to one role.
@@ -368,23 +375,36 @@ SELECT documentdb_api.create_user('{"createUser":"gatingUserRwRo", "pwd":"test_p
 -- Case 3: the accepted clusterAdmin + readWriteAnyDatabase combination still succeeds.
 SELECT documentdb_api.create_user('{"createUser":"gatingUserAdmin", "pwd":"test_password", "roles":[{"role":"clusterAdmin","db":"admin"},{"role":"readWriteAnyDatabase","db":"admin"}], "$db":"admin"}');
 
--- Case 4: readWriteAnyDatabase on its own is rejected while the flag is off, with a
--- message that points at the required pairing rather than listing it as allowed.
+-- Case 4: readWriteAnyDatabase on its own remains unavailable while the
+-- enforcement feature is disabled.
+SET documentdb.enable_readwrite_any_database_role_enforcement TO OFF;
 SELECT documentdb_api.create_user('{"createUser":"gatingUserRwOnly", "pwd":"test_password", "roles":[{"role":"readWriteAnyDatabase","db":"admin"}], "$db":"admin"}');
 
--- Case 5: clusterAdmin on its own stays rejected regardless of the flag.
-SELECT documentdb_api.create_user('{"createUser":"gatingUserClusterOnly", "pwd":"test_password", "roles":[{"role":"clusterAdmin","db":"admin"}], "$db":"admin"}');
-
--- Case 6: turning the flag on accepts readWriteAnyDatabase on its own, which is how
--- a read-write-only user is provisioned, and widens the message for other cases.
+-- Case 5: enabling enforcement permits standalone readWriteAnyDatabase.
 SET documentdb.enable_readwrite_any_database_role_enforcement TO ON;
 SELECT documentdb_api.create_user('{"createUser":"gatingUserRwOnly", "pwd":"test_password", "roles":[{"role":"readWriteAnyDatabase","db":"admin"}], "$db":"admin"}');
+SELECT pg_has_role(
+    'gatingUserRwOnly',
+    'documentdb_rbac_readwrite_anydb_role',
+    'MEMBER');
+SELECT documentdb_api.create_collection('gating_user_db', 'gating_user_collection');
+SET ROLE "gatingUserRwOnly";
+SELECT documentdb_api.insert_one(
+    'gating_user_db',
+    'gating_user_collection',
+    '{"_id":1,"value":"standalone"}');
+SELECT documentdb_api.count_query(
+    'gating_user_db',
+    '{"count":"gating_user_collection","query":{"value":"standalone"}}');
+RESET ROLE;
+
+-- Case 6: clusterAdmin on its own stays rejected.
 SELECT documentdb_api.create_user('{"createUser":"gatingUserClusterOnly", "pwd":"test_password", "roles":[{"role":"clusterAdmin","db":"admin"}], "$db":"admin"}');
+
+-- Cleanup the users created by the accepted cases.
+SELECT documentdb_api.drop_user('{"dropUser":"gatingUserAdmin", "$db":"admin"}');
 SELECT documentdb_api.drop_user('{"dropUser":"gatingUserRwOnly", "$db":"admin"}');
 RESET documentdb.enable_readwrite_any_database_role_enforcement;
-
--- Cleanup the user created by the accepted case.
-SELECT documentdb_api.drop_user('{"dropUser":"gatingUserAdmin", "$db":"admin"}');
 
 -- ***** Granting a custom role via createUser *****
 -- A custom role created through createRole can be granted to a user, provided
@@ -401,14 +421,9 @@ SELECT documentdb_api.create_user('{"createUser":"customRoleUser", "pwd":"test_p
 -- to exactly one role.
 SELECT documentdb_api.create_user('{"createUser":"customRoleUser2", "pwd":"test_password", "roles":[{"role":"readAnyDatabase","db":"admin"},{"role":"customUserRole","db":"admin"}], "$db":"admin"}');
 
--- Same input with readWriteAnyDatabase, whose standalone support is gated.
--- With the flag off the gate is reported first; with it on, standalone
--- readWriteAnyDatabase is allowed and the custom-role conflict is reported.
--- Either way the request is rejected.
+-- Same input with readWriteAnyDatabase is rejected because a user resolves to
+-- exactly one role.
 SELECT documentdb_api.create_user('{"createUser":"customRoleUser2", "pwd":"test_password", "roles":[{"role":"readWriteAnyDatabase","db":"admin"},{"role":"customUserRole","db":"admin"}], "$db":"admin"}');
-SET documentdb.enable_readwrite_any_database_role_enforcement TO ON;
-SELECT documentdb_api.create_user('{"createUser":"customRoleUser2", "pwd":"test_password", "roles":[{"role":"readWriteAnyDatabase","db":"admin"},{"role":"customUserRole","db":"admin"}], "$db":"admin"}');
-RESET documentdb.enable_readwrite_any_database_role_enforcement;
 
 -- Specifying more than one custom role is rejected.
 SELECT documentdb_api.create_role('{"createRole":"customUserRole2", "roles":["readAnyDatabase"], "privileges":[], "$db":"admin"}');
@@ -459,6 +474,10 @@ SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_api_find_r
 SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_api_insert_role');
 SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_api_remove_role');
 SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_api_update_role');
+SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_rbac_api_access_role');
+SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_rbac_baseline_read_role');
+SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_rbac_baseline_write_role');
+SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_rbac_readwrite_anydb_role');
 
 -- IS_SYSTEM_LOGIN_ROLE: system login roles should be reserved
 SELECT documentdb_test_helpers.test_is_reserved_role_name('documentdb_bg_worker_role');
@@ -476,3 +495,47 @@ SELECT documentdb_api.update_user('{"updateUser":"documentdb_readonly_role", "pw
 SELECT documentdb_api.users_info('{"usersInfo":"documentdb_readonly_role", "$db":"admin"}');
 
 DROP FUNCTION documentdb_test_helpers.test_is_reserved_role_name(text);
+-- A role that a user merely created must not be reported as a role the user holds.
+-- PostgreSQL 16 and later records a membership for the role that runs CREATE ROLE
+-- carrying ADMIN OPTION but neither INHERIT nor SET, so it confers none of the new
+-- role's privileges. connectionStatus resolves the caller's role by picking the
+-- first membership in name order, so such a membership on a name that sorts early
+-- would otherwise displace the role the user actually holds.
+SET documentdb.enableRoleCrud TO ON;
+SET documentdb.enableRolesAdminDBCheck TO ON;
+
+CREATE ROLE "connStatusRoleCreator" LOGIN CREATEROLE;
+GRANT documentdb_admin_role TO "connStatusRoleCreator";
+GRANT SELECT ON documentdb_api_catalog.roles TO "connStatusRoleCreator";
+
+-- Baseline: the creator reports readWriteAnyDatabase and clusterAdmin.
+SET ROLE "connStatusRoleCreator";
+SELECT documentdb_api.connection_status('{"connectionStatus": 1, "$db":"admin"}');
+
+-- aaaConnStatusCreatedRole sorts before documentdb_admin_role, so an unfiltered
+-- membership would win the ordering and blank out the reported roles.
+SELECT documentdb_api.create_role(
+    '{"createRole":"aaaConnStatusCreatedRole", "roles":[], "privileges":[], "$db":"admin"}');
+
+-- The reported roles must be identical to the baseline above.
+SELECT documentdb_api.connection_status('{"connectionStatus": 1, "$db":"admin"}');
+RESET ROLE;
+
+SELECT documentdb_api.drop_role('{"dropRole":"aaaConnStatusCreatedRole", "$db":"admin"}');
+REVOKE SELECT ON documentdb_api_catalog.roles FROM "connStatusRoleCreator";
+REVOKE documentdb_admin_role FROM "connStatusRoleCreator";
+DROP ROLE "connStatusRoleCreator";
+
+-- Positive control: a membership granted WITH ADMIN OPTION does confer the role,
+-- so it must still be reported. Filtering on ADMIN OPTION alone would wrongly
+-- hide it, which is why the filter tests INHERIT and SET instead.
+CREATE ROLE "connStatusAdminOptionUser" LOGIN;
+GRANT documentdb_readonly_role TO "connStatusAdminOptionUser" WITH ADMIN OPTION;
+SET ROLE "connStatusAdminOptionUser";
+SELECT documentdb_api.connection_status('{"connectionStatus": 1, "$db":"admin"}');
+RESET ROLE;
+REVOKE documentdb_readonly_role FROM "connStatusAdminOptionUser";
+DROP ROLE "connStatusAdminOptionUser";
+
+RESET documentdb.enableRoleCrud;
+RESET documentdb.enableRolesAdminDBCheck;

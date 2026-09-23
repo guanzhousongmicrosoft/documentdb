@@ -71,14 +71,9 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_co
 -- sortByCount
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$sortByCount": { "$eq": [ { "$mod": [ { "$toInt": "$_id" }, 2 ] }, 0  ] } }, { "$sort": { "_id": 1 } }], "cursor": {} }');
 -- $group
-SET documentdb.enableNewMinMaxAccumulators TO off;
-SET documentdb.enableNewWithExprAccumulators TO off;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
 
-SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
-SET documentdb.enableNewMinMaxAccumulators TO off;
-SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- $group with $count with non-empty arg (tracks group_count_with_arg feature counter)
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": null, "e": { "$count": 1 } } }], "cursor": {} }');
@@ -86,10 +81,7 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_co
 -- $group scalar aggregate: constant _id with a simple $field accumulator (tracks group_scalar_agg_index_pushdown feature counter)
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col", "pipeline": [ { "$group": { "_id": null, "m": { "$max": "$a" } } }], "cursor": {} }');
 
-SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$sum": "$_id" }, "e": { "$count": 1 } } }], "cursor": {} }');
-SET documentdb.enableNewMinMaxAccumulators TO off;
-SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- $group with first/last
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$first": "$_id" }, "e": { "$last":  "$_id" } } }], "cursor": {} }');
@@ -101,16 +93,11 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_co
 SET documentdb_core.enablecollation TO on;
 SELECT document FROM bson_aggregation_find('db', '{ "find": "feature_counter_col2", "filter": { "$or" : [{ "a": { "$eq": "cat" } }, { "a": { "$eq": "DOG" } }] }, "sort": { "_id": 1 }, "skip": 0, "limit": 5, "collation": { "locale": "en", "strength" : 1} }');
 SELECT document FROM bson_aggregation_find('db', '{ "find": "feature_counter_col2", "filter": { "$or" : [{ "a": { "$eq": "cat" } }, { "b": { "$eq": "DOG" } }] }, "sort": { "_id": 1 }, "skip": 0, "limit": 10, "collation": { "locale": "fr_CA", "strength" : 3 } }');
--- $group accumulator that cannot honor the collation. The WithExpr accumulators
--- must be on to get past the stage check, and skipFailOnCollation lets the
--- accumulator run so the counter is reported without the error.
-SET documentdb.enableNewMinMaxAccumulators TO on;
-SET documentdb.enableNewWithExprAccumulators TO on;
+-- $group accumulator that cannot honor the collation. skipFailOnCollation lets
+-- the accumulator run so the counter is reported without the error.
 SET documentdb.skipFailOnCollation TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "feature_counter_col2", "pipeline": [ { "$group": { "_id": null, "a": { "$addToSet": "$a" } } } ], "cursor": {}, "collation": { "locale": "en", "strength": 1 } }');
 RESET documentdb.skipFailOnCollation;
-RESET documentdb.enableNewMinMaxAccumulators;
-RESET documentdb.enableNewWithExprAccumulators;
 RESET documentdb_core.enablecollation;
 
 
@@ -118,7 +105,7 @@ RESET documentdb_core.enablecollation;
 SELECT documentdb_api_internal.create_indexes_non_concurrently('db', '{"createIndexes": "feature_counter_col2", "indexes": [{"key": {"ttl": 1}, "name": "ttl_index", "v" : 1, "expireAfterSeconds": 5}]}', true);
 
 -- Run validate command
-SELECT documentdb_api.validate('db', '{ "validate" : "validatecoll", "repair" : true }' );
+SELECT documentdb_api.validate('db', '{ "validate" : "feature_counter_col2", "repair" : true }' );
 
 -- Print without resetting the counters
 SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(false);
@@ -481,3 +468,25 @@ RESET enable_bitmapscan;
 SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
 
 SELECT documentdb_api.drop_collection('db', 'updateMany');
+
+-- Ordered $first distinct-scan candidates suppressed by the feature flag.
+SELECT documentdb_api.insert_one('db', 'orderedFirstCandidate', '{ "_id": 1, "x": "a", "y": 10 }');
+SELECT documentdb_api.insert_one('db', 'orderedFirstCandidate', '{ "_id": 2, "x": "a", "y": 20 }');
+SELECT documentdb_api.insert_one('db', 'orderedFirstCandidate', '{ "_id": 3, "x": "b", "y": 30 }');
+SET documentdb.defaultUseCompositeOpClass TO on;
+SELECT documentdb_api_internal.create_indexes_non_concurrently('db', '{ "createIndexes": "orderedFirstCandidate", "indexes": [ { "key": { "x": 1, "y": -1 }, "name": "idx_x_y_desc" } ] }', true);
+SELECT count(*) * 0 AS count FROM documentdb_api_internal.command_feature_counter_stats(true);
+
+SET documentdb.enable_distinct_scan_for_ordered_group_first TO off;
+SET documentdb.enableSortPushToAccumulatorWithPrefix TO on;
+SET enable_seqscan TO off;
+SET enable_bitmapscan TO off;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "orderedFirstCandidate", "hint": "idx_x_y_desc", "pipeline": [ { "$sort": { "x": 1, "y": -1 } }, { "$group": { "_id": "$x", "f": { "$first": "$y" } } }, { "$sort": { "_id": 1 } } ] }');
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+RESET documentdb.enableSortPushToAccumulatorWithPrefix;
+RESET documentdb.enable_distinct_scan_for_ordered_group_first;
+RESET documentdb.defaultUseCompositeOpClass;
+
+SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
+SELECT documentdb_api.drop_collection('db', 'orderedFirstCandidate');

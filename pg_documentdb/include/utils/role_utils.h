@@ -12,6 +12,18 @@
 
 #include "postgres.h"
 #include "fmgr.h"
+#include "nodes/pg_list.h"
+#include "utils/hsearch.h"
+#include "utils/string_view.h"
+#include "io/bson_core.h"
+
+/*
+ * Baseline RBAC group role names.
+ */
+#define API_RBAC_API_ACCESS_ROLE "documentdb_rbac_api_access_role"
+#define API_RBAC_BASELINE_READ_ROLE "documentdb_rbac_baseline_read_role"
+#define API_RBAC_BASELINE_WRITE_ROLE "documentdb_rbac_baseline_write_role"
+#define API_RBAC_READWRITE_ANYDB_ROLE "documentdb_rbac_readwrite_anydb_role"
 
 /* Macro to check if a role is a system role */
 #define IS_SYSTEM_LOGIN_ROLE(roleName) \
@@ -30,13 +42,8 @@
 	 strcmp((roleName), ApiReadWriteRole) == 0 || \
 	 strcmp((roleName), ApiRootInternalRole) == 0 || \
 	 strcmp((roleName), ApiRootRole) == 0 || \
-	 strcmp((roleName), ApiUserAdminRole) == 0)
-
-/*
- * Baseline RBAC group role names.
- */
-#define API_RBAC_BASELINE_READ_ROLE "documentdb_rbac_baseline_read_role"
-#define API_RBAC_BASELINE_WRITE_ROLE "documentdb_rbac_baseline_write_role"
+	 strcmp((roleName), ApiUserAdminRole) == 0 || \
+	 strcmp((roleName), API_RBAC_READWRITE_ANYDB_ROLE) == 0)
 
 /* Macro to check if a role is an internal custom rbac role */
 #define IS_CUSTOM_RBAC_ROLE(roleName) \
@@ -44,6 +51,7 @@
 	 strcmp((roleName), ApiCollectionInsertRole) == 0 || \
 	 strcmp((roleName), ApiCollectionUpdateRole) == 0 || \
 	 strcmp((roleName), ApiCollectionRemoveRole) == 0 || \
+	 strcmp((roleName), API_RBAC_API_ACCESS_ROLE) == 0 || \
 	 strcmp((roleName), API_RBAC_BASELINE_READ_ROLE) == 0 || \
 	 strcmp((roleName), API_RBAC_BASELINE_WRITE_ROLE) == 0)
 
@@ -98,7 +106,7 @@ typedef struct
 } ConsolidatedPrivilege;
 
 /* Function to write a single role's privileges to a BSON array writer */
-void WritePrivileges(const char *internalRoleName,
+void WritePrivileges(const StringView *internalRoleName,
 					 pgbson_array_writer *privilegesArrayWriter);
 
 /* Function to write multiple roles' privileges from an HTAB to a BSON array writer*/
@@ -113,10 +121,23 @@ bool ContainsReservedPgRoleNamePrefix(const char *name);
 * Note: this function does not check against native built-in role names */
 bool IsReservedInternalRoleName(const char *name);
 
+/* Function to check whether a name is reserved for the extension's own roles,
+ * a blocked prefix, or a built-in role name. Roles and users share one
+ * namespace, so this applies to both. */
+bool IsReservedRoleName(const char *name);
+
+/* Returns whether standalone readWriteAnyDatabase assignment is available. */
+bool IsReadWriteAnyDatabaseRoleAvailable(void);
+
 /* Function to check whether a name identifies a custom role */
 bool IsCustomRole(const char *roleName);
 
 /* Function to build a List of parent role names from an array of Datums */
 List * ConvertUserOrRoleNamesDatumToList(Datum *parentRolesDatums, int parentRolesCount);
+
+void EnsureRoleMembershipLimits(const char *roleName, int64 numRolesToAdd);
+
+void GrantCollectionPrivilegesToBaselineRoles(uint64 collectionId, bool
+											  includeRetryTable);
 
 #endif

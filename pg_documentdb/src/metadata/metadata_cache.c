@@ -17,6 +17,7 @@
 #include <catalog/pg_type.h>
 #include <catalog/pg_operator.h>
 #include <utils/fmgroids.h>
+#include <utils/acl.h>
 
 #include "commands/extension.h"
 #include "executor/spi.h"
@@ -32,11 +33,13 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/version_utils.h"
+#include "utils/role_utils.h"
 #include "catalog/pg_am.h"
 
 #include "metadata/metadata_cache.h"
 #include "metadata/collection.h"
 #include "commands/defrem.h"
+#include "api_hooks.h"
 
 
 #define PG_EXTENSION_NAME_SCAN_NARGS 1
@@ -60,6 +63,8 @@ typedef enum CacheValidityValue
 
 
 static void InvalidateDocumentDBApiCache(Datum argument, Oid relationId);
+static void InvalidateDocumentDBApiRoleOidCache(Datum argument, int cacheId,
+												uint32 hashValue);
 static Oid GetBinaryOperatorId(Oid *operatorId, Oid leftTypeOid, char *operatorName,
 							   Oid rightTypeOid);
 static Oid GetInternalBinaryOperatorId(Oid *operatorId, Oid leftTypeOid,
@@ -285,6 +290,9 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the bson_orderby with collation function */
 	Oid BsonOrderByWithCollationFunctionId;
+
+	/* OID of the bson_orderby_meta function */
+	Oid BsonOrderByMetaFunctionId;
 
 	/* OID of the bson_orderby_index function */
 	Oid BsonOrderByIndexFunctionId;
@@ -773,6 +781,9 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the websearch_to_tsquery function. */
 	Oid WebSearchToTsQueryFunctionId;
 
+	/* OID of the is_reserved_user function. */
+	Oid IsReservedUserFunctionId;
+
 	/* OID of the websearch_to_tsquery function with regconfig option. */
 	Oid WebSearchToTsQueryWithRegConfigFunctionId;
 
@@ -814,6 +825,15 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the bson_aggregation_count function */
 	Oid ApiCatalogAggregationCountFunctionId;
+
+	/* OID of the bson_aggregation_update function */
+	Oid ApiCatalogAggregationUpdateFunctionId;
+
+	/* OID of the bson_aggregation_delete function */
+	Oid ApiCatalogAggregationDeleteFunctionId;
+
+	/* OID of the bson_aggregation_find_and_modify function */
+	Oid ApiCatalogAggregationFindAndModifyFunctionId;
 
 	/* OID of the bson_aggregation_distinct function */
 	Oid ApiCatalogAggregationDistinctFunctionId;
@@ -941,9 +961,6 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the BSONDERIVATIVE aggregate function */
 	Oid ApiCatalogBsonDerivativeAggregateFunctionOid;
 
-	/* OID of the BSONAVERAGE aggregate function */
-	Oid ApiCatalogBsonAverageAggregateFunctionOid;
-
 	/* OID of the bson_array_agg function. TODO remove this in favor of the below. */
 	Oid ApiCatalogBsonArrayAggregateFunctionOid;
 
@@ -964,12 +981,6 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the BSONEXPMOVINGAVG window function */
 	Oid ApiCatalogBsonExpMovingAvgAggregateFunctionOid;
-
-	/* OID of the BSONMAX aggregate function */
-	Oid ApiCatalogBsonMaxAggregateFunctionOid;
-
-	/* OID of the BSONMIN aggregate function */
-	Oid ApiCatalogBsonMinAggregateFunctionOid;
 
 	/* OID of the BSONMAXWITHEXPR aggregate function */
 	Oid ApiInternalBsonMaxWithExprAggregateFunctionOid;
@@ -1000,18 +1011,6 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the BSONAVERAGEWITHEXPR aggregate function */
 	Oid ApiInternalBsonAvgWithExprAggregateFunctionOid;
-
-	/* OID of the BSONFIRSTONSORTED aggregate function */
-	Oid ApiCatalogBsonFirstOnSortedAggregateFunctionOid;
-
-	/* OID of the BSONLASTONSORTED aggregate function */
-	Oid ApiCatalogBsonLastOnSortedAggregateFunctionOid;
-
-	/* OID of the BSONFIRSTONSORTED aggregate function */
-	Oid BsonFirstOnSortedAggregateAllArgsFunctionOid;
-
-	/* OID of the BSONLASTONSORTED aggregate function */
-	Oid BsonLastOnSortedAggregateAllArgsFunctionOid;
 
 	/* OID of the BSONFIRST aggregate function */
 	Oid ApiCatalogBsonFirstAggregateFunctionOid;
@@ -1132,6 +1131,9 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the bson_distinct_unwind function */
 	Oid BsonDistinctUnwindFunctionOid;
+
+	/* OID of the bson_distinct_unwind function with collation */
+	Oid BsonDistinctUnwindWithCollationFunctionOid;
 
 	/* OID of the bson_expression_partition_get function */
 	Oid BsonExpressionPartitionByFieldsGetFunctionOid;
@@ -1339,6 +1341,24 @@ typedef struct DocumentDBApiOidCacheData
 
 	/* OID of the ApiInternalSchemaName.bson_stats_project function */
 	Oid BsonStatsProjectFunctionOid;
+
+	struct
+	{
+		/* OID of the ApiReadOnlyRole */
+		Oid ApiReadOnlyRoleOid;
+
+		/* OID of the ApiAdminV2Role */
+		Oid ApiAdminV2RoleOid;
+
+		/* OID of the CollectionRbacBaselineReadRole */
+		Oid CollectionRbacBaselineReadRoleOid;
+
+		/* OID of the CollectionRbacBaselineWriteRole */
+		Oid CollectionRbacBaselineWriteRoleOid;
+
+		/* OID of the CollectionRbacReadWriteAnyDatabaseRole */
+		Oid CollectionRbacReadWriteAnyDatabaseRoleOid;
+	} RoleOids;
 } DocumentDBApiOidCacheData;
 
 static DocumentDBApiOidCacheData Cache;
@@ -1369,6 +1389,8 @@ InitializeDocumentDBApiExtensionCache(void)
 																  ALLOCSET_DEFAULT_SIZES);
 
 		CacheRegisterRelcacheCallback(InvalidateDocumentDBApiCache, (Datum) 0);
+		CacheRegisterSyscacheCallback(AUTHOID, InvalidateDocumentDBApiRoleOidCache,
+									  (Datum) 0);
 	}
 
 	/* reset any previously allocated memory. Code below is sensitive to OOMs */
@@ -1407,6 +1429,20 @@ InitializeDocumentDBApiExtensionCache(void)
 }
 
 
+static void
+InvalidateDocumentDBApiRoleOidCache(Datum argument, int cacheId, uint32 hashValue)
+{
+	Assert(cacheId == AUTHOID);
+
+	if (CacheValidity == CACHE_INVALID)
+	{
+		return;
+	}
+
+	memset(&Cache.RoleOids, 0, sizeof(Cache.RoleOids));
+}
+
+
 /* Invalidates the collections cache using the collections table oid.
  * this is used to be able to invalidate the cache via the version cache
  * so that the lifetime of both are tight together.
@@ -1442,6 +1478,9 @@ InvalidateDocumentDBApiCache(Datum argument, Oid relationId)
 		CacheValidity = CACHE_INVALID;
 		ResetCollectionsCache();
 		InvalidateVersionCache();
+
+		/* Let registered consumers refresh state derived from collection metadata. */
+		NotifyCollectionMetadataInvalidated();
 	}
 	else
 	{
@@ -1459,7 +1498,17 @@ InvalidateDocumentDBApiCache(Datum argument, Oid relationId)
 			 * cache on the next call to InitializeDocumentDBApiExtensionCache.
 			 */
 		}
+
+		NotifyCollectionRelationInvalidated(relationId);
 	}
+}
+
+
+Oid
+CatalogCollectionsTableId(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+	return Cache.CollectionsTableId;
 }
 
 
@@ -3789,6 +3838,39 @@ ApiCatalogAggregationCountFunctionId(void)
 
 
 Oid
+ApiCatalogAggregationUpdateFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationUpdateFunctionId,
+		"bson_aggregation_update",
+		TEXTOID, BsonTypeId(),
+		"2.0");
+}
+
+
+Oid
+ApiCatalogAggregationDeleteFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationDeleteFunctionId,
+		"bson_aggregation_delete",
+		TEXTOID, BsonTypeId(),
+		"2.0");
+}
+
+
+Oid
+ApiCatalogAggregationFindAndModifyFunctionId(void)
+{
+	return GetBinaryOperatorFunctionIdMissingOk(
+		&Cache.ApiCatalogAggregationFindAndModifyFunctionId,
+		"bson_aggregation_find_and_modify",
+		TEXTOID, BsonTypeId(),
+		"2.0");
+}
+
+
+Oid
 ApiCatalogAggregationDistinctFunctionId(void)
 {
 	return GetBinaryOperatorFunctionIdMissingOk(
@@ -4410,14 +4492,6 @@ BsonDerivativeAggregateFunctionOid(void)
 
 
 Oid
-BsonAvgAggregateFunctionOid(void)
-{
-	return GetAggregateFunctionByName(&Cache.ApiCatalogBsonAverageAggregateFunctionOid,
-									  ApiCatalogSchemaName, "bsonaverage");
-}
-
-
-Oid
 BsonCovariancePopAggregateFunctionOid(void)
 {
 	return GetAggregateFunctionByName(
@@ -4559,14 +4633,6 @@ BsonMergeObjectsFunctionOid(void)
 
 
 Oid
-BsonMaxAggregateFunctionOid(void)
-{
-	return GetAggregateFunctionByName(&Cache.ApiCatalogBsonMaxAggregateFunctionOid,
-									  ApiCatalogSchemaName, "bsonmax");
-}
-
-
-Oid
 BsonMaxWithExprAggregateFunctionOid(void)
 {
 	return GetAggregateFunctionByName(
@@ -4581,14 +4647,6 @@ BsonMaxWithExprInternalAggregateFunctionOid(void)
 	return GetAggregateFunctionByName(
 		&Cache.ApiInternalBsonMaxWithExprInternalAggregateFunctionOid,
 		DocumentDBApiInternalSchemaName, "bsonmaxwithexprinternal");
-}
-
-
-Oid
-BsonMinAggregateFunctionOid(void)
-{
-	return GetAggregateFunctionByName(&Cache.ApiCatalogBsonMinAggregateFunctionOid,
-									  ApiCatalogSchemaName, "bsonmin");
 }
 
 
@@ -4813,26 +4871,6 @@ GetBsonFirstNLastNOnSortedAggregateFunctionOid(Oid *function, bool allArgs,
 
 
 Oid
-BsonFirstOnSortedAggregateFunctionOid(void)
-{
-	bool allArgs = false;
-	return GetBsonFirstNLastNOnSortedAggregateFunctionOid(
-		&Cache.ApiCatalogBsonFirstOnSortedAggregateFunctionOid, allArgs,
-		"bsonfirstonsorted");
-}
-
-
-Oid
-BsonFirstOnSortedAggregateAllArgsFunctionOid(void)
-{
-	bool allArgs = true;
-	return GetBsonFirstNLastNOnSortedAggregateFunctionOid(
-		&Cache.BsonFirstOnSortedAggregateAllArgsFunctionOid, allArgs,
-		"bsonfirstonsorted");
-}
-
-
-Oid
 BsonFirstAggregateFunctionOid(void)
 {
 	bool allArgs = false;
@@ -4865,26 +4903,6 @@ BsonLastAggregateAllArgsFunctionOid(void)
 	bool allArgs = true;
 	return GetBsonFirstNLastNAggregateFunctionOid(
 		&Cache.BsonLastAggregateAllArgsFunctionOid, allArgs, "bsonlast");
-}
-
-
-Oid
-BsonLastOnSortedAggregateFunctionOid(void)
-{
-	bool allArgs = false;
-	return GetBsonFirstNLastNOnSortedAggregateFunctionOid(
-		&Cache.ApiCatalogBsonLastOnSortedAggregateFunctionOid, allArgs,
-		"bsonlastonsorted");
-}
-
-
-Oid
-BsonLastOnSortedAggregateAllArgsFunctionOid(void)
-{
-	bool allArgs = true;
-	return GetBsonFirstNLastNOnSortedAggregateFunctionOid(
-		&Cache.BsonLastOnSortedAggregateAllArgsFunctionOid, allArgs,
-		"bsonlastonsorted");
 }
 
 
@@ -5121,6 +5139,19 @@ BsonDistinctUnwindFunctionOid(void)
 	return GetBinaryOperatorFunctionId(&Cache.BsonDistinctUnwindFunctionOid,
 									   "bson_distinct_unwind",
 									   BsonTypeId(), TEXTOID);
+}
+
+
+Oid
+BsonDistinctUnwindWithCollationFunctionOid(void)
+{
+	Oid argTypes[3] = { BsonTypeId(), TEXTOID, TEXTOID };
+
+	bool missingOK = true;
+	return GetSchemaFunctionIdWithNargs(
+		&Cache.BsonDistinctUnwindWithCollationFunctionOid,
+		ApiCatalogSchemaName, "bson_distinct_unwind", 3, argTypes,
+		missingOK);
 }
 
 
@@ -5488,6 +5519,24 @@ BsonOrderByFunctionOid(void)
 {
 	return GetBinaryOperatorFunctionId(&Cache.BsonOrderByFunctionId,
 									   "bson_orderby", BsonTypeId(), BsonTypeId());
+}
+
+
+/*
+ * BsonOrderByMetaFunctionOid returns the OID of the
+ * bson_orderby_meta(<bson>, bytea, tsquery) function that computes the
+ * text score for a document from an explicit index options blob and TSQuery.
+ */
+Oid
+BsonOrderByMetaFunctionOid(void)
+{
+	int nargs = 3;
+	Oid argTypes[3] = { BsonTypeId(), BYTEAOID, TSQUERYOID };
+	bool missingOk = true;
+	return GetSchemaFunctionIdWithNargs(&Cache.BsonOrderByMetaFunctionId,
+										ApiInternalSchemaNameV2,
+										"bson_orderby_meta", nargs, argTypes,
+										missingOk);
 }
 
 
@@ -7211,6 +7260,29 @@ WebSearchToTsQueryFunctionId(void)
 
 
 /*
+ * Returns the OID of the internal is_reserved_user function.
+ */
+Oid
+IsReservedUserFunctionId(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (Cache.IsReservedUserFunctionId == InvalidOid)
+	{
+		List *functionNameList = list_make2(makeString(ApiInternalSchemaName),
+											makeString("is_reserved_user"));
+		Oid paramOids[1] = { TEXTOID };
+		bool missingOK = false;
+
+		Cache.IsReservedUserFunctionId =
+			LookupFuncName(functionNameList, 1, paramOids, missingOK);
+	}
+
+	return Cache.IsReservedUserFunctionId;
+}
+
+
+/*
  * Returns the OID of the pg_catalog.websearch_to_tsquery function that
  * takes a web search query text and a text-search dictionary configuration.
  */
@@ -7868,6 +7940,87 @@ GetBsonIndexBoundsArrayTypeOid(void)
 	}
 
 	return Cache.BsonIndexBoundsArrayTypeOid;
+}
+
+
+Oid
+ApiAdminV2RoleOid(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (Cache.RoleOids.ApiAdminV2RoleOid == InvalidOid)
+	{
+		bool missingOk = false;
+		Cache.RoleOids.ApiAdminV2RoleOid = get_role_oid(ApiAdminRoleV2, missingOk);
+	}
+
+	return Cache.RoleOids.ApiAdminV2RoleOid;
+}
+
+
+Oid
+ApiReadOnlyRoleOid(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (Cache.RoleOids.ApiReadOnlyRoleOid == InvalidOid)
+	{
+		bool missingOk = false;
+		Cache.RoleOids.ApiReadOnlyRoleOid = get_role_oid(ApiReadOnlyRole, missingOk);
+	}
+
+	return Cache.RoleOids.ApiReadOnlyRoleOid;
+}
+
+
+Oid
+CollectionRbacBaselineReadRoleOid(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (!OidIsValid(Cache.RoleOids.CollectionRbacBaselineReadRoleOid))
+	{
+		bool missingOk = true;
+
+		Cache.RoleOids.CollectionRbacBaselineReadRoleOid =
+			get_role_oid(API_RBAC_BASELINE_READ_ROLE, missingOk);
+	}
+
+	return Cache.RoleOids.CollectionRbacBaselineReadRoleOid;
+}
+
+
+Oid
+CollectionRbacBaselineWriteRoleOid(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (!OidIsValid(Cache.RoleOids.CollectionRbacBaselineWriteRoleOid))
+	{
+		bool missingOk = true;
+
+		Cache.RoleOids.CollectionRbacBaselineWriteRoleOid =
+			get_role_oid(API_RBAC_BASELINE_WRITE_ROLE, missingOk);
+	}
+
+	return Cache.RoleOids.CollectionRbacBaselineWriteRoleOid;
+}
+
+
+Oid
+CollectionRbacReadWriteAnyDatabaseRoleOid(void)
+{
+	InitializeDocumentDBApiExtensionCache();
+
+	if (!OidIsValid(Cache.RoleOids.CollectionRbacReadWriteAnyDatabaseRoleOid))
+	{
+		bool missingOk = true;
+
+		Cache.RoleOids.CollectionRbacReadWriteAnyDatabaseRoleOid =
+			get_role_oid(API_RBAC_READWRITE_ANYDB_ROLE, missingOk);
+	}
+
+	return Cache.RoleOids.CollectionRbacReadWriteAnyDatabaseRoleOid;
 }
 
 

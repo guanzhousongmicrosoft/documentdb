@@ -12,7 +12,7 @@ use tokio_postgres::{error::SqlState, Row};
 
 use crate::{
     context::{ConnectionContext, Cursor, CursorId},
-    error::{DocumentDBError, ErrorCode, Result},
+    error::{backend_io_error_kind, DocumentDBError, ErrorCode, ErrorKind, Result},
     postgres::{document::ColumnByteLen, PgDocument},
     responses::{
         constant::{
@@ -62,12 +62,26 @@ pub fn postgres_sqlstate_to_i32(sql_state: &SqlState) -> i32 {
 
 documentdb_int_error_mapping!();
 
+const fn map_postgres_transport_error(
+    io_error_kind: Option<std::io::ErrorKind>,
+) -> (ErrorCode, &'static str) {
+    if matches!(io_error_kind, Some(std::io::ErrorKind::TimedOut)) {
+        (
+            ErrorCode::ExceededTimeLimit,
+            "The command being executed was terminated due to a command timeout. Consider increasing the maxTimeMS on the command.",
+        )
+    } else {
+        (ErrorCode::InternalError, generic_internal_error_message())
+    }
+}
+
 /// Converts a raw [`tokio_postgres::Error`] into a [`DocumentDBError`].
 ///
 /// If the error carries a [`SqlState`] code, the code and message are extracted
 /// and forwarded to [`map_pg_db_error`] for semantic mapping, with the original
 /// error preserved as the error source. Errors without a SQL state (e.g. I/O or
-/// connection errors) are returned as [`ErrorCode::InternalError`].
+/// connection errors) are classified from their underlying I/O cause when it
+/// is safe to do so.
 #[must_use]
 pub fn map_pg_error(
     pg_error: tokio_postgres::Error,
@@ -76,7 +90,17 @@ pub fn map_pg_error(
     activity_id: &str,
 ) -> DocumentDBError {
     let Some(sql_state) = pg_error.code().cloned() else {
-        return DocumentDBError::internal_error(format!("Non db postgres error: {pg_error}"));
+        let internal_message = format!("Non db postgres error: {pg_error}");
+        let (error_code, error_message_user) =
+            map_postgres_transport_error(backend_io_error_kind(&pg_error));
+
+        return DocumentDBError::new_documentdb_error(
+            error_code,
+            error_message_user.to_owned(),
+            Some(internal_message),
+            Some(Box::new(pg_error)),
+            ErrorKind::Gateway,
+        );
     };
 
     let db_error_message = pg_error
@@ -100,11 +124,11 @@ pub fn map_pg_error(
 }
 
 /// First applies any registered custom error mapping logic,
-/// then falls back to the generic error mapping logic in `map_pg_error_generic`
+/// then falls back to the generic error mapping logic in `map_pg_db_error_fallback`
 /// if the custom mapper returns `None`.
 ///
 /// Errors which are related to open sourced documentdb extension functionality
-/// should be mapped in `map_pg_error_generic`.
+/// should be mapped in `map_pg_db_error_fallback`.
 #[must_use]
 pub fn map_pg_db_error<'a>(
     is_in_transaction: bool,
@@ -120,7 +144,7 @@ pub fn map_pg_db_error<'a>(
         }
     }
 
-    map_pg_error_generic(
+    map_pg_db_error_fallback(
         is_in_transaction,
         is_replica_cluster,
         sql_state,
@@ -129,9 +153,37 @@ pub fn map_pg_db_error<'a>(
     )
 }
 
+/// Resource-exhaustion and privilege `SqlState`s whose mapping does not depend on
+/// transaction or activity context. Shared by query-time (`map_pg_db_error_fallback`) and
+/// pool-acquisition-time (`error::map_pool_db_error_code`) mapping so the two tables can't
+/// drift apart. `DISK_FULL` and `INVALID_PASSWORD` are deliberately not included here: those
+/// states are already intercepted earlier by `from_known_external_error_code`, so their match
+/// arms below are unreachable for real postgres errors and surface the raw `msg` rather than a
+/// fixed message; error.rs keeps its own mapping for those two.
+pub const fn map_connection_level_sqlstate(
+    sql_state: &SqlState,
+) -> Option<(ErrorCode, &'static str)> {
+    match *sql_state {
+        SqlState::OUT_OF_MEMORY => Some((
+            ErrorCode::ExceededMemoryLimit,
+            "Exceeded available memory on the server.",
+        )),
+        // Closest proxy — all cases seen so far have been OOM for this error code.
+        SqlState::INSUFFICIENT_RESOURCES => Some((
+            ErrorCode::ExceededMemoryLimit,
+            "Exceeded available resources on the server.",
+        )),
+        SqlState::INSUFFICIENT_PRIVILEGE => Some((
+            ErrorCode::Unauthorized,
+            "User is not authorized to perform this action",
+        )),
+        _ => None,
+    }
+}
+
 /// Errors which are related to open sourced documentdb extension functionality should be mapped in this function.
 #[expect(clippy::too_many_lines, reason = "complex error mapping logic")]
-fn map_pg_error_generic<'a>(
+fn map_pg_db_error_fallback<'a>(
     is_in_transaction: bool,
     is_replica_cluster: bool,
     sql_state: &'a SqlState,
@@ -165,6 +217,21 @@ fn map_pg_error_generic<'a>(
             error_code: known_error_code,
             error_message: msg,
             internal_note: None,
+        };
+    }
+
+    if let Some((error_code, error_message)) = map_connection_level_sqlstate(sql_state) {
+        if matches!(
+            *sql_state,
+            SqlState::OUT_OF_MEMORY | SqlState::INSUFFICIENT_RESOURCES
+        ) {
+            tracing::error!(activity_id = activity_id, "{error_message}");
+        }
+
+        return PostgresErrorMappedResult {
+            error_code,
+            error_message,
+            internal_note: Some(msg),
         };
     }
 
@@ -394,11 +461,6 @@ fn map_pg_error_generic<'a>(
             error_message: "Exceeded time limit while waiting for a new primary to be elected",
             internal_note: Some(msg),
         },
-        SqlState::INSUFFICIENT_PRIVILEGE => PostgresErrorMappedResult {
-            error_code: ErrorCode::Unauthorized,
-            error_message: "User is not authorized to perform this action",
-            internal_note: Some(msg),
-        },
         SqlState::T_R_DEADLOCK_DETECTED => PostgresErrorMappedResult {
             error_code: ErrorCode::WriteConflict,
             error_message: "Could not acquire lock for operation due to deadlock",
@@ -454,25 +516,6 @@ fn map_pg_error_generic<'a>(
             let error_message = "Operation was attempted in a transaction that was aborted";
             PostgresErrorMappedResult {
                 error_code: ErrorCode::OperationNotSupportedInTransaction,
-                error_message,
-                internal_note: Some(msg),
-            }
-        }
-        SqlState::OUT_OF_MEMORY => {
-            let error_message = "Exceeded available memory on the server.";
-            tracing::error!(activity_id = activity_id, "{error_message}");
-            PostgresErrorMappedResult {
-                error_code: ErrorCode::ExceededMemoryLimit,
-                error_message,
-                internal_note: Some(msg),
-            }
-        }
-        SqlState::INSUFFICIENT_RESOURCES => {
-            // Closest proxy — all cases seen so far have been OOM for this error code.
-            let error_message = "Exceeded available resources on the server.";
-            tracing::error!(activity_id = activity_id, "{error_message}");
-            PostgresErrorMappedResult {
-                error_code: ErrorCode::ExceededMemoryLimit,
                 error_message,
                 internal_note: Some(msg),
             }
@@ -823,6 +866,24 @@ mod tests {
         );
         assert_eq!(result.error_code(), ErrorCode::OutOfDiskSpace);
         assert_eq!(result.error_message(), "disk full");
+    }
+
+    #[test]
+    fn postgres_transport_timeout_maps_to_exceeded_time_limit() {
+        let (error_code, error_message) =
+            map_postgres_transport_error(Some(std::io::ErrorKind::TimedOut));
+
+        assert_eq!(error_code, ErrorCode::ExceededTimeLimit);
+        assert!(error_message.contains("maxTimeMS"));
+    }
+
+    #[test]
+    fn ambiguous_postgres_transport_error_stays_internal() {
+        let (error_code, error_message) =
+            map_postgres_transport_error(Some(std::io::ErrorKind::ConnectionReset));
+
+        assert_eq!(error_code, ErrorCode::InternalError);
+        assert_eq!(error_message, generic_internal_error_message());
     }
 
     #[test]

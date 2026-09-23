@@ -147,6 +147,22 @@ typedef struct
 	 * query cursor rewrite path (enableCursorsOnAggregationQueryRewrite).
 	 */
 	bool isAggregationQueryCursorRewrite;
+
+	/*
+	 * Whether a dynamic streaming cursor has returned a row on any prior page.
+	 */
+	bool hasFetchedRows;
+
+	/*
+	 * Top-level find limit tracked across pages in the "lim" continuation field.
+	 * Zero means untracked.
+	 */
+	int64_t streamingLimit;
+
+	/*
+	 * Top-level find skip tracked while planning.
+	 */
+	int64_t streamingSkip;
 } QueryData;
 
 
@@ -166,7 +182,7 @@ FindQueryPlan * ParseFindQueryAndLookupCollection(text *database, pgbson *findSp
 Query * ApplyParsedFindQuery(FindQueryPlan *plan, CursorParamKind cursorParamKind);
 Query * GenerateGetMoreQuery(text *database, pgbson *getMoreSpec,
 							 pgbson *continuationSpec,
-							 QueryData *queryData, bool setStatementTimeout);
+							 bool setStatementTimeout);
 Query * BuildAggregationCursorGetMoreQuery(text *database, pgbson *getMoreSpec,
 										   pgbson *continuationSpec);
 Query * GenerateCountQuery(text *database, pgbson *countSpec, bool setStatementTimeout);
@@ -237,36 +253,7 @@ GenerateFirstPageQueryData(void)
 }
 
 
-/*
- * Feature flag and version check for using optimized "WithExpr" aggregate functions
- * (e.g., bsonmaxwithexpr, bsonminwithexpr, etc.) instead of the legacy aggregates
- * that wrap bson_expression_get.
- *
- * Used by both $group accumulators and $setWindowFields window operators.
- */
-extern bool EnableNewMinMaxAccumulators;
-extern bool EnableNewWithExprAccumulators;
 extern bool EnableParallelSafeWithExprAccumulators;
-
-inline static bool
-CanUseWithExprMinMaxAggregates(void)
-{
-	return (EnableNewMinMaxAccumulators || EnableNewWithExprAccumulators) &&
-		   IsClusterVersionAtleast(DocDB_V0, 110, 0);
-}
-
-
-/*
- * Feature flag and version check for using the superset EnableNewWithExprAccumulators
- * GUC. Gates WithExpr aggregates introduced in v111.
- */
-inline static bool
-CanUseWithExprAggregates(void)
-{
-	return EnableNewWithExprAccumulators &&
-		   IsClusterVersionAtleast(DocDB_V0, 111, 0);
-}
-
 
 /*
  * Feature flag and version check for the parallel-safe internal-state variants

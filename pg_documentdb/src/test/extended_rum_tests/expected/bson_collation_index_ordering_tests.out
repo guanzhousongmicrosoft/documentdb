@@ -93,6 +93,82 @@ FROM documentdb_api_internal.documentdb_rum_page_get_entries(
  5      | { "$" : "item20", "$flags" : { "$numberInt" : "5" } }
 (5 rows)
 
+-- Collation-aware sorted limits: an index whose collation matches the requested
+-- one genuinely provides the sort order, so it streams with the remaining limit
+-- tracked. A mismatching collation does not satisfy the requested ordering, so it
+-- must fall back to a persistent cursor rather than stream rows in the wrong
+-- order.
+SET documentdb.enableDynamicCursors TO on;
+SET documentdb.enable_dynamic_cursor_with_skiplimit TO on;
+CREATE TEMP TABLE matching_collation_limit AS
+SELECT cursorpage, continuation, persistconnection
+FROM find_cursor_first_page(
+    'ord_coll_ordered_db',
+    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": true }, "limit": 4, "batchSize": 2 }',
+    81001);
+SELECT persistconnection,
+       bson_dollar_project(continuation, '{ "dc.type": 1, "lim": 1 }') AS continuation_flags
+FROM matching_collation_limit;
+ persistconnection |                               continuation_flags                                
+-------------------+---------------------------------------------------------------------------------
+ f                 | { "dc" : { "type" : { "$numberInt" : "3" } }, "lim" : { "$numberLong" : "2" } }
+(1 row)
+
+SELECT bson_dollar_project(cursorpage, '{ "cursor.nextBatch._id": 1 }')
+FROM cursor_get_more(
+    'ord_coll_ordered_db',
+    '{ "getMore": { "$numberLong": "81001" }, "collection": "ord_numord_true", "batchSize": 2 }',
+    (SELECT continuation FROM matching_collation_limit));
+                                             bson_dollar_project                                             
+-------------------------------------------------------------------------------------------------------------
+ { "cursor" : { "nextBatch" : [ { "_id" : { "$numberInt" : "5" } }, { "_id" : { "$numberInt" : "2" } } ] } }
+(1 row)
+
+DROP TABLE matching_collation_limit;
+-- If collation ordering is disabled between pages, the unchanged index still
+-- resolves by OID but no longer provides the required pathkeys.
+CREATE TEMP TABLE changed_collation_limit AS
+SELECT continuation
+FROM find_cursor_first_page(
+    'ord_coll_ordered_db',
+    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": true }, "limit": 4, "batchSize": 2 }',
+    81003);
+SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO off;
+SELECT cursorpage
+FROM cursor_get_more(
+    'ord_coll_ordered_db',
+    '{ "getMore": { "$numberLong": "81003" }, "collection": "ord_numord_true", "batchSize": 2 }',
+    (SELECT continuation FROM changed_collation_limit));
+ERROR:  Cannot resume secondary index scan with the required ordering.
+SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+DROP TABLE changed_collation_limit;
+CREATE TEMP TABLE mismatching_collation_limit AS
+SELECT cursorpage, continuation, persistconnection
+FROM find_cursor_first_page(
+    'ord_coll_ordered_db',
+    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": false }, "limit": 4, "batchSize": 2 }',
+    81002);
+SELECT persistconnection,
+       bson_dollar_project(continuation, '{ "dc.type": 1, "lim": 1 }') AS continuation_flags
+FROM mismatching_collation_limit;
+ persistconnection | continuation_flags 
+-------------------+--------------------
+ t                 | { }
+(1 row)
+
+SELECT bson_dollar_project(cursorpage, '{ "cursor.nextBatch._id": 1 }')
+FROM cursor_get_more(
+    'ord_coll_ordered_db',
+    '{ "getMore": { "$numberLong": "81002" }, "collection": "ord_numord_true", "batchSize": 2 }',
+    (SELECT continuation FROM mismatching_collation_limit));
+                                             bson_dollar_project                                             
+-------------------------------------------------------------------------------------------------------------
+ { "cursor" : { "nextBatch" : [ { "_id" : { "$numberInt" : "3" } }, { "_id" : { "$numberInt" : "4" } } ] } }
+(1 row)
+
+DROP TABLE mismatching_collation_limit;
+RESET documentdb.enable_dynamic_cursor_with_skiplimit;
+RESET documentdb.enableDynamicCursors;
 -- ===== Section 2: Single-key ordered index with numericOrdering=false ======
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
   'ord_coll_ordered_db',
@@ -7385,7 +7461,6 @@ $cmd$);
 -- 29ag: a collated group cannot stream from a simple index. "item02" and
 -- "item2" compare equal with numericOrdering but are separated in binary index
 -- order, so omitting the Sort would split one logical group into two.
-SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT documentdb_api.insert_one(
   'ord_coll_ordered_db',
   'ord_orderby_samefield',
@@ -7509,7 +7584,6 @@ $cmd$);
                            Order By: (document |-<> '{ "a" : { "$numberInt" : "1" } }'::bson)
 (19 rows)
 
-RESET documentdb.enableNewWithExprAccumulators;
 -- ============================================================
 -- Section 30: index-only scan under collation on collation-aware
 -- ordered indexes led by _id and by country.
@@ -7957,7 +8031,6 @@ SELECT document FROM bson_aggregation_find('ord_coll_ios_db', '{ "find": "ios_co
 (3 rows)
 
 -- Field-consuming aggregate targets also require the stored row values.
-SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('ord_coll_ios_db', '{ "aggregate": "ios_coll", "pipeline": [ { "$match": { "country": "usa" } }, { "$group": { "_id": null, "value": { "$first": "$country" } } } ], "hint": "ios_country_id_en_s1", "collation": { "locale": "en", "strength": 1 } }') $$, p_ignore_heap_fetches => true);
                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                         
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -8025,7 +8098,6 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
                Order By: (collection.document |-<> '{ "country" : { "$numberInt" : "1" } }'::bson)
 (18 rows)
 
-RESET documentdb.enableNewWithExprAccumulators;
 -- The index, rather than the query, determines whether values can be reconstructed.
 SELECT documentdb_api_internal.create_indexes_non_concurrently('ord_coll_ios_db', '{ "createIndexes": "ios_coll", "indexes": [ { "key": { "seq": 1, "country": 1 }, "storageEngine": { "enableOrderedIndex": true }, "collation": { "locale": "en", "strength": 1 }, "name": "ios_seq_country_en_s1" }, { "key": { "seq": 1, "country": 1 }, "storageEngine": { "enableOrderedIndex": true }, "name": "ios_seq_country_simple" } ] }', true);
                                                                                                    create_indexes_non_concurrently                                                                                                    

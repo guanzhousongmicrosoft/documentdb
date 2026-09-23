@@ -370,6 +370,7 @@ Query * HandleNativeVectorSearch(const bson_value_t *existingValue, Query *query
 
 /* Metadata based query generators */
 Query * GenerateConfigDatabaseQuery(AggregationPipelineBuildContext *context);
+Query * GenerateAdminDatabaseQuery(AggregationPipelineBuildContext *context);
 
 bool IsPartitionByFieldsOnShardKey(const pgbson *partitionByFields,
 								   const MongoCollection *collection);
@@ -412,6 +413,12 @@ ShouldSkipShardKeyFilterOnBaseTable(AggregationPipelineBuildContext *context)
 		   context->mongoCollection->shardKey == NULL &&
 		   context->mongoCollection->isSingleShardTable;
 }
+
+
+void FillRteForMongoCollection(Query *query, RangeTblEntry *rte,
+							   const char *collectionAlias,
+							   bool *allowShardBaseTable,
+							   MongoCollection *collection);
 
 
 #endif

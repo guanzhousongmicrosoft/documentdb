@@ -9,6 +9,15 @@
 # the gateway's status.
 configFile=""
 
+# Every operator setting (flag, env var, default, type) is declared once in
+# the sibling settings table; this script parses, defaults and validates from
+# it. Loaded before cleanup() is defined because cleanup reads a default.
+# shellcheck source=documentdb_local_settings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/documentdb_local_settings.sh" || {
+    echo "Error: cannot load documentdb_local_settings.sh beside this script." >&2
+    exit 1
+}
+
 # Initialized up front so cleanup() — which can now also run from the gateway
 # self-exit path — never dereferences an unset PID var under the `set -u`
 # that sourcing utils.sh (CREATE_USER=true path) turns on.
@@ -48,7 +57,7 @@ cleanup() {
     # while the gateway self-exit path is already running this cleanup.
     if [ "${POSTGRES_STOPPED:-false}" != "true" ]; then
         POSTGRES_STOPPED=true
-        if [ "${START_POSTGRESQL:-true}" = "true" ] && [ -n "${DATA_PATH:-}" ] \
+        if [ "${START_POSTGRESQL:-}" = "true" ] && [ -n "${DATA_PATH:-}" ] \
                 && [ -f "${DATA_PATH}/postmaster.pid" ]; then
             pgctl_bin="$(command -v pg_ctl 2>/dev/null || true)"
             if [ -n "$pgctl_bin" ]; then
@@ -99,6 +108,15 @@ start_log_streaming() {
 
 # Print help message
 usage() {
+    local d_gw d_pg d_user d_data d_init d_log d_tls d_toast
+    d_gw="$(documentdb_local_setting_default DOCUMENTDB_PORT)"
+    d_pg="$(documentdb_local_setting_default POSTGRESQL_PORT)"
+    d_user="$(documentdb_local_setting_default USERNAME)"
+    d_data="$(documentdb_local_setting_default DATA_PATH)"
+    d_init="$(documentdb_local_setting_default INIT_DATA_PATH)"
+    d_log="$(documentdb_local_setting_default LOG_LEVEL)"
+    d_tls="$(documentdb_local_setting_default TLS_MODE)"
+    d_toast="$(documentdb_local_setting_default DOCUMENTDB_TOAST_COMPRESSION)"
     cat << EOF
 Launches DocumentDB
 
@@ -113,30 +131,45 @@ Optional arguments:
                         container (e.g. if KEY_FILE=/mykey.key, you'd add an option like the following to your
                         docker run: --mount type=bind,source=./mykey.key,target=/mykey.key)
                         Overrides KEY_FILE environment variable.
-  --data-path [PATH]    Specify a directory for data. Frequently used with docker run --mount option 
-                        (e.g. if DATA_PATH=/usr/documentdb/data, you'd add an option like the following to your 
+  --data-path [PATH]    Specify a directory for data. Frequently used with docker run --mount option
+                        (e.g. if DATA_PATH=/usr/documentdb/data, you'd add an option like the following to your
                         docker run: --mount type=bind,source=./.local/data,target=/usr/documentdb/data)
-                        Defaults to /data
+                        Defaults to ${d_data}
                         Overrides DATA_PATH environment variable.
+                        Fast first boot: the image ships a pre-initialized
+                        data directory that Docker copies into fresh NAMED or
+                        ANONYMOUS volumes on /data; empty custom paths are
+                        populated from it too. A bind-mounted host directory
+                        on /data is NOT populated by Docker, so its first
+                        boot runs full initialization and is slower. The
+                        cluster's locale/encoding are fixed inside the
+                        pre-built directory; only a full re-initialization
+                        (e.g. --disable-extended-rum on a fresh volume)
+                        re-reads locale environment variables.
+                        If PostgreSQL reports a permission error on files a
+                        previously interrupted start left behind, set
+                        DOCUMENTDB_FORCE_OWNERSHIP_REPAIR=true to force a
+                        full recursive ownership repair on the next start.
   --documentdb-port     The port of the DocumentDB endpoint on the container. 
-                        You still need to publish this port (e.g. -p 10260:10260).
-                        Defaults to 10260
+                        You still need to publish this port (e.g. -p ${d_gw}:${d_gw}).
+                        Defaults to ${d_gw}
                         Overrides DOCUMENTDB_PORT environment variable.
   --enable-telemetry    Enable telemetry data sent to the usage colletor (Azure Application Insights). 
                         Overrides ENABLE_TELEMETRY environment variable.
   --log-level           The verbosity of logs that will be emitted.
                         Overrides LOG_LEVEL environment variable.
-                          quiet, error, warn, info (default), debug, trace
+                          $(documentdb_local_setting_allowed LOG_LEVEL)
+                        Defaults to ${d_log}.
   --username            Specify the username for the DocumentDB.
-                        Defaults to default_user
+                        Defaults to ${d_user}
                         Overrides USERNAME environment variable.
   --password            Specify the password for the DocumentDB.
                         REQUIRED.
                         Overrides PASSWORD environment variable.
   --create-user         Specify whether to create a user. 
-                        Defaults to true.
+                        Defaults to $(documentdb_local_setting_default CREATE_USER).
   --start-pg            Specify whether to start the PostgreSQL server.
-                        Defaults to true. Advanced/test use only: false
+                        Defaults to $(documentdb_local_setting_default START_POSTGRESQL). Advanced/test use only: false
                         expects an external PostgreSQL, which you run and
                         configure yourself, to be listening already on
                         localhost at --pg-port, and this entrypoint then
@@ -148,18 +181,18 @@ Optional arguments:
                         undefined-function error rather than the documented
                         unsupported-command response.
   --pg-port             Specify the port for the PostgreSQL server.
-                        Defaults to 9712.
+                        Defaults to ${d_pg}.
                         Overrides POSTGRESQL_PORT environment variable.
   --owner               Specify the owner of the DocumentDB.
                         Overrides OWNER environment variable.
-                        defaults to documentdb.
+                        Defaults to the current user.
   --allow-external-connections [true|false]
                         Open the container's internal PostgreSQL server to all
                         interfaces (listen_addresses='*' + a permissive pg_hba
                         entry). This does NOT affect the gateway, which always
                         listens on all interfaces on the DocumentDB port; it
                         only exposes the backend PostgreSQL port directly.
-                        Defaults to false.
+                        Defaults to $(documentdb_local_setting_default ALLOW_EXTERNAL_CONNECTIONS).
                         Overrides ALLOW_EXTERNAL_CONNECTIONS environment variable.
   --init-data [true|false]
                         Enable initialization with built-in sample data.
@@ -173,7 +206,7 @@ Optional arguments:
                         Runs once per data volume (on a fresh volume), so scripts should be
                         idempotent; a failed run is not retried on restart. To re-run, start
                         with a fresh data volume.
-                        Defaults to /init_doc_db.d
+                        Defaults to ${d_init}
                         Overrides INIT_DATA_PATH environment variable.
   --skip-init-data      Skip initialization with built-in sample data.
                         Legacy alias for --init-data false.
@@ -183,10 +216,17 @@ Optional arguments:
   --disable-extended-rum
                         Disable the use of extended_rum for indexes.
                         By default, extended rum is enabled.
+                        The setting is fixed when a data directory is first
+                        initialized and cannot be changed for an existing one.
+                        On a fresh data volume this flag re-initializes the
+                        image's pre-built data directory (destroying only that
+                        untouched template); on a volume with existing data it
+                        has no effect and the volume's original setting stays
+                        active. Start with a fresh data volume to change it.
                         Overrides DISABLE_EXTENDED_RUM environment variable.
   --toast-compression [lz4|pglz|default]
                         Compression used for values the container's PostgreSQL
-                        stores out of line (TOAST). lz4 (the default)
+                        stores out of line (TOAST). ${d_toast} (the default)
                         decompresses faster for large documents; pglz is
                         PostgreSQL's built-in method; default leaves the
                         server's own setting alone. Affects newly written
@@ -199,7 +239,7 @@ Optional arguments:
                         Overrides DOCUMENTDB_TOAST_COMPRESSION environment variable.
   --tlsMode [MODE]      Set the TLS mode for client connections.
                         Supported modes: disabled, allowTLS, requireTLS.
-                        By default, the gateway accepts both plain and TLS connections (allowTLS).
+                        By default, the gateway accepts both plain and TLS connections (${d_tls}).
                         disabled behaves the same as allowTLS; the gateway has no plain-only mode.
                         When set to requireTLS, plain (non-TLS) connections are rejected.
                         Overrides TLS_MODE environment variable.
@@ -232,155 +272,167 @@ fi
 echo "[ENTRYPOINT] DocumentDB container starting..."
 echo "[ENTRYPOINT] Log streaming will be enabled for PostgreSQL logs"
 
-# Handle arguments
-
-while [[ $# -gt 0 ]];
-do
-  case $1 in
-    -h|--help) 
-        usage;
-        exit 0;;
-
-    --cert-path)
-        shift
-        export CERT_PATH=$1
-        shift;;
-
-    --key-file)
-        shift
-        export KEY_FILE=$1
-        shift;;
-
-    --data-path)
-        shift
-        export DATA_PATH=$1
-        shift;;
-
-    --documentdb-port)
-        shift
-        export DOCUMENTDB_PORT=$1
-        shift;;
-
-    --enable-telemetry)
-        shift
-        export ENABLE_TELEMETRY=$1
-        shift;;
-        
-    --log-level)
-        shift
-        export LOG_LEVEL=$1
-        shift;;
-
-    --username)
-        shift
-        export USERNAME=$1
-        shift;;
-
-    --password)
-        shift
-        export PASSWORD=$1
-        shift;;
-
-    --create-user)
-        shift
-        export CREATE_USER=$1
-        shift;;
-
-    --start-pg)
-        shift
-        export START_POSTGRESQL=$1
-        shift;;
-
-    --pg-port)
-        shift
-        export POSTGRESQL_PORT=$1
-        shift;;
-
-    --owner)
-        shift
-        export OWNER=$1
-        shift;;
-
-    --allow-external-connections)
-        shift
-        export ALLOW_EXTERNAL_CONNECTIONS=$1
-        shift;;
-
-    --init-data)
-        shift
-        export INIT_DATA=$1
-        shift;;
-
-    --init-data-path)
-        shift
-        export INIT_DATA_PATH=$1
-        shift;;
-
-    --skip-init-data)
-        export INIT_DATA=false
-        export SKIP_INIT_DATA=true
-        shift;;
-
-    --disable-extended-rum)
-        export DISABLE_EXTENDED_RUM=true
-        shift;;
-
-    --toast-compression)
-        shift
-        # A missing/empty value would read as "no explicit choice" and
-        # silently take the quiet-degradation path reserved for the built-in
-        # default — fail loudly instead (documentdb-tune rejects both too).
-        if [ $# -lt 1 ] || [ -z "$1" ]; then
-            echo "--toast-compression requires a value: lz4, pglz, or default." >&2
-            exit 1
-        fi
-        export DOCUMENTDB_TOAST_COMPRESSION=$1
-        shift;;
-
-    --tlsMode)
-        export TLS_MODE="$2"
-        shift; shift;;
-
-    -*)
-        echo "Unknown option $1"
-        exit 1;; 
-  esac
+# Handle arguments. Every value flag is looked up in the settings table and
+# exported as its environment variable, so child processes see CLI values as
+# env. Only the flags that are not "one flag, one value" are spelled here.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0 ;;
+        --skip-init-data)
+            # Legacy alias for --init-data false; the two variables are
+            # reconciled below.
+            export INIT_DATA=false
+            export SKIP_INIT_DATA=true
+            shift
+            continue ;;
+        --disable-extended-rum)
+            # Bare flag; there is no positive spelling on the command line.
+            export DISABLE_EXTENDED_RUM=true
+            shift
+            continue ;;
+    esac
+    if ! _setting_row="$(documentdb_local_setting_row_by_flag "$1")"; then
+        echo "Unknown option $1" >&2
+        exit 1
+    fi
+    _setting_var="${_setting_row#*|}"
+    _setting_var="${_setting_var%%|*}"
+    if [ $# -lt 2 ] || [ -z "$2" ]; then
+        # A missing or empty value would read as "not set" and take the
+        # default silently; fail loudly instead.
+        _setting_allowed="$(documentdb_local_setting_allowed "${_setting_var}")"
+        echo "$1 requires a value${_setting_allowed:+: ${_setting_allowed}}." >&2
+        exit 1
+    fi
+    export "${_setting_var}=$2"
+    shift 2
 done
+unset _setting_row _setting_var _setting_allowed
 
-# Set default values if not provided.
-#
-# Track whether USERNAME / PASSWORD came from the operator (CLI flag or
-# explicit env var) vs. Fell back to the built-in default. The built-in
-# defaults exist for legacy / evaluation use, but a loud warning is
-# printed when they apply because anyone reachable on the published port
-# can authenticate with default_user / Admin100. A future major version
-# will refuse to start without --password / PASSWORD set explicitly.
-# A single flag suffices: the warning below fires when EITHER the username or
-# the password fell back to the built-in default, and the warning text is
-# static (it does not distinguish which one defaulted).
+# Record which settings the operator supplied (CLI flag or non-empty
+# environment variable) BEFORE any default is applied. Two things read this:
+# the default-credentials warning, and the TOAST resolution, which fails
+# loudly on an explicit request the build cannot honour but degrades quietly
+# for the built-in default. The built-in credential defaults exist for
+# legacy / evaluation use; a future major version will refuse to start
+# without --password / PASSWORD set explicitly.
+DOCUMENTDB_LOCAL_EXPLICIT=" "
+for _setting_row in "${DOCUMENTDB_LOCAL_SETTINGS[@]}"; do
+    IFS='|' read -r _f _setting_var _setting_default _setting_type _setting_label <<< "${_setting_row}"
+    if [ -n "${!_setting_var:-}" ]; then
+        DOCUMENTDB_LOCAL_EXPLICIT="${DOCUMENTDB_LOCAL_EXPLICIT}${_setting_var} "
+    elif [ -n "${_setting_default}" ] && [ "${_setting_var}" != "DOCUMENTDB_TOAST_COMPRESSION" ]; then
+        # Inside the image the Dockerfile's ENV block already supplies these;
+        # the table default is what makes a source-checkout run work.
+        export "${_setting_var}=${_setting_default}"
+    fi
+done
+setting_is_explicit() {
+    case "${DOCUMENTDB_LOCAL_EXPLICIT}" in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 USING_DEFAULT_CREDS=false
-if [ -z "${USERNAME:-}" ] || [ -z "${PASSWORD:-}" ]; then
+if ! setting_is_explicit USERNAME || ! setting_is_explicit PASSWORD; then
     USING_DEFAULT_CREDS=true
 fi
+# The one computed default: the user this process runs as.
 export OWNER=${OWNER:-$(whoami)}
-export DATA_PATH=${DATA_PATH:-/data}
-export DOCUMENTDB_PORT=${DOCUMENTDB_PORT:-10260}
-export POSTGRESQL_PORT=${POSTGRESQL_PORT:-9712}
-export USERNAME=${USERNAME:-default_user}
-export PASSWORD=${PASSWORD:-Admin100}
-export CREATE_USER=${CREATE_USER:-true}
-export START_POSTGRESQL=${START_POSTGRESQL:-true}
-export INIT_DATA=${INIT_DATA:-}
-export INIT_DATA_PATH=${INIT_DATA_PATH:-/init_doc_db.d}
+
+# Runtime state file consumed by healthcheck.sh. Written only once startup
+# completes (see the ready banner below), so its presence doubles as the
+# readiness marker. Remove any leftover from a previous boot of this
+# container (e.g. `docker restart`) so the healthcheck cannot report healthy
+# while this boot is still starting up — and verify both the removal and
+# that the path is writable, failing NOW rather than at the publish: a
+# failure discovered there would surface only after the full (up to
+# multi-minute) boot, as a container that works but never reports healthy.
+export DOCUMENTDB_RUNTIME_STATE_FILE=${DOCUMENTDB_RUNTIME_STATE_FILE:-/tmp/documentdb-local-runtime.env}
+rm -f "$DOCUMENTDB_RUNTIME_STATE_FILE" "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" 2>/dev/null
+if [ -e "$DOCUMENTDB_RUNTIME_STATE_FILE" ] \
+        || ! : > "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" 2>/dev/null; then
+    echo "Error: cannot reset or write the runtime state file at $DOCUMENTDB_RUNTIME_STATE_FILE, which the container health check depends on. Set DOCUMENTDB_RUNTIME_STATE_FILE to a writable path." >&2
+    exit 1
+fi
+rm -f "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp"
+
+# Validate every set value against its declared type. An empty value counts
+# as unset (INIT_DATA, CERT_PATH and KEY_FILE are legitimately empty).
+# Unsigned integers are also normalized to base 10 so a zero-padded value
+# such as "010260" cannot be read as octal by a later $(( )).
+for _setting_row in "${DOCUMENTDB_LOCAL_SETTINGS[@]}"; do
+    IFS='|' read -r _f _setting_var _setting_default _setting_type _setting_label <<< "${_setting_row}"
+    _setting_value="${!_setting_var:-}"
+    [ -n "${_setting_value}" ] || continue
+    case "${_setting_type}" in
+        uint)
+            if ! [[ "${_setting_value}" =~ ^[0-9]+$ ]]; then
+                echo "Invalid ${_setting_label} value ${_setting_value}, must be a number" >&2
+                exit 1
+            fi
+            export "${_setting_var}=$((10#${_setting_value}))" ;;
+        bool)
+            if [ "${_setting_value}" != "true" ] && [ "${_setting_value}" != "false" ]; then
+                echo "Invalid ${_setting_label} value ${_setting_value}, must be true or false" >&2
+                exit 1
+            fi ;;
+        enum:*)
+            case ",${_setting_type#enum:}," in
+                *",${_setting_value},"*) ;;
+                *)
+                    echo "Invalid ${_setting_label} value '${_setting_value}', must be one of: $(documentdb_local_setting_allowed "${_setting_var}")" >&2
+                    exit 1 ;;
+            esac ;;
+    esac
+done
+unset _setting_row _f _setting_var _setting_default _setting_type _setting_label _setting_value
+
+# Cross-setting rules the table cannot express.
+if { [ -n "${CERT_PATH:-}" ] && [ -z "${KEY_FILE:-}" ]; } || \
+   { [ -z "${CERT_PATH:-}" ] && [ -n "${KEY_FILE:-}" ]; }; then
+    echo "Error: Both CERT_PATH and KEY_FILE must be set together, or neither should be set." >&2
+    exit 1
+fi
+
+# SKIP_INIT_DATA is the legacy negative spelling of INIT_DATA. Reconcile
+# once, then only INIT_DATA is consulted: an unset INIT_DATA follows
+# SKIP_INIT_DATA (false enables sample data), and SKIP_INIT_DATA is rewritten
+# from the result so both read consistently.
 export SKIP_INIT_DATA=${SKIP_INIT_DATA:-}
+if [ -n "$SKIP_INIT_DATA" ] && [ "$SKIP_INIT_DATA" != "true" ] && [ "$SKIP_INIT_DATA" != "false" ]; then
+    echo "Invalid skip-init-data value $SKIP_INIT_DATA, must be true or false" >&2
+    exit 1
+fi
+if [ -z "${INIT_DATA:-}" ]; then
+    if [ "$SKIP_INIT_DATA" = "false" ]; then
+        export INIT_DATA=true
+    else
+        export INIT_DATA=false
+    fi
+fi
+if [ "$INIT_DATA" = "true" ]; then
+    export SKIP_INIT_DATA=false
+else
+    export SKIP_INIT_DATA=true
+fi
+
+# Image-internal paths and identities. Not operator settings: they describe
+# where this image put things, and only a source-checkout run overrides them.
 export DISABLE_EXTENDED_RUM=${DISABLE_EXTENDED_RUM:-false}
-export TLS_MODE=${TLS_MODE:-allowTLS}
 export GATEWAY_HOME=${GATEWAY_HOME:-/home/documentdb/gateway}
 export DOCUMENTDB_LOG_DIR=${DOCUMENTDB_LOG_DIR:-/var/log/documentdb}
-export POSTGRES_LOG_VERSION=${PG_VERSION_USED:-17}
+# The PostgreSQL major this run assumes, resolved once. Inside the image
+# PG_VERSION_USED always comes from the Dockerfile; the fallback only applies
+# to a source checkout, where it means the developer's PostgreSQL.
+PG_MAJOR_ASSUMED=${PG_VERSION_USED:-17}
+export POSTGRES_LOG_VERSION=${PG_MAJOR_ASSUMED}
 export SYSTEM_POSTGRES_LOG=${SYSTEM_POSTGRES_LOG:-/var/log/postgresql/postgresql-${POSTGRES_LOG_VERSION}-main.log}
 export DOCUMENTDB_RUNTIME_USER=${DOCUMENTDB_RUNTIME_USER:-documentdb}
 export DOCUMENTDB_RUNTIME_GROUP=${DOCUMENTDB_RUNTIME_GROUP:-$DOCUMENTDB_RUNTIME_USER}
+
 
 # Resolve script and data directories.
 # Package-installed paths take priority over the legacy Docker layout.
@@ -442,13 +494,13 @@ fi
 # DOCUMENTDB_ALLOW_DEFAULT_PASSWORD=true.
 if [ "${USING_DEFAULT_CREDS}" = "true" ]; then
     if [ "${DOCUMENTDB_ALLOW_DEFAULT_PASSWORD:-false}" != "true" ]; then
-        cat >&2 <<'WARN'
+        cat >&2 <<WARN
 ========================================================================
 WARNING: DocumentDB is starting with the BUILT-IN DEFAULT CREDENTIALS.
 ========================================================================
 
-  Username: default_user   (because --username / USERNAME was not set)
-  Password: Admin100       (because --password / PASSWORD was not set)
+  Username: $(documentdb_local_setting_default USERNAME)   (because --username / USERNAME was not set)
+  Password: $(documentdb_local_setting_default PASSWORD)       (because --password / PASSWORD was not set)
 
 These credentials are PUBLIC and well-known. Any client that can reach
 the gateway port can authenticate as the admin user. Do NOT use this
@@ -472,98 +524,13 @@ echo "Using username: $USERNAME"
 echo "Using owner: $OWNER"
 echo "Using data path: $DATA_PATH"
 
-# Reject a username the gateway would refuse at authentication time (a reserved
-# role name or a BlockedRolePrefix) before starting anything, so the container
-# never reports ready with a user that can never authenticate.
-bash "$(dirname "${BASH_SOURCE[0]}")/documentdb_validate_username.sh" "$USERNAME" || exit 1
-
-if { [ -n "${CERT_PATH:-}" ] && [ -z "${KEY_FILE:-}" ]; } || \
-   { [ -z "${CERT_PATH:-}" ] && [ -n "${KEY_FILE:-}" ]; }; then
-    echo "Error: Both CERT_PATH and KEY_FILE must be set together, or neither should be set."
-    exit 1
-fi
-
-num='^[0-9]+$'
-if ! [[ "$DOCUMENTDB_PORT" =~ $num ]]; then
-    echo "Invalid port value $DOCUMENTDB_PORT, must be a number"
-    exit 1
-fi
-# Normalize to base-10 so a zero-padded value (e.g. "010260") is not later
-# parsed as invalid octal by the jq ".GatewayListenPort = $DOCUMENTDB_PORT"
-# numeric assignment, which would error and — with no `set -e` — skip the
-# &&-chained config mv, silently leaving the gateway on the default port.
-DOCUMENTDB_PORT=$((10#$DOCUMENTDB_PORT))
-
-if ! [[ "$POSTGRESQL_PORT" =~ $num ]]; then
-    echo "Invalid PostgreSQL port value $POSTGRESQL_PORT, must be a number"
-    exit 1
-fi
-POSTGRESQL_PORT=$((10#$POSTGRESQL_PORT))
-
-if [ -n "$ENABLE_TELEMETRY" ] && \
-   [ "$ENABLE_TELEMETRY" != "true" ] && \
-   [ "$ENABLE_TELEMETRY" != "false" ]; then
-    echo "Invalid enable-telemetry value $ENABLE_TELEMETRY, must be true or false"
-    exit 1
-fi
-
-if [ -n "$LOG_LEVEL" ] && \
-   [ "$LOG_LEVEL" != "quiet" ] && \
-   [ "$LOG_LEVEL" != "error" ] && \
-   [ "$LOG_LEVEL" != "warn" ] && \
-   [ "$LOG_LEVEL" != "info" ] && \
-   [ "$LOG_LEVEL" != "debug" ] && \
-   [ "$LOG_LEVEL" != "trace" ]; then
-    echo "Invalid log level value $LOG_LEVEL, must be one of: quiet, error, warn, info, debug, trace"
-    exit 1
-fi
-
-if [ -n "$INIT_DATA" ] && \
-   [ "$INIT_DATA" != "true" ] && \
-   [ "$INIT_DATA" != "false" ]; then
-    echo "Invalid init-data value $INIT_DATA, must be true or false"
-    exit 1
-fi
-
-if [ -n "$SKIP_INIT_DATA" ] && \
-   [ "$SKIP_INIT_DATA" != "true" ] && \
-   [ "$SKIP_INIT_DATA" != "false" ]; then
-    echo "Invalid skip-init-data value $SKIP_INIT_DATA, must be true or false"
-    exit 1
-fi
-
-# Same strict true/false contract as the other booleans above. This matters
-# more than usual here: before the --allow-external-connections fix this
-# setting was accidentally always-on, so legacy users may be passing 1/yes/
-# TRUE and expecting an open PostgreSQL port — silently treating those as
-# false would close their port with nothing in the logs explaining why.
-if [ -n "${ALLOW_EXTERNAL_CONNECTIONS:-}" ] && \
-   [ "$ALLOW_EXTERNAL_CONNECTIONS" != "true" ] && \
-   [ "$ALLOW_EXTERNAL_CONNECTIONS" != "false" ]; then
-    echo "Invalid allow-external-connections value $ALLOW_EXTERNAL_CONNECTIONS, must be true or false"
-    exit 1
-fi
-
-if [ -z "$INIT_DATA" ]; then
-    if [ "$SKIP_INIT_DATA" = "false" ]; then
-        export INIT_DATA=true
-    else
-        export INIT_DATA=false
-    fi
-fi
-
-if [ "$INIT_DATA" = "true" ]; then
-    export SKIP_INIT_DATA=false
-else
-    export SKIP_INIT_DATA=true
-fi
-
-case "$TLS_MODE" in
-    disabled|allowTLS|requireTLS) ;;
-    *)
-        echo "Invalid tlsMode value '$TLS_MODE', must be one of: disabled, allowTLS, requireTLS"
-        exit 1;;
-esac
+# Reject a username the gateway would refuse at authentication time (a
+# BlockedRolePrefix) before starting anything, so the container never reports
+# ready with a user that can never authenticate. Pass CONFIG_DIR explicitly:
+# the validator's own default resolves to the legacy layout, while the gateway
+# is started from $CONFIG_DIR/SetupConfiguration.json (see the cp below).
+bash "$(dirname "${BASH_SOURCE[0]}")/documentdb_validate_username.sh" \
+    "$USERNAME" "$CONFIG_DIR/SetupConfiguration.json" || exit 1
 
 # TOAST compression request. Resolved and validated here, outside the
 # PostgreSQL-start branch, so a bad value is rejected in every mode; the same
@@ -571,18 +538,14 @@ esac
 # here. toast_requested keeps the RAW request so the failure branches below can
 # tell an explicit choice (fail loudly) from the built-in default (degrade
 # quietly), which is the documentdb-tune contract.
+# Validated above; the default is applied here rather than in the generic
+# pass because an explicit request fails loudly where the default degrades.
 toast_requested="${DOCUMENTDB_TOAST_COMPRESSION:-}"
-toast_explicit=true
-if [ -z "$toast_requested" ]; then
-    toast_explicit=false
+toast_explicit=false
+if setting_is_explicit DOCUMENTDB_TOAST_COMPRESSION; then
+    toast_explicit=true
 fi
-toast_compression="${toast_requested:-lz4}"
-case "$toast_compression" in
-    lz4|pglz|default) ;;
-    *)
-        echo "Error: Invalid TOAST compression value '$toast_compression' (from --toast-compression or DOCUMENTDB_TOAST_COMPRESSION), must be one of: lz4, pglz, default" >&2
-        exit 1;;
-esac
+toast_compression="${toast_requested:-$(documentdb_local_setting_default DOCUMENTDB_TOAST_COMPRESSION)}"
 
 # No server to configure here, so say the request is dropped instead of
 # dropping it silently. A warning, not an error: the variable is often set once
@@ -604,18 +567,68 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         echo "Creating data directory: $DATA_PATH"
         sudo mkdir -p "$DATA_PATH"
     fi
-    
-    # Change ownership to the runtime user to ensure we can write/delete files
-    echo "Setting ownership of $DATA_PATH to ${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}"
-    sudo chown -R "${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}" "$DATA_PATH"
-    
-    # Ensure we have full permissions on the directory
-    echo "Setting permissions on $DATA_PATH"
-    sudo chmod -R 750 "$DATA_PATH"
-    
-    if [ "${ALLOW_EXTERNAL_CONNECTIONS:-false}" = "true" ]; then
+
+    # Repair ownership only when the data directory (or the PG_VERSION file
+    # inside it, which catches e.g. a root-restored backup under a correctly
+    # owned top-level directory) is not already owned by the runtime user. An
+    # unconditional recursive chown/chmod rewrites metadata for every file in
+    # the cluster on every boot, which gets slow on large data volumes
+    # (issue #480).
+    # Known residual: this two-sample probe can miss interior files left
+    # foreign-owned by a repair interrupted after the top directory was
+    # converted (GNU chown -R converts post-order, so this needs the top dir
+    # to have been correct already). PostgreSQL then fails with a clear
+    # permission error; DOCUMENTDB_FORCE_OWNERSHIP_REPAIR=true is the escape
+    # hatch that forces the full recursive repair without sacrificing the
+    # fast path for everyone else.
+    data_dir_owner=$(stat -c '%U' "$DATA_PATH" 2>/dev/null)
+    pg_version_owner="$DOCUMENTDB_RUNTIME_USER"
+    if [ -f "$DATA_PATH/PG_VERSION" ]; then
+        pg_version_owner=$(stat -c '%U' "$DATA_PATH/PG_VERSION" 2>/dev/null)
+    fi
+    if [ "${DOCUMENTDB_FORCE_OWNERSHIP_REPAIR:-false}" = "true" ] || \
+       [ "$data_dir_owner" != "${DOCUMENTDB_RUNTIME_USER}" ] || \
+       [ "$pg_version_owner" != "${DOCUMENTDB_RUNTIME_USER}" ]; then
+        # Change ownership to the runtime user to ensure we can write/delete files
+        echo "Setting ownership of $DATA_PATH to ${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}"
+        sudo chown -R "${DOCUMENTDB_RUNTIME_USER}:${DOCUMENTDB_RUNTIME_GROUP}" "$DATA_PATH"
+
+        # Ensure we have full permissions on the directory
+        echo "Setting permissions on $DATA_PATH"
+        sudo chmod -R 750 "$DATA_PATH"
+    else
+        # PostgreSQL refuses to start when the data directory itself is more
+        # permissive than 0750; keep that guarantee without a recursive walk.
+        chmod 750 "$DATA_PATH" 2>/dev/null || sudo chmod 750 "$DATA_PATH"
+    fi
+
+    # Adopt the image-baked, pre-initialized data directory when one is present
+    # so first boot skips initdb + CREATE EXTENSION (issue #480). Extracted to
+    # a sibling script to keep this entrypoint lean; see that script for the
+    # full rationale (marker lifecycle, pristineness rules, custom --data-path
+    # handling). Exit 10 means the requested options conflict with the baked
+    # template and the server bootstrap must force a clean re-initialization;
+    # any other nonzero status is a real failure.
+    force_reinit_args=()
+    bash "$(dirname "${BASH_SOURCE[0]}")/documentdb_prepare_data_directory.sh" "$DATA_PATH"
+    prepare_data_dir_rc=$?
+    case "$prepare_data_dir_rc" in
+        0) ;;
+        10) force_reinit_args+=(-c) ;;
+        *)
+            echo "Error: preparing the data directory failed (status ${prepare_data_dir_rc})." >&2
+            exit "$prepare_data_dir_rc" ;;
+    esac
+
+    # Deliberately an internal array, NOT the PGOPTIONS environment variable:
+    # PGOPTIONS is a standard libpq CLIENT variable users legitimately set for
+    # per-session GUCs, and word-splitting the ambient value into
+    # start_oss_server.sh's argv let unrelated content reach its getopts --
+    # where `-c` means "force cleanup" and destroys the data directory.
+    external_access_args=()
+    if [ "${ALLOW_EXTERNAL_CONNECTIONS}" = "true" ]; then
         echo "Allowing external connections to PostgreSQL..."
-        export PGOPTIONS="-e"
+        external_access_args+=(-e)
     fi
 
     # TOAST compression for this image's PostgreSQL. Applied here rather than in
@@ -713,8 +726,8 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         # first. PATH is only a fallback, and is what the tests stub.
         toast_pg_config=""
         for toast_pg_bindir in \
-                "/usr/lib/postgresql/${PG_VERSION_USED:-17}/bin" \
-                "/usr/pgsql-${PG_VERSION_USED:-17}/bin"; do
+                "/usr/lib/postgresql/${PG_MAJOR_ASSUMED}/bin" \
+                "/usr/pgsql-${PG_MAJOR_ASSUMED}/bin"; do
             if [ -x "$toast_pg_bindir/pg_config" ]; then
                 toast_pg_config="$toast_pg_bindir/pg_config"
                 break
@@ -736,7 +749,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
                 fi
                 toast_path_major="${toast_path_version#* }"      # "PostgreSQL 17.2" -> "17.2"
                 toast_path_major="${toast_path_major%%[!0-9]*}"  # "17.2" / "18devel" -> "17" / "18"
-                if [ -n "$toast_path_major" ] && [ "$toast_path_major" = "${PG_VERSION_USED:-17}" ]; then
+                if [ -n "$toast_path_major" ] && [ "$toast_path_major" = "${PG_MAJOR_ASSUMED}" ]; then
                     toast_pg_config="$toast_path_pg_config"
                 fi
             fi
@@ -877,17 +890,20 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     done
 
     echo "Starting OSS server..."
-    EXTENDED_RUM_FLAG="-r"
+    # Pass an explicit `-r <bool>`: the server script now defaults to extended
+    # RUM *enabled*, so merely omitting -r no longer disables it -- that
+    # silently turned --disable-extended-rum into a no-op.
+    extended_rum_bool="true"
     if [ "$DISABLE_EXTENDED_RUM" = "true" ]; then
-        EXTENDED_RUM_FLAG=""
+        extended_rum_bool="false"
     fi
     start_oss_server_args=()
-    if [ -n "$EXTENDED_RUM_FLAG" ]; then
-        start_oss_server_args+=("$EXTENDED_RUM_FLAG")
+    if [ ${#force_reinit_args[@]} -gt 0 ]; then
+        start_oss_server_args+=("${force_reinit_args[@]}")
     fi
-    if [ -n "${PGOPTIONS:-}" ]; then
-        IFS=' ' read -r -a pgoptions_array <<< "$PGOPTIONS"
-        start_oss_server_args+=("${pgoptions_array[@]}")
+    start_oss_server_args+=(-r "$extended_rum_bool")
+    if [ ${#external_access_args[@]} -gt 0 ]; then
+        start_oss_server_args+=("${external_access_args[@]}")
     fi
     if [ "$CREATE_USER" = "false" ]; then
         start_oss_server_args+=(-u "")
@@ -897,6 +913,19 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     start_oss_server_args+=(-d "$DATA_PATH" -p "$POSTGRESQL_PORT")
 
     "$SCRIPT_DIR/start_oss_server.sh" "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
+    start_oss_server_rc=${PIPESTATUS[0]}
+    if [ "$start_oss_server_rc" -ne 0 ]; then
+        # $? here is tee's, so the script's own status has to be read
+        # explicitly. A setup step that fails *after* the postmaster
+        # daemonized (e.g. CREATE EXTENSION) otherwise leaves postmaster.pid
+        # in place and sails through every later gate into a healthy verdict
+        # on a half-configured server.
+        # Without this, a failed bootstrap (e.g. initdb dying after a forced
+        # cleanup) was only discovered a full postmaster.pid timeout later,
+        # under a misleading "failed to start within 60 seconds" headline.
+        echo "Error: start_oss_server.sh failed (status ${start_oss_server_rc}); see $OSS_SERVER_LOG and the PostgreSQL server log at $DATA_PATH/pglog.log." >&2
+        exit "$start_oss_server_rc"
+    fi
 
     echo "OSS server started."
     echo "[ENTRYPOINT] Setting up PostgreSQL log streaming..."
@@ -1188,12 +1217,9 @@ if [ -n "${CERT_PATH:-}" ] && [ -n "${KEY_FILE:-}" ]; then
 fi
 
 echo "Setting TLS mode to '$TLS_MODE'..."
-jq --arg tlsMode "$TLS_MODE" '.TlsMode = $tlsMode' "$configFile" > "$configFile.tmp" && \
-mv "$configFile.tmp" "$configFile"
-
-# Translate the requested TLS mode into the EnforceTls flag the gateway actually
-# reads. requireTLS enforces TLS for every connection; allowTLS and disabled let
-# the gateway accept both plain (non-TLS) and TLS clients on the same port.
+# The gateway has no TlsMode field; only EnforceTls below is read. requireTLS
+# enforces TLS for every connection; allowTLS and disabled let the gateway
+# accept both plain (non-TLS) and TLS clients on the same port.
 if [ "$TLS_MODE" = "requireTLS" ]; then
     enforceTls=true
 else
@@ -1282,21 +1308,27 @@ else
     # overridable so tests can exercise the timeout path without a long wait.
     if command -v pg_isready >/dev/null 2>&1; then
         pg_ready_timeout="$(sanitize_uint "${DOCUMENTDB_PG_READY_TIMEOUT:-600}" 600 DOCUMENTDB_PG_READY_TIMEOUT)"
-        pg_ready_interval="$(sanitize_uint "${DOCUMENTDB_PG_READY_INTERVAL:-5}" 5 DOCUMENTDB_PG_READY_INTERVAL)"
-        # Interval needs a >=1 lower bound (a 0 would busy-spin forever since
-        # elapsed never advances), then base-10 normalization so a zero-padded
-        # value (e.g. "08") is not parsed as invalid octal by the $(( )) below.
+        # 1s interval: the very first check usually succeeds (PostgreSQL was
+        # started above), so a coarser interval only adds startup latency on
+        # the rare retry path (issue #480).
+        pg_ready_interval="$(sanitize_uint "${DOCUMENTDB_PG_READY_INTERVAL:-1}" 1 DOCUMENTDB_PG_READY_INTERVAL)"
+        # Interval needs a >=1 lower bound (a 0 would busy-spin between
+        # probes), then base-10 normalization so a zero-padded value (e.g.
+        # "08") is not parsed as invalid octal by the $(( )) below.
         [ "$pg_ready_interval" -ge 1 ] || pg_ready_interval=1
         pg_ready_interval=$((10#$pg_ready_interval))
-        pg_ready_elapsed=0
+        # Measure real wall-clock time (bash's SECONDS), not accumulated sleep
+        # durations: pg_isready itself can block for seconds per probe, and
+        # counting only sleeps would stretch the effective bound far past the
+        # documented timeout.
+        pg_ready_start=$SECONDS
         echo "Waiting for PostgreSQL to be ready on localhost:$POSTGRESQL_PORT before creating the admin user..."
         while ! pg_isready -h localhost -p "$POSTGRESQL_PORT" >/dev/null 2>&1; do
-            if [ "$pg_ready_elapsed" -ge "$pg_ready_timeout" ]; then
+            if [ $((SECONDS - pg_ready_start)) -ge "$pg_ready_timeout" ]; then
                 echo "Error: PostgreSQL did not become ready on localhost:$POSTGRESQL_PORT within ${pg_ready_timeout}s; cannot create the admin user." >&2
                 exit 1
             fi
             sleep "$pg_ready_interval"
-            pg_ready_elapsed=$((pg_ready_elapsed + pg_ready_interval))
         done
         echo "PostgreSQL is ready."
     else
@@ -1354,22 +1386,26 @@ fi
 
 gateway_pid=$! # Capture the PID of the gateway process
 
-# Wait for the gateway to be ready before attempting initialization
+# Wait for the gateway to be ready before attempting initialization. Poll at a
+# sub-second interval so readiness is detected promptly (issue #480), but only
+# log once per second to keep the container log readable.
 echo "Waiting for gateway to be ready..."
-max_attempts=60
+max_attempts=240
 attempt=0
 while [ $attempt -lt $max_attempts ]; do
     if nc -z localhost "$DOCUMENTDB_PORT"; then
         echo "Gateway is ready on localhost:$DOCUMENTDB_PORT"
         break
     fi
-    echo "Attempt $((attempt + 1))/$max_attempts: Gateway not ready yet, waiting..."
-    sleep 1
+    if [ $((attempt % 4)) -eq 0 ]; then
+        echo "Attempt $((attempt / 4 + 1))/60: Gateway not ready yet, waiting..."
+    fi
+    sleep 0.25
     attempt=$((attempt + 1))
 done
 
 if [ $attempt -eq $max_attempts ]; then
-    echo "Error: Gateway failed to start within $max_attempts seconds"
+    echo "Error: Gateway failed to start within 60 seconds"
     exit 1
 fi
 
@@ -1488,6 +1524,24 @@ if [ -f "$GATEWAY_LOG" ]; then
 fi
 
 echo "Gateway started with PID: $gateway_pid"
+
+# Publish the resolved runtime settings for healthcheck.sh. This runs after
+# gateway readiness and data initialization so the healthcheck only reports
+# healthy on a fully initialized database, and it records the ports actually
+# in use — which may come from CLI flags that HEALTHCHECK / `docker exec`
+# sessions cannot see in their environment. Written via a temp file + mv so
+# the healthcheck never reads a partially written file. A write failure is
+# not fatal to the database, but the container will keep reporting unhealthy,
+# so warn loudly.
+if printf 'DOCUMENTDB_PORT=%s\nPOSTGRESQL_PORT=%s\n' \
+        "$DOCUMENTDB_PORT" "$POSTGRESQL_PORT" \
+        > "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" \
+        && mv "${DOCUMENTDB_RUNTIME_STATE_FILE}.tmp" "$DOCUMENTDB_RUNTIME_STATE_FILE"; then
+    echo "Runtime state for the health check written to $DOCUMENTDB_RUNTIME_STATE_FILE"
+else
+    echo "Warning: could not write $DOCUMENTDB_RUNTIME_STATE_FILE; the container health check will keep reporting unhealthy." >&2
+fi
+
 echo ""
 echo "=== DocumentDB is ready ==="
 echo ""
@@ -1495,7 +1549,9 @@ echo "Connect with mongosh (replace <password> with the password you set):"
 echo "  mongosh 'mongodb://${USERNAME}:<password>@localhost:${DOCUMENTDB_PORT}/mydb?tls=true&tlsAllowInvalidCertificates=true'"
 echo "  (Replace mydb with any DB name; a fresh DB is created on first insert.)"
 echo ""
-echo "Data is stored in ${DATA_PATH}; mount a volume there (docker run -v <host-dir>:/data ...) to persist it across container recreation."
+echo "Data is stored in ${DATA_PATH}; mount a volume there to persist it across container recreation."
+echo "  Named volume (fast first boot, recommended): docker run -v mydata:${DATA_PATH} ..."
+echo "  Host directory (first boot runs a slower full initialization): docker run -v <host-dir>:${DATA_PATH} ..."
 echo ""
 echo "All logs are being streamed to docker logs with prefixes:"
 echo "  [POSTGRES] - PostgreSQL database logs ($PG_LOG_FILE)"

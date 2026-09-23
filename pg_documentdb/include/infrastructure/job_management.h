@@ -13,11 +13,13 @@
 
 #define DOCUMENTDB_INDEX_BUILD_JOB1_JOBID 90
 #define DOCUMENTDB_INDEX_BUILD_JOB2_JOBID 91
+#define DOCUMENTDB_CURSOR_CLEANUP_JOBID 92
 
 extern bool EnableBackgroundWorker;
 extern bool EnableBackgroundWorkerJobs;
+extern bool EnableBackgroundWorkerJobsInRecovery;
 extern bool EnableBackgroundWorkerInitJobs;
-extern bool EnableBgWorkerMetricsEmission;
+extern bool StartBackgroundWorkerInRecovery;
 extern bool IndexBuildsScheduledOnBgWorker;
 
 /* index build tasks */

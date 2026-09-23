@@ -1,6 +1,11 @@
 SET search_path TO documentdb_api, documentdb_core, documentdb_api_catalog, documentdb_api_internal, public;
 -- Composite op class required for RUM index to expose skip-tids primitive.
 SET documentdb.defaultUseCompositeOpClass TO on;
+-- enableProjectPushUpBeforeUnwindWithGroup is enabled by default starting in v118.
+-- Pin it off here so the $unwind -> $group cases in this suite keep exercising the
+-- plan shape without the injected field-pruning $project. Remove this pin when the
+-- flag is retired.
+SET documentdb.enableProjectPushUpBeforeUnwindWithGroup TO off;
 -- Ensure database 'db' exists so the system sentinel does not consume a test
 -- collection id when running in standalone mode.
 SELECT documentdb_api.insert_one('db', 'setup_sentinel_first', '{ "_id": 0 }');
@@ -20,8 +25,6 @@ SELECT documentdb_api.drop_collection('db', 'setup_sentinel_first');
 -- bson_aggregation_group_distinct_scan_tests.sql (which uses 20000-range).
 SET documentdb.next_collection_id TO 21000;
 SET documentdb.next_collection_index_id TO 21000;
-SET documentdb.enableNewMinMaxAccumulators TO off;
-SET documentdb.enableNewWithExprAccumulators TO off;
 -- Primary collection: 8 documents with three distinct values of x in
 -- insertion order. The first y-value seen per x (and thus what $first
 -- should return when ordered by x) is:
@@ -100,12 +103,19 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('db',
  { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "2" }, "numIndexesAfter" : { "$numberInt" : "3" }, "createdCollectionAutomatically" : false, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
 (1 row)
 
+SELECT documentdb_api_internal.create_indexes_non_concurrently('db',
+  '{ "createIndexes": "grp_first", "indexes": [{ "key": { "x": 1, "y": -1 }, "name": "idx_x_y_desc" }] }', true);
+                                                                                                   create_indexes_non_concurrently                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "3" }, "numIndexesAfter" : { "$numberInt" : "4" }, "createdCollectionAutomatically" : false, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
+(1 row)
+
 -- Wrong-index target for C10.
 SELECT documentdb_api_internal.create_indexes_non_concurrently('db',
   '{ "createIndexes": "grp_first", "indexes": [{ "key": { "y": 1 }, "name": "idx_y" }] }', true);
                                                                                                    create_indexes_non_concurrently                                                                                                    
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "3" }, "numIndexesAfter" : { "$numberInt" : "4" }, "createdCollectionAutomatically" : false, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
+ { "raw" : { "defaultShard" : { "numIndexesBefore" : { "$numberInt" : "4" }, "numIndexesAfter" : { "$numberInt" : "5" }, "createdCollectionAutomatically" : false, "ok" : { "$numberInt" : "1" } } }, "ok" : { "$numberInt" : "1" } }
 (1 row)
 
 -- Multikey collection for C6 (array-valued indexed field).
@@ -244,8 +254,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -253,7 +263,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -311,8 +321,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -320,7 +330,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -376,8 +386,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -385,7 +395,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -432,8 +442,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -441,7 +451,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -482,8 +492,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -491,7 +501,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'g'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$_id" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text), 'g'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$_id" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -533,8 +543,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                                      
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                  run_explain_and_trim                                                                                                                                                                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -542,7 +552,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : { "$concat" : [ "$x", "-" ] } }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : { "$concat" : [ "$x", "-" ] } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -587,8 +597,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -596,7 +606,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -640,8 +650,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$limit": 1 }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                  run_explain_and_trim                                                                                                                                                                                                                                                                  
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                              run_explain_and_trim                                                                                                                                                                                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit (actual rows=1 loops=1)
    Output: agg_stage_3.document
    ->  Subquery Scan on agg_stage_3 (actual rows=1 loops=1)
@@ -655,7 +665,7 @@ $Q$, p_ignore_heap_fetches := true);
                      ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
                            Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
                            ->  GroupAggregate (actual rows=3 loops=1)
-                                 Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+                                 Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                                  Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                                  ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                                        Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -685,8 +695,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -694,7 +704,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -743,8 +753,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -752,7 +762,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -807,8 +817,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id.x": 1, "_id.y": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                                                                                                run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                             run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=8 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson)), (bson_orderby(agg_stage_1.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST, (bson_orderby(agg_stage_1.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -816,7 +826,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=8 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson), bson_orderby(agg_stage_1.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=8 loops=1)
-               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$_id" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$_id" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -858,8 +868,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                             run_explain_and_trim                                                                                                                                                                                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                      run_explain_and_trim                                                                                                                                                                                                                                                      
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -867,9 +877,9 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  Nested Loop (actual rows=3 loops=1)
-               Output: bson_dollar_merge_documents((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), (COALESCE(bson_array_agg(collection_0_1.document, 'm'::text), '{ "m" : [  ] }'::bson)), true)
+               Output: bson_dollar_merge_documents((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text))), (COALESCE(bson_array_agg(collection_0_1.document, 'm'::text), '{ "m" : [  ] }'::bson)), true)
                ->  GroupAggregate (actual rows=3 loops=1)
-                     Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+                     Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                      Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                      ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                            Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -881,8 +891,8 @@ $Q$, p_ignore_heap_fetches := true);
                      Output: COALESCE(bson_array_agg(collection_0_1.document, 'm'::text), '{ "m" : [  ] }'::bson)
                      ->  Index Scan using idx_x on documentdb_data.documents_21000 collection_0_1 (actual rows=3 loops=3)
                            Output: collection_0_1.shard_key_value, collection_0_1.object_id, collection_0_1.document
-                           Index Cond: (collection_0_1.document @*= bson_dollar_lookup_extract_filter_expression((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), '{ "x" : "_id" }'::bson))
-                           Filter: bson_dollar_lookup_join_filter(collection_0_1.document, bson_dollar_lookup_extract_filter_expression((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), '{ "x" : "_id" }'::bson), 'x'::text)
+                           Index Cond: (collection_0_1.document @*= bson_dollar_lookup_extract_filter_expression((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text))), '{ "x" : "_id" }'::bson))
+                           Filter: bson_dollar_lookup_join_filter(collection_0_1.document, bson_dollar_lookup_extract_filter_expression((bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text))), '{ "x" : "_id" }'::bson), 'x'::text)
 (23 rows)
 
 ROLLBACK;
@@ -924,8 +934,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id.x": 1, "_id.y": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                                                                                                run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                             run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=5 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson)), (bson_orderby(agg_stage_2.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST, (bson_orderby(agg_stage_2.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -933,7 +943,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=5 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id.x" : { "$numberInt" : "1" } }'::bson), bson_orderby(agg_stage_2.document, '{ "_id.y" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=5 loops=1)
-               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$_id" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$_id" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=5 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -979,8 +989,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -988,7 +998,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Custom Scan (DocumentDBApiDistinctQueryScan) (actual rows=3 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -1022,8 +1032,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                                                                                                                                                                                          
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                   run_explain_and_trim                                                                                                                                                                                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1031,7 +1041,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 's'::text, bsonsum(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text), 's'::text, bsonsumwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -1057,8 +1067,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                                                                                                     
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                  run_explain_and_trim                                                                                                                                                                                                                                                                                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1066,7 +1076,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 's'::text, bsonsum(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'm'::text, bsonmax(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 's'::text, bsonsumwithexpr(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text), 'm'::text, bsonmaxwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
@@ -1145,9 +1155,8 @@ ROLLBACK;
 -- With enableSortPushToAccumulatorWithPrefix ON, the rewrite drops the
 -- prefix (group key already covered by idx_x) and pushes the suffix into
 -- the accumulator as bsonfirstonsorted(... ORDER BY bson_orderby(...)).
--- The OID is in our allowlist, so the OID check passes; aggref->aggorder
--- is non-NIL, so the walker rejects on the aggorder guard. This case
--- exercises the second guard rather than the OID check.
+-- The aggregate is eligible, but idx_x does not provide the y suffix order,
+-- so path-level validation rejects the distinct wrapper.
 --
 -- Loudness: the sort-aware result for $sort: { x: 1, y: -1 } is
 -- a -> 60, b -> 80, c -> 70. A regression where the walker missed
@@ -1181,8 +1190,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                               run_explain_and_trim                                                                                                                                                                                                                                                                                                                
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1190,12 +1199,187 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson) ORDER BY (bson_orderby(collection.document, '{ "y" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "y" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
                ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
                      Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
                      Index Cond: (collection.document @<> '{ "x" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson)
                      Order By: (collection.document |-<> '{ "x" : { "$numberInt" : "1" } }'::bson)
+(13 rows)
+
+ROLLBACK;
+-- ============================================================
+-- C4b: The same ordered $first shape on an index that supplies both
+-- the group prefix and the accumulator suffix. On PostgreSQL 16 and later,
+-- path-level validation accepts the wrapper when both keys are exposed.
+-- Disable key-level skipping so this case covers wrapper eligibility only.
+-- ============================================================
+BEGIN;
+SET LOCAL enable_seqscan TO off;
+SET LOCAL enable_bitmapscan TO off;
+SET LOCAL enable_hashagg TO off;
+SET LOCAL documentdb.enableDistinctScanForGroupFirst TO on;
+SET LOCAL documentdb.enable_distinct_scan_for_ordered_group_first TO off;
+SET LOCAL documentdb.enable_distinct_skip_scan_on_key TO off;
+SET LOCAL documentdb.enableSortPushToAccumulatorWithPrefix TO on;
+SELECT documentdb_test_helpers.run_explain_and_trim($Q$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_pipeline('db',
+  '{ "aggregate": "grp_first", "hint": "idx_x_y_desc", "pipeline": [
+    { "$sort": { "x": 1, "y": -1 } },
+    { "$group": { "_id": "$x", "f": { "$first": "$y" } } },
+    { "$sort": { "_id": 1 } }
+  ] }')
+$Q$, p_ignore_heap_fetches := true);
+                                                                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort (actual rows=3 loops=1)
+   Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
+   Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
+   Sort Method: quicksort  Memory: xxxkB
+   ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
+         Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
+         ->  GroupAggregate (actual rows=3 loops=1)
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "y" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
+               ->  Index Only Scan using idx_x_y_desc on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
+                     Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
+                     Index Cond: (collection.document @<> '{ "x" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson)
+                     Order By: (collection.document |-<> '{ "x" : { "$numberInt" : "1" } }'::bson)
+                     Heap Fetches: xxx
+(14 rows)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL enable_seqscan TO off;
+SET LOCAL enable_bitmapscan TO off;
+SET LOCAL enable_hashagg TO off;
+SET LOCAL documentdb.enableDistinctScanForGroupFirst TO on;
+SET LOCAL documentdb.enable_distinct_skip_scan_on_key TO off;
+SET LOCAL documentdb.enableSortPushToAccumulatorWithPrefix TO on;
+SELECT document FROM bson_aggregation_pipeline('db',
+  '{ "aggregate": "grp_first", "hint": "idx_x_y_desc", "pipeline": [
+    { "$sort": { "x": 1, "y": -1 } },
+    { "$group": { "_id": "$x", "f": { "$first": "$y" } } },
+    { "$sort": { "_id": 1 } }
+  ] }');
+                    document                    
+------------------------------------------------
+ { "_id" : "a", "f" : { "$numberInt" : "60" } }
+ { "_id" : "b", "f" : { "$numberInt" : "80" } }
+ { "_id" : "c", "f" : { "$numberInt" : "70" } }
+(3 rows)
+
+SELECT documentdb_test_helpers.run_explain_and_trim($Q$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_pipeline('db',
+  '{ "aggregate": "grp_first", "hint": "idx_x_y_desc", "pipeline": [
+    { "$sort": { "x": 1, "y": -1 } },
+    { "$group": { "_id": "$x", "f": { "$first": "$y" } } },
+    { "$sort": { "_id": 1 } }
+  ] }')
+$Q$, p_ignore_heap_fetches := true);
+                                                                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort (actual rows=3 loops=1)
+   Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
+   Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
+   Sort Method: quicksort  Memory: xxxkB
+   ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
+         Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
+         ->  GroupAggregate (actual rows=3 loops=1)
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "y" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
+               ->  Index Only Scan using idx_x_y_desc on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
+                     Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
+                     Index Cond: (collection.document @<> '{ "x" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson)
+                     Order By: (collection.document |-<> '{ "x" : { "$numberInt" : "1" } }'::bson)
+                     Heap Fetches: xxx
+(14 rows)
+
+ROLLBACK;
+-- ============================================================
+-- C4c: Two ordered $first accumulators with two group keys. idx_xy
+-- supplies the group ordering in its forward direction but not the
+-- trailing _id order required by both accumulators. Path-level validation
+-- must reject the distinct wrapper.
+-- ============================================================
+BEGIN;
+SET LOCAL enable_seqscan TO off;
+SET LOCAL enable_bitmapscan TO off;
+SET LOCAL enable_hashagg TO off;
+SET LOCAL documentdb.enableDistinctScanForGroupFirst TO on;
+SET LOCAL documentdb.enableSortPushToAccumulatorWithPrefix TO on;
+SELECT documentdb_test_helpers.run_explain_and_trim($Q$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_pipeline('db',
+  '{ "aggregate": "grp_first", "hint": "idx_xy", "pipeline": [
+    { "$sort": { "x": 1, "y": 1, "_id": 1 } },
+    { "$group": {
+        "_id": { "x": "$x", "y": "$y" },
+        "firstY": { "$first": "$y" },
+        "firstId": { "$first": "$_id" }
+    } },
+    { "$sort": { "_id": 1 } }
+  ] }')
+$Q$, p_ignore_heap_fetches := true);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort (actual rows=8 loops=1)
+   Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
+   Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
+   Sort Method: quicksort  Memory: xxxkB
+   ->  Subquery Scan on agg_stage_1 (actual rows=8 loops=1)
+         Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
+         ->  GroupAggregate (actual rows=8 loops=1)
+               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'firstY'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST), 'firstId'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$_id" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
+               ->  Index Scan using idx_xy on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
+                     Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
+                     Index Cond: ((collection.document @<> '{ "x" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson) AND (collection.document @<> '{ "y" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson))
+                     Order By: ((collection.document |-<> '{ "x" : { "$numberInt" : "1" } }'::bson) AND (collection.document |-<> '{ "y" : { "$numberInt" : "1" } }'::bson))
+(13 rows)
+
+ROLLBACK;
+-- ============================================================
+-- C4d: The same incomplete ordering while scanning idx_xy backward.
+-- Reversing every requested direction still leaves the trailing _id
+-- order unserved, so the distinct wrapper must remain ineligible.
+-- ============================================================
+BEGIN;
+SET LOCAL enable_seqscan TO off;
+SET LOCAL enable_bitmapscan TO off;
+SET LOCAL enable_hashagg TO off;
+SET LOCAL documentdb.enableDistinctScanForGroupFirst TO on;
+SET LOCAL documentdb.enableSortPushToAccumulatorWithPrefix TO on;
+SELECT documentdb_test_helpers.run_explain_and_trim($Q$
+EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, SUMMARY OFF, TIMING OFF, VERBOSE ON)
+SELECT document FROM bson_aggregation_pipeline('db',
+  '{ "aggregate": "grp_first", "hint": "idx_xy", "pipeline": [
+    { "$sort": { "x": -1, "y": -1, "_id": -1 } },
+    { "$group": {
+        "_id": { "x": "$x", "y": "$y" },
+        "firstY": { "$first": "$y" },
+        "firstId": { "$first": "$_id" }
+    } },
+    { "$sort": { "_id": 1 } }
+  ] }')
+$Q$, p_ignore_heap_fetches := true);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort (actual rows=8 loops=1)
+   Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
+   Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
+   Sort Method: quicksort  Memory: xxxkB
+   ->  Subquery Scan on agg_stage_1 (actual rows=8 loops=1)
+         Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
+         ->  GroupAggregate (actual rows=8 loops=1)
+               Output: bson_repath_and_build('_id'::text, bson_repath_and_build('x'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'y'::text, (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), 'firstY'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "_id" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST), 'firstId'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$_id" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text ORDER BY (bson_orderby(collection.document, '{ "_id" : { "$numberInt" : "-1" } }'::bson)) USING >>> NULLS LAST)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), (bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Group Key: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)
+               ->  Index Scan using idx_xy on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
+                     Output: bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson), collection.document
+                     Index Cond: ((collection.document @<> '{ "x" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson) AND (collection.document @<> '{ "y" : { "orderByScan" : { "$numberInt" : "1" } } }'::bson))
+                     Order By: ((collection.document |-<> '{ "x" : { "$numberInt" : "1" } }'::bson) AND (collection.document |-<> '{ "y" : { "$numberInt" : "1" } }'::bson))
 (13 rows)
 
 ROLLBACK;
@@ -1216,10 +1400,10 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$group": { "_id": null, "f": { "$first": "$y" } } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                     run_explain_and_trim                                                                                                                      
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                  run_explain_and_trim                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  GroupAggregate (actual rows=1 loops=1)
-   Output: bson_repath_and_build('_id'::text, '{ "" : null }'::bson, 'f'::text, bsonfirstonsorted(bson_expression_get(document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), ('{ "" : null }'::bson)
+   Output: bson_repath_and_build('_id'::text, '{ "" : null }'::bson, 'f'::text, bsonfirstwithexprinternal(document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), ('{ "" : null }'::bson)
    Group Key: '{ "" : null }'::bson
    ->  Index Scan using idx_x on documentdb_data.documents_21000 collection (actual rows=8 loops=1)
          Output: '{ "" : null }'::bson, document
@@ -1245,8 +1429,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                            
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                        run_explain_and_trim                                                                                                                                                                                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1254,7 +1438,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$v" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$v" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=3 loops=1)
                      Output: (bson_expression_get(collection.document, '{ "" : "$tags" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), collection.document
@@ -1298,8 +1482,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                                                                                                           
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                       run_explain_and_trim                                                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1307,7 +1491,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(agg_stage_1.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(agg_stage_1.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=6 loops=1)
                      Output: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), agg_stage_1.document
@@ -1352,8 +1536,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                                                                                                           
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                       run_explain_and_trim                                                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=2 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1361,7 +1545,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=2 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=2 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(agg_stage_1.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(agg_stage_1.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=4 loops=1)
                      Output: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), agg_stage_1.document
@@ -1408,8 +1592,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                            
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                        run_explain_and_trim                                                                                                                                                                                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=2 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1417,7 +1601,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=2 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=2 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(agg_stage_1.document, '{ "" : "$vals" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(agg_stage_1.document, '{ "" : "$vals" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=4 loops=1)
                      Output: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), agg_stage_1.document
@@ -1451,8 +1635,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_1.document, (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1460,7 +1644,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_1 (actual rows=3 loops=1)
          Output: agg_stage_1.document, bson_orderby(agg_stage_1.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(collection.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(collection.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=8 loops=1)
                      Output: (bson_expression_get(collection.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), collection.document
@@ -1564,8 +1748,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1573,7 +1757,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted((bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=8 loops=1)
                      Output: (bson_expression_get(bson_dollar_project(collection.document, '{ "x" : { "$numberInt" : "1" }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), collection.document
@@ -1616,8 +1800,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1625,7 +1809,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted((bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=8 loops=1)
                      Output: (bson_expression_get(bson_dollar_project(collection.document, '{ "newx" : "$x", "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$newx" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), collection.document
@@ -1668,8 +1852,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     run_explain_and_trim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1677,7 +1861,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted((bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)))), (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexprinternal(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=8 loops=1)
                      Output: (bson_expression_get(bson_dollar_project(collection.document, '{ "xc" : { "$concat" : [ "$x", "-suffix" ] }, "_id" : { "$numberInt" : "0" } }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson), '{ "" : "$xc" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), collection.document
@@ -1721,8 +1905,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     { "$sort": { "_id": 1 } }
   ] }')
 $Q$, p_ignore_heap_fetches := true);
-                                                                                                                                                                                                                                                          run_explain_and_trim                                                                                                                                                                                                                                                           
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                   run_explain_and_trim                                                                                                                                                                                                                                                   
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort (actual rows=3 loops=1)
    Output: agg_stage_2.document, (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson))
    Sort Key: (bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)) NULLS FIRST
@@ -1730,7 +1914,7 @@ $Q$, p_ignore_heap_fetches := true);
    ->  Subquery Scan on agg_stage_2 (actual rows=3 loops=1)
          Output: agg_stage_2.document, bson_orderby(agg_stage_2.document, '{ "_id" : { "$numberInt" : "1" } }'::bson)
          ->  GroupAggregate (actual rows=3 loops=1)
-               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstonsorted(bson_expression_get(agg_stage_1.document, '{ "" : "$y" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
+               Output: bson_repath_and_build('_id'::text, (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), 'f'::text, bsonfirstwithexpr(agg_stage_1.document, '{ "" : "$y" }'::bson, '{ "now" : NOW_SYS_VARIABLE }'::bson, NULL::text)), (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                Group Key: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson))
                ->  Sort (actual rows=8 loops=1)
                      Output: (bson_expression_get(agg_stage_1.document, '{ "" : "$x" }'::bson, true, '{ "now" : NOW_SYS_VARIABLE }'::bson)), agg_stage_1.document

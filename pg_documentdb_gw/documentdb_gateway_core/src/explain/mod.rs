@@ -9,12 +9,11 @@
 use core::f64;
 use std::{cmp::Ordering, collections::HashMap, str::FromStr, sync::LazyLock};
 
-use bson::{rawdoc, Document, RawArrayBuf, RawBson, RawDocument, RawDocumentBuf};
+use bson::{rawdoc, DateTime, Document, RawArrayBuf, RawBson, RawDocumentBuf};
 use model::{
     DistributedJob, DistributedQueryPlan, DistributedSubPlan, ExplainPlan, ExplainWorker,
     IndexCost, IndexDetails, PostgresExplain, VectorSearchParams,
 };
-use serde_json::Value;
 
 use crate::{
     context::{ConnectionContext, RequestContext},
@@ -199,7 +198,6 @@ impl Verbosity {
     }
 }
 
-#[expect(clippy::expect_used, reason = "values are checked before access")]
 async fn run_explain(
     request_context: &RequestContext<'_>,
     target: &ExplainTarget<'_>,
@@ -210,7 +208,7 @@ async fn run_explain(
 ) -> Result<Response> {
     let request = request_context.request();
 
-    let (explain_response, query) = pg_data_client
+    let (explain_response, _) = pg_data_client
         .execute_explain(
             request_context,
             target,
@@ -224,10 +222,6 @@ async fn run_explain(
 
     match explain_response {
         Some(content) => {
-            let explain_content = dynamic_config
-                .enable_developer_explain()
-                .then(|| convert_to_bson(content.clone()));
-
             let (collection_name, subtype) = get_subtype_and_collection_name(target)?;
             let (body, planning_time, execution_time, data_size) = transform_explain(
                 content,
@@ -241,6 +235,7 @@ async fn run_explain(
 
             let mut explain = RawDocumentBuf::new();
             explain.append("explainVersion", 2.0);
+            explain.append("currentDateTime", DateTime::now());
 
             let command_str = format!(
                 "db.runCommand({{explain: {}}})",
@@ -286,18 +281,6 @@ async fn run_explain(
                 explain.append(key, val.to_raw_bson());
             }
 
-            if dynamic_config.enable_developer_explain() {
-                explain.append(
-                    "internal",
-                    developer_explain(
-                        &query,
-                        explain_content.expect("Set during developer explain"),
-                        target.document(),
-                        request.db(),
-                    ),
-                );
-            }
-
             explain.append("ok", OK_SUCCEEDED);
 
             Ok(Response::Raw(RawResponse::new(explain)))
@@ -305,21 +288,6 @@ async fn run_explain(
         None => Err(DocumentDBError::internal_error(
             "PG returned no rows in response".to_owned(),
         )),
-    }
-}
-
-fn developer_explain(
-    query: &str,
-    explain_content: RawBson,
-    request: &RawDocument,
-    db: &str,
-) -> RawDocumentBuf {
-    rawdoc! {
-        "sql": {
-            "query": query
-        },
-        "query_parameters":[db, request.to_raw_document_buf()],
-        "explain": explain_content
     }
 }
 
@@ -759,9 +727,10 @@ fn get_aggregate_plan_from_output<'a>(
             let facet_names: Vec<&str> = output.split('\'').collect();
             (facet_names.len() > 4).then(|| facet_names[facet_names.len() - 4])
         }
-    } else if output.contains("coord_combine_agg") {
+    } else if output.contains("coord_combine_agg") || output.contains("coord_binary_combine_agg") {
         Some("MERGE_CURSORS")
-    } else if output.contains("worker_partial_agg") {
+    } else if output.contains("worker_partial_agg") || output.contains("worker_binary_partial_agg")
+    {
         Some("WORKER_PARTIAL_AGG")
     } else {
         None
@@ -1838,6 +1807,9 @@ fn execution_stats(plan: ExplainPlan, query_catalog: &QueryCatalog) -> RawDocume
             "executionStartAtTimeMillis",
             smallest_from_f64(truncate_latency(plan.actual_startup_time.unwrap_or(0.0))),
         );
+        if let Some(actual_loops) = plan.actual_loops.filter(|value| *value > 1.0) {
+            doc.append("actualLoops", smallest_from_f64(actual_loops));
+        }
         if plan.index_name.is_none()
             || plan.filter.is_some()
             || plan.rows_removed_by_filter.unwrap_or(0) > 0
@@ -1963,6 +1935,10 @@ fn execution_stats(plan: ExplainPlan, query_catalog: &QueryCatalog) -> RawDocume
         }
         if let Some(workers) = plan.workers.as_ref() {
             if !workers.is_empty() {
+                doc.append(
+                    "stageWorkerCount",
+                    i32::try_from(workers.len()).unwrap_or(i32::MAX),
+                );
                 let mut worker_array = RawArrayBuf::new();
                 for worker in workers {
                     worker_array.push(build_worker_doc(worker));
@@ -2350,37 +2326,6 @@ fn truncate_latency(latency: f64) -> f64 {
     (latency * 1000.0).trunc() / 1000.0
 }
 
-fn convert_to_bson(val: serde_json::Value) -> RawBson {
-    match val {
-        Value::Number(n) => {
-            if let Some(n) = n.as_i64() {
-                RawBson::Int64(n)
-            } else if let Some(n) = n.as_f64() {
-                RawBson::Double(n)
-            } else {
-                RawBson::Double(f64::NAN)
-            }
-        }
-        Value::Object(map) => {
-            let mut doc = RawDocumentBuf::new();
-            for (k, v) in map {
-                doc.append(k, convert_to_bson(v));
-            }
-            RawBson::Document(doc)
-        }
-        Value::Array(arr) => {
-            let mut bson_array = RawArrayBuf::new();
-            for v in arr {
-                bson_array.push(convert_to_bson(v));
-            }
-            RawBson::Array(bson_array)
-        }
-        Value::Null => RawBson::Null,
-        Value::Bool(b) => RawBson::Boolean(b),
-        Value::String(s) => RawBson::String(s),
-    }
-}
-
 #[expect(
     clippy::cast_possible_truncation,
     reason = "intentional truncation of f64 to i64 for smallest representation"
@@ -2486,14 +2431,19 @@ mod tests {
         .expect("PostgreSQL worker data should deserialize");
         let plan = ExplainPlan {
             node_type: "Gather".to_owned(),
-            workers: Some(vec![worker]),
+            actual_loops: Some(2.0),
+            actual_rows: Some(2),
+            workers: Some(vec![worker, ExplainWorker::default()]),
             ..Default::default()
         };
 
         let stats = execution_stats(plan, &QueryCatalog::default());
-        let workers = stats
+        let execution_stage = stats
             .get_document("executionStages")
-            .expect("execution stages should be present")
+            .expect("execution stages should be present");
+        assert_eq!(execution_stage.get_i32("actualLoops"), Ok(2));
+        assert_eq!(execution_stage.get_i32("stageWorkerCount"), Ok(2));
+        let workers = execution_stage
             .get_array("stageWorkerData")
             .expect("stage worker data should be present");
         let worker = workers

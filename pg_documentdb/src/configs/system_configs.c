@@ -116,6 +116,9 @@ int ScramDefaultSaltLen = SCRAM_DEFAULT_SALT_LEN;
 #define MAX_USER_LIMIT 100
 int MaxUserLimit = MAX_USER_LIMIT;
 
+#define DEFAULT_MAX_ROLES_PER_ROLE 50
+int MaxRolesPerRole = DEFAULT_MAX_ROLES_PER_ROLE;
+
 #define DEFAULT_TDIGEST_COMPRESSION_ACCURACY 1500
 int TdigestCompressionAccuracy = DEFAULT_TDIGEST_COMPRESSION_ACCURACY;
 
@@ -157,6 +160,9 @@ int IndexTermCompressionThreshold = DEFAULT_INDEX_TERM_COMPRESSION_THRESHOLD;
 
 #define DEFAULT_ENABLE_USER_CRUD true
 bool EnableUserCrud = DEFAULT_ENABLE_USER_CRUD;
+
+#define DEFAULT_ENABLE_NATIVE_AUTHENTICATION true
+bool IsNativeAuthEnabled = DEFAULT_ENABLE_NATIVE_AUTHENTICATION;
 
 #define DEFAULT_VECTOR_ITERATIVE_SCAN_MODE VectorIterativeScan_RELAXED_ORDER
 int VectorPreFilterIterativeScanMode = DEFAULT_VECTOR_ITERATIVE_SCAN_MODE;
@@ -243,6 +249,14 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 			"Whether to enforce that $db in the command body matches the database argument."),
 		NULL, &EnableDbNameValidation, DEFAULT_ENABLE_DB_NAME_VALIDATION,
 		PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.isNativeAuthEnabled", newGucPrefix),
+		gettext_noop(
+			"Determines whether native authentication is enabled."),
+		NULL, &IsNativeAuthEnabled,
+		DEFAULT_ENABLE_NATIVE_AUTHENTICATION,
+		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 		psprintf("%s.query_plan_cache_size", prefix),
@@ -400,6 +414,15 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 		gettext_noop("The default number of users allowed."),
 		NULL, &MaxUserLimit,
 		MAX_USER_LIMIT, 1, 500,
+		PGC_SUSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		psprintf("%s.max_roles_per_role", newGucPrefix),
+		gettext_noop("The maximum number of roles allowed in a role assignment."),
+		NULL, &MaxRolesPerRole,
+		DEFAULT_MAX_ROLES_PER_ROLE, 1, INT_MAX,
 		PGC_SUSET,
 		0,
 		NULL, NULL, NULL);
