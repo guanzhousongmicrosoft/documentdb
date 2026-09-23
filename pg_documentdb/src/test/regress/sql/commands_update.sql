@@ -720,3 +720,15 @@ select documentdb_api.update('db', '{"update":"update_index_name_cache","ordered
 RESET client_min_messages;
 
 select documentdb_api.drop_collection('db', 'update_index_name_cache');
+
+-- A let-only updateOne must still match under a generic plan: bson_query_match
+-- is STRICT, so its collation argument has to be an empty string, not NULL.
+select 1 from documentdb_api.insert_one('db', 'update_let_generic', '{"_id":1,"name":"cat"}');
+select 1 from documentdb_api.insert_one('db', 'update_let_generic', '{"_id":2,"name":"dog"}');
+BEGIN;
+SET LOCAL plan_cache_mode TO force_generic_plan;
+SET LOCAL client_min_messages TO WARNING;
+select 1 from documentdb_api.update('db', '{"update":"update_let_generic","updates":[{"q":{"$expr":{"$eq":["$name","$$target"]}},"u":{"$set":{"letSelected":true}},"multi":false}],"let":{"target":"cat"}}');
+select count(*) from documentdb_api.collection('db', 'update_let_generic') where document @@ '{"letSelected":true}';
+ROLLBACK;
+select documentdb_api.drop_collection('db', 'update_let_generic');
