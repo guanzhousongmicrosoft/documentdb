@@ -32,6 +32,7 @@
 * Return retryable or specific error codes from the gateway for backend connection, transport, and pool failures and for malformed legacy wire-protocol requests instead of `InternalError`. *[Bugfix]*
 * Require insert and/or update permission on a `$merge` or `$out` target collection according to the stage's configured actions, instead of only read permission, so a read-only user can no longer write through these stages. *[Bugfix/Security]*
 * Limit result string size for `$concat`. *[Bugfix]*
+* Write the same generated `_id` to the document and its stored object ID in `$merge`/`$out`, so inserted documents without `_id` are found by `_id` lookups. Guarded by the default-on `documentdb.enable_merge_generated_id_consistency` setting. *[Bugfix]*
 
 ### documentdb v0.117-0 (September 10, 2026) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
