@@ -2259,7 +2259,8 @@ verify_manual_repair_of_missing_index_extension() {
     local before_spec='{"createIndexes": "probe_coll", "indexes": [{"key": {"n": 1}, "name": "n_1"}]}'
     # A different index, so the success below cannot be an existing-index no-op.
     local after_spec='{"createIndexes": "probe_coll", "indexes": [{"key": {"m": 1}, "name": "m_1"}]}'
-    local index_sql_prefix="SET client_min_messages = warning; SET statement_timeout = '180s'; SELECT ok, retval::text FROM documentdb_api.create_indexes_background"
+    # bson::text is BSONHEX unless bsonUseEJson is on; the errmsg grep below needs JSON.
+    local index_sql_prefix="SET documentdb_core.bsonUseEJson TO true; SET client_min_messages = warning; SET statement_timeout = '180s'; SELECT ok, retval::text FROM documentdb_api.create_indexes_background"
 
     # Idempotent pre-clean: a previous aborted run must not fail this one.
     sudo pg_dropcluster --stop "${PG_MAJOR}" "${probe_cluster}" >/dev/null 2>&1 || true
