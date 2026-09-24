@@ -8,6 +8,9 @@
 #       PG 18). Identical to the per-PR/push E2E, but on a schedule: package
 #       installs resolve live PGDG/EPEL/CRB dependencies, so this catches
 #       external repository drift that breaks users *between* our commits.
+#       On RHEL it also runs the packaging/README.md prerequisite block on a
+#       stock EL image (test-documented-prereqs.sh), which the paved images
+#       cannot check because they enable CRB themselves.
 #     - systemd-as-PID-1 lifecycle suite (run-systemd-e2e.sh): unit hardening,
 #       enable/start/stop of documentdb-local.target, and the container
 #       restart that stands in for a host reboot — the one surface the
@@ -107,6 +110,14 @@ jobs:
       - name: Gateway build + clean-install E2E (live dependency resolution)
         run: ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
 
+      # The paved RHEL images enable CRB themselves, so only this catches the
+      # README prerequisite block going insufficient on a stock host.
+      - name: Documented RHEL prerequisites are sufficient (stock EL host)
+        if: startsWith(matrix.os, 'rhel')
+        env:
+          OS: ${{ matrix.os }}
+        run: ./packaging/test_packages/test-documented-prereqs.sh --pg ${{ matrix.pg_version }} --el "${OS#rhel}" --packages-dir "$(pwd)/packaging"
+
   systemd-lifecycle:
     name: systemd lifecycle E2E (ubuntu24.04-pg18)
     if: github.event.schedule != '0 4 * * 0'
@@ -184,6 +195,13 @@ jobs:
 
       - name: Gateway build + clean-install E2E
         run: ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
+
+      # Same check as the nightly tier, for the EL8 (powertools) spelling.
+      - name: Documented RHEL prerequisites are sufficient (stock EL host)
+        if: startsWith(matrix.os, 'rhel')
+        env:
+          OS: ${{ matrix.os }}
+        run: ./packaging/test_packages/test-documented-prereqs.sh --pg ${{ matrix.pg_version }} --el "${OS#rhel}" --packages-dir "$(pwd)/packaging"
 
   scenario-suites-deb:
     name: Scenario suites (DEB, ubuntu24.04)

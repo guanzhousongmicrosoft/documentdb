@@ -455,31 +455,42 @@ sudo documentdb-tune --pg-version 18 --cluster main --dry-run       # preview
 sudo documentdb-tune --pg-version 18 --cluster main --yes
 sudo systemctl restart postgresql@18-main
 
-# (3) Create the extension in the `postgres` database (the tune fragment
+# (3) Create the extensions in the `postgres` database (the tune fragment
 # pins cron.database_name='postgres', so pg_cron — pulled in via CASCADE —
 # only allows extension creation there). If you need a custom DB name,
 # either override cron.database_name in the per-instance documentdb.conf
 # fragment before restart, OR keep the DocumentDB metadata in `postgres`
 # and create your application data DBs separately.
-sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 \
-        -c 'CREATE EXTENSION documentdb CASCADE;'
+#
+# Both statements are required when documentdb-tune wrote
+# documentdb.alternate_index_handler_name='extended_rum' (it does whenever the
+# extended-RUM extension is installed, the default for these packages).
+# CASCADE does not pull in documentdb_extended_rum, and without it no new index
+# can be built. documentdb-tune prints the exact command for your host.
+#
+# --cluster 18/main: a bare psql follows the default socket and port, which on a
+# host running several majors is not the instance tuned above.
+sudo -u postgres psql --cluster 18/main -d postgres -X -v ON_ERROR_STOP=1 \
+        -c 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;' \
+        -c 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;'
 
-# (4) Verify
-sudo -u postgres psql -d postgres -c '\dx documentdb*'
-# Should list: documentdb, documentdb_core, plus dependencies (pg_cron, pgvector, postgis, ...)
+# (4) Verify — same instance as step (3)
+sudo -u postgres psql --cluster 18/main -d postgres -c '\dx documentdb*'
+# Should list: documentdb, documentdb_core, documentdb_extended_rum, plus
+# dependencies (pg_cron, pgvector, postgis, ...)
 ```
 
-**Even simpler on Debian/Ubuntu when starting from scratch:**
+**Even simpler on Debian/Ubuntu when starting from a PostgreSQL instance that does not exist yet:**
 
 ```bash
 sudo apt install postgresql-18-documentdb
 sudo apt install documentdb-postgresql-tools
-sudo documentdb-createcluster 18 main --start
-sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 \
-        -c 'CREATE EXTENSION documentdb CASCADE;'
+sudo documentdb-createcluster 18 docdb --start
 ```
 
-`documentdb-createcluster` wraps `pg_createcluster` and `documentdb-tune`, so the PostgreSQL instance is created and the per-instance `documentdb.conf` fragment is written in one step. On Debian/Ubuntu the instance config stays under `/etc/postgresql/18/main/`, while the managed fragment lives at `/etc/postgresql-common/documentdb/18/main/documentdb.conf`. When `--start` is requested, the wrapper tunes the instance before starting it.
+`docdb` must not already exist: `documentdb-createcluster` wraps `pg_createcluster`, which refuses a name that is taken — including the `main` instance the `postgresql-18` package creates on install. Use Workflow A above for that one.
+
+The wrapper creates the PostgreSQL instance and writes the per-instance `documentdb.conf` fragment in one step. With `--start` it then starts the instance and creates the DocumentDB extensions — including `documentdb_extended_rum` when the tuning requires it — in its `postgres` database, so no manual `CREATE EXTENSION` step is left. Without `--start` it prints the start command and the extension recipe instead. On Debian/Ubuntu the instance config stays under `/etc/postgresql/18/docdb/`, while the managed fragment lives at `/etc/postgresql-common/documentdb/18/docdb/documentdb.conf`.
 
 After verification the administrator has three options:
 
@@ -512,7 +523,14 @@ sudo apt install postgresql-18-documentdb documentdb-gateway
 sudo apt install documentdb-postgresql-tools
 sudo documentdb-tune --pg-version 18 --cluster main --yes
 sudo systemctl restart postgresql@18-main
-sudo -u postgres psql -d postgres -c 'CREATE EXTENSION documentdb CASCADE;'
+# Both statements: documentdb-tune pins
+# documentdb.alternate_index_handler_name='extended_rum' whenever the
+# extended-RUM extension is installed (the default), and CASCADE does not pull
+# it in. Skipping the second leaves a database where no new index can be built.
+# --cluster 18/main targets the instance tuned on the line above.
+sudo -u postgres psql --cluster 18/main -d postgres -X -v ON_ERROR_STOP=1 \
+    -c 'CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;' \
+    -c 'CREATE EXTENSION IF NOT EXISTS documentdb_extended_rum CASCADE;'
 
 # (3) One-shot PostgreSQL-side gateway registration against the local PostgreSQL instance.
 # Auto-detects when there is exactly one PostgreSQL instance on the host (typical case).
@@ -535,8 +553,9 @@ sudo systemctl enable --now documentdb-gateway
 # making PWFILE itself readable by the postgres user. The password appears
 # briefly in psql's argv (visible to root and the postgres user via ps for the
 # lifetime of the process), which is acceptable for this scripted bootstrap.
-# Run this against the same database where CREATE EXTENSION was executed (postgres here).
-sudo -u postgres psql -d postgres -X -v ON_ERROR_STOP=1 \
+# Run this against the same instance and database where CREATE EXTENSION was
+# executed (18/main, postgres here).
+sudo -u postgres psql --cluster 18/main -d postgres -X -v ON_ERROR_STOP=1 \
     -v admin_password="$(sudo cat "$PWFILE")" <<'SQL'
 SELECT documentdb_api.create_user(
   jsonb_build_object(
@@ -648,7 +667,7 @@ The bolded cells are the only places `postgresql.conf`, `pg_hba.conf`, or `pg_id
 | `documentdb-postgresql@N.service` | `documentdb-common` | Stand-alone private PostgreSQL service template (shared, major-agnostic file) for greenfield/per-major flows; instantiated per-major, with the per-major instance lifecycle managed by `documentdb-N`. |
 | `documentdb-gateway-local@N.service` | `documentdb-common` | Stand-alone gateway service template (shared file) paired with `documentdb-local@N.target`; brownfield keeps the adopted PostgreSQL service outside this unit's ownership boundary. |
 | `documentdb-tune` | `documentdb-postgresql-tools` | Apply or remove the recommended DocumentDB config for one local PostgreSQL instance. On Debian/Ubuntu this writes `/etc/postgresql-common/documentdb/%v/%c/documentdb.conf` and ensures the instance `postgresql.conf` includes it. On RHEL (or when `--pgdata` is given) it writes a marked managed block directly into the target `postgresql.conf`. |
-| `documentdb-createcluster N C` | `documentdb-postgresql-tools` | Debian/Ubuntu helper that wraps `pg_createcluster N C`, runs `documentdb-tune` for that specific PostgreSQL instance, then starts the instance if requested. |
+| `documentdb-createcluster N C` | `documentdb-postgresql-tools` | Debian/Ubuntu helper that wraps `pg_createcluster N C`, runs `documentdb-tune` for that specific PostgreSQL instance, and with `--start` starts it and creates the DocumentDB extensions (plus `documentdb_extended_rum` when the tuning requires it) in its `postgres` database. Without `--start` it prints those steps instead. |
 | `documentdb-register-gateway` | `documentdb-postgresql-tools` | One-shot local gateway registration against an existing PostgreSQL instance (Workflow B). |
 | `documentdb-gateway-admin` | `documentdb-postgresql-tools` | Administrator helper for ongoing user/role management against a DocumentDB-enabled PostgreSQL instance (`create-user`, `drop-user`, `list-users`, `reset-password`, `check`). Used by `documentdb-setup` and `documentdb-register-gateway` for the optional first-admin bootstrap; day-2 user management is normally done via the wire protocol but this CLI remains available for scripted scenarios where no admin connection is yet established. |
 | `documentdb-setup` | `documentdb-common` | Stand-alone package setup wizard (shared, major-agnostic file; delegates to `documentdb-tune` and `documentdb-register-gateway`). |
@@ -781,11 +800,11 @@ Package dependencies use `>=` floors, not exact pins (§4.4, "Dependencies (summ
 
 ### 10.8 No documented point-release upgrade runbook
 
-Bumping the extension package to a new point release installs a new `.so` but does not itself update the installed SQL catalog — PostgreSQL's own `ALTER EXTENSION documentdb UPDATE;` (and `ALTER EXTENSION documentdb_extended_rum UPDATE;` where that extension is installed) is required to move the catalog forward. `documentdb-setup` already does this idempotently as part of its normal apply path (so a Workflow C re-run after an upgrade picks it up for free), but there is currently no dedicated "after you upgrade the package, do this" section in this document, and no proactive nudge printed by the package upgrade itself (postinst never runs SQL — see [§7](#7-security-posture)).
+Bumping the extension package to a new point release installs a new `.so` but does not itself update the installed SQL catalog — PostgreSQL's own `ALTER EXTENSION documentdb_core UPDATE;` then `ALTER EXTENSION documentdb UPDATE;` (it does not cascade to dependencies), plus `ALTER EXTENSION documentdb_extended_rum UPDATE;` where that extension is installed, is required to move the catalog forward. `documentdb-setup` already does this idempotently as part of its normal apply path (so a Workflow C re-run after an upgrade picks it up for free), but there is currently no dedicated "after you upgrade the package, do this" section in this document, and no proactive nudge printed by the package upgrade itself (postinst never runs SQL — see [§7](#7-security-posture)).
 
 **Accepted for this release:** `ALTER EXTENSION ... UPDATE` is a standard PostgreSQL extension-upgrade operation, not a documentdb-specific one, and Workflow A/B administrators who manage their own PostgreSQL instance are expected to already follow that convention. Writing the explicit runbook is deferred rather than blocking this PR.
 
-**Workaround / operator guidance:** after a point-release package upgrade, either re-run `sudo documentdb-setup` (Workflow C — idempotent, safe to repeat) or run `ALTER EXTENSION documentdb UPDATE;` (and `documentdb_extended_rum` if present) directly against the affected PostgreSQL instance (Workflow A/B).
+**Workaround / operator guidance:** after a point-release package upgrade, either re-run `sudo documentdb-setup` (Workflow C — idempotent, safe to repeat) or run `ALTER EXTENSION documentdb_core UPDATE;` then `ALTER EXTENSION documentdb UPDATE;` (and `documentdb_extended_rum` if present) directly against the affected PostgreSQL instance (Workflow A/B).
 
 **Follow-up:** add a "day-2: after upgrading" subsection under [§5 User workflows](#5-user-workflows); documentation-only, no runtime behavior change needed.
 
@@ -846,7 +865,7 @@ Smaller hardening / cleanup items surfaced during the stacked Track-1 package re
 | s | Fold the duplicated per-major `PG_PORT`/`DATA_DIR` default-guard block in `documentdb-setup.sh` (repeated at `resolve_runtime_paths`, `--print-config`, and `--status`, all `PG_PORT=documentdb_default_pg_port` + `DATA_DIR=/var/lib/documentdb-local/N/data` under the same `PG_PORT_EXPLICIT`/`DATA_DIR_EXPLICIT` guards) into one helper. The genuinely different `parse_arguments` variant (which has no explicit-guard short-circuit) stays separate. Deferred as maintainability-only; folds naturally into the item (h) `documentdb-setup.sh` decomposition. | dedup / maintainability | standalone (documentdb-N) pkg |
 | t | Suppress the gateway RPM `%post` Workflow-B guidance on a transitive install, matching the DEB postinst's `is_transitive_install` (which skips the recipe when a parent `documentdb-N`/meta pulled the gateway in). The DEB check works because dpkg unpacks the whole transaction before running any postinst, so the parent is already queryable in the "unpacked" state; RPM runs each package's `%post` immediately after that one package installs (dependencies first), so at the gateway `%post` the parent `documentdb-N`/meta is not yet in the rpmdb and `rpm -q` reports it absent. There is no false-positive-safe signal *in `%post`* (suppressing on a wrong guess would hide the setup guidance from a genuine stand-alone `dnf install documentdb-gateway`), so the guidance always prints today. The viable fix is to move the check to a `%posttrans` scriptlet: it runs once after the whole transaction commits, where `rpm -q documentdb` / `rpm -q documentdb-N` reliably reflects the parent's presence (the gateway spec already uses `%posttrans` for its per-major unit restarts). Deferred as cosmetic: the printed Workflow-C line already leads with the recommended `documentdb-setup`, so the extra Workflow-B block is verbose, not contradictory. | UX / parity | gateway pkg |
 | u | Drive the net-new install/lifecycle E2E harnesses under `oss/packaging/test_packages/` — the scenario suites (`e2e-rhel-scenarios.sh`, `e2e-rhel-multimajor.sh`, `e2e-multimajor-scenario.sh`, `e2e-container-scenarios.sh`, `e2e-package-hygiene.sh`, `e2e-extra-scenarios.sh`, `e2e-pg16-minimum-major.sh`) and the systemd-as-PID-1 lifecycle suite (`systemd/run-systemd-e2e.sh` + `test-systemd-lifecycle.sh`) — from a scheduled/nightly CI workflow across the OS matrix (ubuntu22.04/24.04, deb11/12/13, rhel8/9), so the cross-OS install story is machine-gated instead of relying on the documented manual WSL2/Docker runs. PR gating today covers the RPM extension clean-install, the gateway clean-install cells, the `documentdb-common` co-install regression (debian:12 + rockylinux:9), and a single-container functional smoke; a nightly (not per-PR) cadence adds the broader matrix without increasing PR latency. | test coverage / CI | combined PR review |
-| v | Single-source the remaining cross-script constants and e2e scaffolding surfaced by the combined-PR maintainability pass: add a gateway-port equivalent of `documentdb_default_pg_port` to `documentdb-tools-lib.sh` (named default `10260`) and replace the literals in `documentdb-register-gateway.sh` and the e2e scripts; export the shared multi-major test ports (`10261`/`10262`, `27018`/`27019`) and PG majors from `e2e-lib.sh`; and hoist the `mongosh` bootstrap (`MONGO_JS`/`mongo_eval`/`mongo_ping`) plus the staged-package-install / `E2E_SETUP_OVERRIDE` flow — currently repeated across the five scenario scripts — into `e2e-lib.sh`, which all five already source. `PUBLIC_ALIAS_PG_MAJOR` lockstep (with `DEFAULT_PG_MAJOR` and the meta spec's `%define default_pg_major`) intentionally stays as-is: it is contract-test-guarded, and a practical single source across bash and the RPM spec preamble does not exist today. | dedup / maintainability | combined PR review |
+| v | Single-source the remaining cross-script constants and e2e scaffolding surfaced by the combined-PR maintainability pass: the gateway-port half has shipped — `DOCUMENTDB_DEFAULT_GATEWAY_PORT` (`10260`) now lives in `documentdb-tools-lib.sh` and is read by `documentdb-setup` and `documentdb-register-gateway`, with the container image's `ENV DOCUMENTDB_PORT` held equal to it by a test, leaving only the literals in the e2e scripts to replace; export the shared multi-major test ports (`10261`/`10262`, `27018`/`27019`) and PG majors from `e2e-lib.sh`; and hoist the `mongosh` bootstrap (`MONGO_JS`/`mongo_eval`/`mongo_ping`) plus the staged-package-install / `E2E_SETUP_OVERRIDE` flow — currently repeated across the five scenario scripts — into `e2e-lib.sh`, which all five already source. `PUBLIC_ALIAS_PG_MAJOR` lockstep (with `DEFAULT_PG_MAJOR` and the meta spec's `%define default_pg_major`) intentionally stays as-is: it is contract-test-guarded, and a practical single source across bash and the RPM spec preamble does not exist today. | dedup / maintainability | combined PR review |
 
 **Already shipped (in-scope fixes from these same reviews, for context):** the gateway package landed the EL8 `runuser` portability fix and the RPM build + clean-install CI wiring; the postgresql-tools package landed the config-mutation safety hardening — TTY refusal for `--admin-password-stdin`, reconciled `check_foreign_markers` / `backup_file` safety helpers (identical across the tools), and `log_verbose` routed to stderr. The DEB and RPM tools packages are also built by the appliance package's `build_extra_packages.sh` and exercised by this package's CI, so the build gate itself is not deferred — only the additional smoke/behavioral coverage in (c) is. This PR additionally single-sourced the safety-critical managed-block / config-mutation helpers (`assert_managed_markers_balanced`, `strip_managed_block`, `extract_managed_block_content`, `rewrite_with_managed_block`, `backup_file`, `check_foreign_markers`) and the shared string/preload parser helpers (`trim_whitespace`, `strip_wrapping_quotes`, `array_contains`, `read_shared_preload_libraries_from_file`, `merge_shared_preload_libraries`) into `documentdb-tools-lib.sh` — now shared by `documentdb-tune`, `documentdb-register-gateway`, and `documentdb-setup` where applicable (the stand-alone package hard-depends on the `documentdb-postgresql-tools` package shipping the library at `/usr/share/documentdb/scripts/`) — collapsed the two RHEL gateway Dockerfiles (item e), and extracted the shared `deb-common.sh` dpkg-deb scaffolding used by the four `.deb` build scripts. Reconciling `documentdb-setup.sh` onto the shared library also made every managed-block rewrite atomic (temp files now land in the target file's directory via `create_temp_in_dir`, so the final `mv` is a same-filesystem rename rather than a tmpfs copy-then-unlink that could truncate a live config) and fail-closed on a torn/unbalanced block; the remaining `die`/`log`/`log_verbose`, temp-file/cleanup infrastructure, `run_as_user`, `detect_distro`, `has_working_systemd`, `prepend_with_managed_block`, `documentdb-gateway-admin.sh`, and PG-instance-detection folds in item (a) are still deferred.
 

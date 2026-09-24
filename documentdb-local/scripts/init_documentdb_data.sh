@@ -6,27 +6,20 @@
 set -e
 set -u
 
-# Default values
-USERNAME="default_user"
+# Defaults come from the image's settings table beside this script; the
+# entrypoint passes every value explicitly, so these only apply standalone.
+# shellcheck source=documentdb_local_settings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/documentdb_local_settings.sh"
+USERNAME="$(documentdb_local_setting_default USERNAME)"
 PASSWORD=""
-INIT_DATA_PATH="/init_doc_db.d"
+INIT_DATA_PATH="$(documentdb_local_setting_default INIT_DATA_PATH)"
 VERBOSE="false"
 DOCUMENTDB_HOST="localhost"
-DOCUMENTDB_PORT="10260"
+DOCUMENTDB_PORT="$(documentdb_local_setting_default DOCUMENTDB_PORT)"
 # When set (custom user-provided initialization only), this marker is written immediately
 # before the first user script runs, so a non-idempotent init that fails partway is not
 # re-run on a restart and cannot loop. Empty for built-in sample data, which is idempotent.
 ATTEMPT_MARKER=""
-LOG_FILE="${ENTRYPOINT_LOG:-/var/log/documentdb/gateway_entrypoint.log}"
-LOG_FILE_AVAILABLE="false"
-
-if [ -n "$LOG_FILE" ]; then
-    if touch "$LOG_FILE" 2>/dev/null; then
-        LOG_FILE_AVAILABLE="true"
-    else
-        echo "Warning: Unable to append to log file: $LOG_FILE"
-    fi
-fi
 
 # Print usage information
 usage() {
@@ -38,10 +31,10 @@ Usage: $0 [OPTIONS]
 Options:
   -h, --help                    Show this help message
   -H, --host HOST              DocumentDB host (default: localhost)
-  -P, --port PORT              DocumentDB port (default: 10260)
-  -u, --username USERNAME      DocumentDB username (default: default_user)
+  -P, --port PORT              DocumentDB port (default: $(documentdb_local_setting_default DOCUMENTDB_PORT))
+  -u, --username USERNAME      DocumentDB username (default: $(documentdb_local_setting_default USERNAME))
   -d, --data-path PATH         Path to directory containing .js initialization files
-                               (default: /init_doc_db.d)
+                               (default: $(documentdb_local_setting_default INIT_DATA_PATH))
   -v, --verbose                Enable verbose output
   --attempt-marker PATH        Internal: marker file recorded immediately before the first
                                user script runs, making custom initialization one-shot per
@@ -131,13 +124,14 @@ run_mongosh_script() {
     local init_file="${1:-}"
     local init_mode="${2:-load}"
 
+    # File mode propagates JavaScript errors; a heredoc read as a REPL exits zero at EOF.
     DOCUMENTDB_HOST="$DOCUMENTDB_HOST" \
     DOCUMENTDB_PORT="$DOCUMENTDB_PORT" \
     DOCUMENTDB_USERNAME="$USERNAME" \
     DOCUMENTDB_PASSWORD="$PASSWORD" \
     DOCUMENTDB_INIT_FILE="$init_file" \
     DOCUMENTDB_INIT_MODE="$init_mode" \
-        mongosh --quiet --nodb <<'EOF'
+        mongosh --quiet --nodb --file /dev/stdin <<'EOF'
 const host = process.env.DOCUMENTDB_HOST || 'localhost';
 const port = process.env.DOCUMENTDB_PORT;
 const username = process.env.DOCUMENTDB_USERNAME;
@@ -155,7 +149,7 @@ if (initMode === 'ping') {
     // init scripts that reference the ambient `db` without calling use().
     // The URI above targets /admin only for authentication (authSource=admin);
     // the previous `mongosh localhost:PORT --file` invocation defaulted to
-    // 'test'. Scripts that select their own db (e.g. use('sampledb')) are
+    // 'test'. Scripts that select their own db (e.g. use('StoreData')) are
     // unaffected because their use() runs after this and overrides it.
     db = db.getSiblingDB('test');
     load(initFile);
@@ -169,23 +163,6 @@ resolve_password
 log() {
     if [ "$VERBOSE" = "true" ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-    fi
-}
-
-print_and_log() {
-    local message="$1"
-    echo "$message"
-    if [ "$LOG_FILE_AVAILABLE" = "true" ]; then
-        printf '%s\n' "$message" >> "$LOG_FILE"
-    fi
-}
-
-print_file_and_log() {
-    local file_path="$1"
-    if [ "$LOG_FILE_AVAILABLE" = "true" ]; then
-        tee -a "$LOG_FILE" < "$file_path"
-    else
-        cat "$file_path"
     fi
 }
 
@@ -269,9 +246,6 @@ run_init_scripts() {
 
             echo "Executing initialization script: $(basename "$init_file")"
             log "Full path: $init_file"
-            print_and_log "---- Begin init data: $(basename "$init_file") ----"
-            print_file_and_log "$init_file"
-            print_and_log "---- End init data: $(basename "$init_file") ----"
 
             if run_mongosh_script "$init_file"; then
                 log "Successfully executed: $(basename "$init_file")"

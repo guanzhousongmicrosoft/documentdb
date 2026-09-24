@@ -16,10 +16,6 @@ set -euo pipefail
 umask 077
 
 readonly PROG="documentdb-tune"
-# Managed block markers — intentionally match documentdb-setup.sh for backward
-# compatibility with existing postrm cleanup scripts.
-readonly MANAGED_BLOCK_START="# >>> documentdb-setup managed configuration >>>"
-readonly MANAGED_BLOCK_END="# <<< documentdb-setup managed configuration <<<"
 
 # ── Defaults ────────────────────────────────────────────────────────
 PG_VERSION=""
@@ -33,6 +29,11 @@ YES=false
 VERBOSE=false
 TOAST_COMPRESSION_REQUESTED=""  # explicit --toast-compression choice
 TOAST_COMPRESSION=""            # resolved value; "" leaves the setting alone
+# Post-apply operator guidance (restart, then create the extensions). Cleared
+# by --no-next-steps for wrappers like documentdb-createcluster that do the work
+# themselves or print their own: otherwise the operator reads the recipe twice,
+# plus a "restart" for a cluster the wrapper has not started yet.
+PRINT_NEXT_STEPS=true
 
 # Resolved at runtime
 CONFIG_TARGET=""
@@ -116,6 +117,10 @@ Options:
                     default for EVERY database, not just DocumentDB's; use
                     "default" there if others must keep the server's setting.
   --yes             Apply changes without prompting
+  --no-next-steps   Suppress the post-apply operator guidance (restart the
+                    server, then create the extensions). For wrapper tools that
+                    print their own; not needed when running documentdb-tune
+                    directly.
   --dry-run         Show what would change without writing
   --restore         Remove the managed config block
   --print           Print the recommended config snippet to stdout and exit
@@ -146,46 +151,21 @@ for _ddb_cand in "${_DDB_TOOLS_LIB_DIR}/documentdb-tools-lib.sh" \
 done
 [[ "${_DDB_TOOLS_LIB_LOADED:-}" == "1" ]] \
     || die "cannot locate documentdb-tools-lib.sh (looked beside ${BASH_SOURCE[0]} and in /usr/share/documentdb/scripts)."
+readonly MANAGED_BLOCK_START="${DOCUMENTDB_MANAGED_BLOCK_START}"
+readonly MANAGED_BLOCK_END="${DOCUMENTDB_MANAGED_BLOCK_END}"
 
 # ── Config generation ───────────────────────────────────────────────
 
 build_config_block() {
     local merged_preload="$1"
-    local block=""
 
-    block="shared_preload_libraries = '${merged_preload}'"
-    block+=$'\n'"cron.database_name = 'postgres'"
-    # Run pg_cron jobs in background workers rather than via a libpq client
-    # connection. documentdb-setup installs a hardened pg_hba.conf that only
-    # admits the documentdb-gateway role (peer + ident map) on the local
-    # socket and requires scram-sha-256 over TCP, so pg_cron's default client
-    # mode (cron.use_background_workers = off, which dials cron.host=localhost
-    # over TCP) cannot authenticate and every scheduled job fails with
-    # "connection failed". That silently breaks index creation: createIndexes
-    # enqueues the build and the documentdb_api_internal.build_index_concurrently
-    # pg_cron job that actually builds it never runs, so the gateway polls for a
-    # completion that never arrives and the command hangs. Background-worker mode
-    # runs the jobs in-process with no connection or authentication, which is the
-    # correct model for the self-contained stand-alone cluster. (Requires a
-    # restart to take effect, which documentdb-setup performs after tuning.)
-    block+=$'\n'"cron.use_background_workers = on"
-    block+=$'\n'"documentdb.enableBackgroundWorker = true"
-    block+=$'\n'"documentdb.enableBackgroundWorkerJobs = true"
-    block+=$'\n'"documentdb.indexBuildsScheduledOnBgWorker = false"
-    block+=$'\n'"documentdb.localhost_connection_string = '$(resolve_localhost_connection)'"
-
-    # Empty means the operator asked us to leave the server's own setting alone,
-    # or the build has no lz4 support.
-    if [[ -n "${TOAST_COMPRESSION}" ]]; then
-        block+=$'\n'"default_toast_compression = '${TOAST_COMPRESSION}'"
-    fi
-
-    if [[ "${HAS_EXTENDED_RUM}" == "true" ]]; then
-        block+=$'\n'"documentdb.rum_library_load_option = 'require_documentdb_extended_rum'"
-        block+=$'\n'"documentdb.alternate_index_handler_name = 'extended_rum'"
-    fi
-
-    printf '%s' "${block}"
+    # Shared renderer (documentdb-tools-lib.sh); an empty TOAST_COMPRESSION
+    # means "leave the server's setting alone" and omits the line.
+    render_documentdb_pg_conf \
+        --preload "${merged_preload}" \
+        --localhost-conn "$(resolve_localhost_connection)" \
+        --toast "${TOAST_COMPRESSION}" \
+        --extended-rum "${HAS_EXTENDED_RUM}"
 }
 
 # ── Distro / path resolution ───────────────────────────────────────
@@ -197,16 +177,11 @@ detect_distro() {
     fi
 }
 
+# An unresolvable share directory is not fatal here: documentdb_detect_extended_rum
+# reads the empty value as "not installed" and the handler stays unpinned, which is
+# what documentdb-createcluster's probe concludes from the same failure.
 resolve_pg_sharedir() {
-    PG_SHAREDIR=""
-    local d pg_config
-    while IFS= read -r d; do
-        pg_config="${d}/pg_config"
-        if [[ -x "${pg_config}" ]]; then
-            PG_SHAREDIR="$("${pg_config}" --sharedir 2>/dev/null || true)"
-            return 0
-        fi
-    done < <(documentdb_pg_bindir_candidates "${PG_VERSION}")
+    PG_SHAREDIR="$(documentdb_pg_sharedir "${PG_VERSION}" || true)"
 }
 
 resolve_config_target() {
@@ -696,7 +671,7 @@ _resolve_effective_port() {
     local port="${PG_PORT_OVERRIDE}"
     if [[ -z "${port}" ]]; then
         port="$(_read_effective_scalar_guc 'port')"
-        [[ -n "${port}" ]] || port="5432"
+        [[ -n "${port}" ]] || port="${DOCUMENTDB_DISTRO_PG_PORT}"
     fi
     printf '%s' "${port}"
 }
@@ -803,8 +778,13 @@ enforce_autoconf_preload_not_overriding() {
     [[ -n "${autoconf}" ]] || return 0
     _spl_assigned_in_file "${autoconf}" || return 0
 
-    local -a required=("pg_cron" "pg_documentdb_core" "pg_documentdb")
-    [[ "${HAS_EXTENDED_RUM}" == "true" ]] && required+=("pg_documentdb_extended_rum")
+    # Same authority as merge_shared_preload_libraries, so what we enforce here
+    # cannot drift from what we write.
+    local -a required=()
+    local _raw
+    _raw="$(documentdb_required_preload_libraries "${HAS_EXTENDED_RUM}")" \
+        || die "cannot determine the required shared_preload_libraries set."
+    mapfile -t required <<< "${_raw}"
 
     local auto_val
     auto_val="$(strip_wrapping_quotes "$(read_shared_preload_libraries_from_file "${autoconf}")")"
@@ -977,11 +957,16 @@ do_print() {
 
     current_preload="$(fold_in_debian_live_preload "${current_preload}")"
     merged_preload="$(merge_shared_preload_libraries "${current_preload}")"
-    block="$(build_config_block "${merged_preload}")"
 
+    # Before rendering: the renderer rejects the same unrepresentable socket dir
+    # enforce_localhost_conn_safe explains, so its remediation must be printed
+    # rather than replaced by the renderer's bare parameter error.
     enforce_config_includes_resolved warn
     enforce_unix_sockets_enabled warn
     enforce_localhost_conn_safe warn
+
+    block="$(build_config_block "${merged_preload}")" \
+        || die "Failed to render the DocumentDB configuration block."
 
     printf '%s\n' "${MANAGED_BLOCK_START}"
     printf '%s\n' "${block}"
@@ -998,12 +983,10 @@ do_apply() {
 
     current_preload="$(fold_in_debian_live_preload "${current_preload}")"
     merged_preload="$(merge_shared_preload_libraries "${current_preload}")"
-    block="$(build_config_block "${merged_preload}")"
 
     # If postgresql.auto.conf (ALTER SYSTEM) overrides shared_preload_libraries
     # away from the required documentdb libraries, the fragment we are about to
     # write is ineffective — fail on apply rather than report a broken success;
-    # a --dry-run preview only warns.
     if [[ "${DRY_RUN}" == "true" ]]; then
         enforce_autoconf_preload_not_overriding warn
         enforce_config_includes_resolved warn
@@ -1015,6 +998,9 @@ do_apply() {
         enforce_unix_sockets_enabled die
         enforce_localhost_conn_safe die
     fi
+
+    block="$(build_config_block "${merged_preload}")" \
+        || die "Failed to render the DocumentDB configuration block."
 
     if [[ -f "${CONFIG_TARGET}" ]]; then
         local fragment_is_current=false
@@ -1044,6 +1030,16 @@ do_apply() {
                 log_verbose "Fragment is current but the live postgresql.conf is missing the include line; applying to add it."
             else
                 log "Config is already up to date: ${CONFIG_TARGET}"
+                # Re-running tune is a common move when indexes fail, and the
+                # answer is usually the missing CREATE EXTENSION, not the
+                # config. Not under --dry-run, which applied nothing, and not
+                # under --no-next-steps: a wrapper that suppressed the guidance
+                # must not get a stray restart line on this path either.
+                if [[ "${DRY_RUN}" != "true" && "${PRINT_NEXT_STEPS}" == "true" ]]; then
+                    log "If PostgreSQL has not restarted since this config was written, restart it first."
+                    print_restart_instruction
+                    print_create_extension_next_step
+                fi
                 return 0
             fi
         fi
@@ -1112,6 +1108,28 @@ do_apply() {
 
     log "Config written to ${CONFIG_TARGET}"
 
+    print_restart_instruction
+
+    print_create_extension_next_step
+}
+
+# The restart that makes the config live. Extracted so every path pointing at
+# CREATE EXTENSION prints this FIRST — pg_documentdb_extended_rum errors out of
+# _PG_init unless already in shared_preload_libraries.
+#
+# Gated on PRINT_NEXT_STEPS too: a restart line is post-apply guidance, and
+# documentdb-createcluster tunes a cluster that was never started, where
+# "Restart the cluster" contradicts the "Start with: ..." it prints next.
+print_restart_instruction() {
+    [[ "${PRINT_NEXT_STEPS}" == "true" ]] || return 0
+
+    # Every restart command below is written with sudo. Say once that a host
+    # without it needs a root shell instead; the extension recipe that follows
+    # renders its own runner and reports that separately.
+    if ! command -v sudo >/dev/null 2>&1; then
+        log "This host has no sudo: run the restart command below as root, without the 'sudo' prefix."
+    fi
+
     if [[ -n "${PG_VERSION}" ]]; then
         if has_working_systemd; then
             if [[ "${IS_DEBIAN}" == "true" && -z "${PGDATA}" ]]; then
@@ -1144,6 +1162,85 @@ do_apply() {
                 log "Restart PostgreSQL to apply the new settings (your distro's preferred command)."
             fi
         fi
+    fi
+}
+
+# The config is only half a working install: with HAS_EXTENDED_RUM the block
+# pins alternate_index_handler_name='extended_rum', an access method that does
+# not exist until documentdb_extended_rum is created. tune cannot do that itself
+# (the cluster may be stopped, and the GUC is cluster-wide while the extension
+# is per-database), so print the command.
+#
+# Always call print_restart_instruction before this.
+print_create_extension_next_step() {
+    [[ "${PRINT_NEXT_STEPS}" == "true" ]] || return 0
+
+    local extra_extension=""
+    if [[ "${HAS_EXTENDED_RUM}" == "true" ]]; then
+        extra_extension="documentdb_extended_rum"
+    fi
+
+    # Name the cluster this invocation tuned: without coordinates the command
+    # follows the default socket and port, a different server on a
+    # multi-cluster host. Separate arguments, because the socket directory is
+    # read from the host's configuration and must reach the operator's shell as
+    # data rather than as syntax.
+    local -a conn_args=()
+    if [[ "${IS_DEBIAN}" == "true" && -z "${PGDATA}" && -n "${PG_VERSION}" ]]; then
+        conn_args=(--cluster "${PG_VERSION}/${CLUSTER_NAME}")
+    else
+        conn_args=(-h "$(_resolve_effective_socket_dir)" -p "$(_resolve_effective_port)")
+    fi
+
+    # A --pgdata instance need not be owned by "postgres" (documentdb-setup
+    # runs stand-alone clusters as documentdb-local), and sudo -u postgres
+    # fails peer auth there. Read the owner off the data directory — and when
+    # that does not yield a usable account (no such directory, stat's UNKNOWN
+    # sentinel for an unmapped uid, or root, which PostgreSQL refuses to run
+    # as) say so instead of printing a command that cannot work.
+    local owner="postgres" owner_answer=""
+    if [[ -n "${PGDATA}" ]]; then
+        if [[ -d "${PGDATA}" ]]; then
+            owner_answer="$(trim_whitespace "$(stat -c '%U' "${PGDATA}" 2>/dev/null || true)")"
+        fi
+        owner="${owner_answer}"
+        case "${owner}" in
+            ""|root|UNKNOWN) owner="" ;;
+        esac
+    fi
+
+    # "the postgres database", not "each database": the block pins
+    # cron.database_name='postgres' and documentdb requires pg_cron, which can
+    # only be created there.
+    local noun="extension"
+    [[ -n "${extra_extension}" ]] && noun="extensions"
+    log "Then create the DocumentDB ${noun} in the 'postgres' database:"
+
+    local advice_line=""
+    if [[ -z "${owner}" ]]; then
+        if [[ -z "${owner_answer}" ]]; then
+            log "  Cannot read the owner of ${PGDATA}, so the exact command cannot be printed."
+        else
+            log "  ${PGDATA} is owned by '${owner_answer}', which cannot own a PostgreSQL session."
+        fi
+        log "  Run these as the account that owns the instance, against $(documentdb_shell_quote "${conn_args[@]}"):"
+        while IFS= read -r advice_line; do
+            log "    ${advice_line}"
+        done < <(documentdb_create_extension_sql "${extra_extension}")
+    else
+        while IFS= read -r advice_line; do
+            log "  ${advice_line}"
+        done < <(documentdb_create_extension_advice "${owner}" postgres \
+                    "${extra_extension}" "${conn_args[@]}")
+    fi
+
+    if [[ -n "${extra_extension}" ]]; then
+        log "Both statements are required: this config sets"
+        log "documentdb.alternate_index_handler_name = 'extended_rum', which resolves only"
+        log "in databases where ${extra_extension} exists — without it a new index"
+        log "build fails with \"Index access method extended_rum is not available\"."
+        log "Run them after PostgreSQL restarts: ${extra_extension} loads only from"
+        log "shared_preload_libraries."
     fi
 }
 
@@ -1227,6 +1324,7 @@ parse_arguments() {
                 esac
                 TOAST_COMPRESSION_REQUESTED="$2"; shift 2 ;;
             --yes) YES=true; shift ;;
+            --no-next-steps) PRINT_NEXT_STEPS=false; shift ;;
             --dry-run) DRY_RUN=true; shift ;;
             --restore) ACTION="restore"; shift ;;
             --print) ACTION="print"; shift ;;

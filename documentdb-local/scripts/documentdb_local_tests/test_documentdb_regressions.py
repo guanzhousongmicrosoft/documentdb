@@ -45,6 +45,18 @@ TUNE_SCRIPT = SCRIPTS_DIR / "documentdb-tune.sh"
 GATEWAY_SETUP_SCRIPT = SCRIPTS_DIR / "documentdb-register-gateway.sh"
 ENTRYPOINT = SCRIPTS_DIR / "emulator_entrypoint.sh"
 TOOLS_LIB = SCRIPTS_DIR / "documentdb-tools-lib.sh"
+PRELOAD_LIB = OSS_ROOT / "scripts" / "preload_libraries.sh"
+
+
+def stage_tools_lib(directory):
+    """Stage documentdb-tools-lib.sh with the file it is installed beside.
+
+    The library takes its required shared_preload_libraries set from the
+    extension-owned preload_libraries.sh and fails closed without it.
+    """
+    directory = Path(directory)
+    shutil.copy2(TOOLS_LIB, directory / "documentdb-tools-lib.sh")
+    shutil.copy2(PRELOAD_LIB, directory / "preload_libraries.sh")
 UTILS_SH = OSS_ROOT / "scripts" / "utils.sh"
 
 
@@ -234,7 +246,7 @@ class TuneDebianIncludeLineAnchoringTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (td_path / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            shutil.copy2(TOOLS_LIB, td_path / "documentdb-tools-lib.sh")
+            stage_tools_lib(td_path)
             live = td_path / "postgresql.conf"
             live.write_text(live_content, encoding="utf-8")
             script = (
@@ -501,7 +513,7 @@ class EntrypointAdminPasswordHardeningTests(unittest.TestCase):
         # SQL goes to psql over stdin, never argv.
         self.assertRegex(
             text,
-            r"printf '%s\\n' \"SELECT documentdb_api\.create_user\('\$\{doc_sql\}'\);\"\s*\\\n\s*\| psql",
+            r"printf '%s\\n' \\\n(\s*\"SET [^\n]*\" \\\n)*\s*\"SELECT documentdb_api\.create_user\('\$\{doc_sql\}'\);\"\s*\\\n\s*\| psql",
         )
         # The single-quote doubling for the SQL literal.
         self.assertIn("doc_sql=${create_user_doc//\\'/\\'\\'}", text)
@@ -638,10 +650,26 @@ class EntrypointAdminPasswordHardeningTests(unittest.TestCase):
             # The SQL arrives on stdin with the JSON-escaped double quote and
             # the SQL-doubled single quote intact.
             self.assertIn("documentdb_api.create_user", sql)
+            # The capture concatenates every psql call, so check the SETs and
+            # the create_user arrive as one block (same connection), not
+            # merely somewhere in the file.
+            self.assertIn(
+                "SET log_statement = 'none';\n"
+                "SET log_min_duration_statement = -1;\n"
+                "SET log_min_error_statement = 'panic';\n"
+                "SELECT documentdb_api.create_user(",
+                sql,
+            )
             self.assertIn('"createUser":"default_user"', sql)
             self.assertIn('pa\\"ss\'\'wd', sql)
             # Role-existence probe also travels via stdin + psql variable.
             self.assertIn("WHERE rolname = :'u';", sql)
+            # psql prints a "LINE 1:" excerpt of a failing statement unless
+            # VERBOSITY is terse, and stderr is tee'd into the entrypoint log.
+            create_call = [a for a in argv.splitlines() if "ON_ERROR_STOP=1" in a]
+            self.assertEqual(len(create_call), 1, argv)
+            self.assertIn("VERBOSITY=terse", create_call[0])
+            self.assertNotIn(password, r.stdout + r.stderr)
 
     def test_stub_override_from_utils_is_still_honored(self):
         # The shadow must replace ONLY the stock implementation: a custom

@@ -35,5 +35,5 @@ jobs:
         # DOCUMENTDB_LOCAL_IMAGE is unset, so it is a no-op here.
         run: python3 -m unittest discover -s documentdb-local/scripts/documentdb_local_tests -p 'test_*.py' -v
 
-      - name: Run internal CI trigger contract tests
-        run: python3 -m unittest discover -s .github/workflows/tests -p 'test_internal_ci_trigger.py'
+      - name: Run workflow contract tests
+        run: python3 -m unittest discover -s .github/workflows/tests -p 'test_*.py' -v
