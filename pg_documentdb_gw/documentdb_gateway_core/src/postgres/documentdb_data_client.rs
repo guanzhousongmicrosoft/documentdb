@@ -1033,15 +1033,37 @@ impl PgDataClient for DocumentDBDataClient {
 
     async fn execute_get_parameter(
         &self,
-        _request_context: &RequestContext<'_>,
-        _all: bool,
-        _show_details: bool,
-        _params: Vec<String>,
-        _connection_context: &ConnectionContext,
+        request_context: &RequestContext<'_>,
+        all: bool,
+        show_details: bool,
+        params: Vec<String>,
+        connection_context: &ConnectionContext,
     ) -> Result<Response> {
-        Err(DocumentDBError::command_not_supported(
-            "Command 'getParameter' not supported.".to_owned(),
-        ))
+        let run_get_param = |conn: Arc<Connection>| {
+            let params = params.clone();
+            async move {
+                let rows = conn
+                    .query(
+                        self.service_context.query_catalog().get_parameter(),
+                        &[Type::BOOL, Type::BOOL, Type::TEXT_ARRAY],
+                        &[&all, &show_details, &params],
+                    )
+                    .await?;
+
+                Ok(Response::Pg(PgResponse::new(rows)))
+            }
+        };
+
+        self.run_query(
+            request_context,
+            connection_context,
+            PullConnection::PoolOrTransaction,
+            QueryOptions::builder()
+                .supports_backend_timeout(false)
+                .build(),
+            run_get_param,
+        )
+        .await
     }
 
     async fn execute_db_stats(

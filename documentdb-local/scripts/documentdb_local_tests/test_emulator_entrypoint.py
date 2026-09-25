@@ -986,7 +986,7 @@ exit 0
     def test_post_start_readiness_gate_precedes_lz4_probe(self):
         # postmaster.pid appears before crash recovery finishes; the boot
         # must wait for the server to ACCEPT connections (pg_isready) before
-        # the lz4 probe runs, or slow-recovering
+        # the lz4 probe and the getParameter stub run, or slow-recovering
         # volumes read as probe anomalies. Structural ordering pin (the
         # behavioral half lives in test_unready_server_stays_inert_and_boots).
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
@@ -994,8 +994,12 @@ exit 0
         gate = entrypoint.index("pg_isready -h localhost", pid_wait)
         rum_probe = entrypoint.index("documentdb_report_extended_rum.sh", pid_wait)
         toast_probe = entrypoint.index("ANY(enumvals)", pid_wait)
+        stub = entrypoint.index(
+            "documentdb_install_getparameter_stub.sh", pid_wait
+        )
         self.assertLess(gate, rum_probe)
         self.assertLess(rum_probe, toast_probe)
+        self.assertLess(gate, stub)
 
     def test_unready_server_stays_inert_and_boots(self):
         # Behavioral half of the readiness gate: pg_isready never reports
@@ -1040,7 +1044,7 @@ exit 0
         # sanitize_uint passes "08"/"09" through; the gate's elapsed-time
         # arithmetic must normalize to base 10 first or $(( )) aborts with
         # "value too great for base" -- with no set -e that abandons the
-        # whole post-start block (probe, reload) while still
+        # whole post-start block (probe, stub install, reload) while still
         # exiting 0: a silent skip. Mirrors the admin-wait pin
         # (test_admin_user_wait_handles_zero_padded_interval); the instant
         # sleep stub keeps the 8-second interval from slowing the test.
@@ -1156,7 +1160,7 @@ exit 0
         # The enumvals probe retries briefly (bounded) when psql itself
         # FAILS -- pin the budget: too few retries loses the tolerance, too
         # many risks the boot stalling. The stub fails every PROBE attempt
-        # (other psql uses keep
+        # (other psql uses, e.g. the getParameter stub install, keep
         # succeeding so the boot itself completes) and records each one.
         self._configure_toast_stubs()
         psql_args = self.root / "failing-psql-args"
@@ -1357,8 +1361,13 @@ exit 0
         # needs it -- and hangs the stub psql these tests use on any runner
         # whose stdin never EOFs (the exact CI failure that motivated this
         # pin).
-        offenders = self._psql_stdin_offenders(ENTRYPOINT)
-        self.assertEqual(offenders, [], msg="\n".join(offenders))
+        for script in (
+            ENTRYPOINT,
+            ENTRYPOINT.parent / "documentdb_install_getparameter_stub.sh",
+        ):
+            with self.subTest(script=script.name):
+                offenders = self._psql_stdin_offenders(script)
+                self.assertEqual(offenders, [], msg="\n".join(offenders))
 
     def test_usage_documents_toast_compression(self):
         result = self._run_entrypoint("--help")
@@ -1372,8 +1381,9 @@ exit 0
         self.assertIn("--start-pg false", result.stdout)
 
     def test_usage_documents_the_external_postgres_mode(self):
-        # --start-pg false writes no server configuration into a database
-        # this entrypoint does not own. Undocumented, it
+        # --start-pg false silently changes two contracts (no server
+        # configuration is written, and no compatibility stub is installed
+        # into a database this entrypoint does not own). Undocumented, it
         # invites users to build on behavior that was never intended to be
         # supported.
         result = self._run_entrypoint("--help")
@@ -1384,8 +1394,6 @@ exit 0
         self.assertIn("Advanced/test use only", usage)
         self.assertIn("listening", usage)
         self.assertIn("getParameter", usage)
-        self.assertIn("CommandNotSupported", usage)
-        self.assertNotIn("undefined-function", usage)
 
     def test_toast_compression_omitted_when_build_lacks_lz4(self):
         # PostgreSQL refuses to start when the value names a method the build
@@ -1683,7 +1691,7 @@ echo oss-server-stub-started
             "default_toast_compression = 'lz4'", conf.read_text(encoding="utf-8")
         )
 
-    def _configure_postgres_stubs(self):
+    def _configure_postgres_stubs(self, psql_exit_code=0):
         (self.data_dir / "postmaster.pid").unlink(missing_ok=True)
         sql_capture = self.root / "psql-input.sql"
         # Append, never truncate: any earlier psql call the entrypoint makes
@@ -1701,7 +1709,7 @@ echo oss-server-stub-started
             self.bin_dir / "psql",
             f"""#!/bin/sh
 cat >> "{sql_capture}"
-exit 0
+exit {psql_exit_code}
 """,
         )
         return sql_capture
@@ -2090,15 +2098,47 @@ exec /bin/chmod "$@"
         args = args_capture.read_text(encoding="utf-8").splitlines()
         self.assertNotIn("-c", args)
 
-    def test_get_parameter_stub_is_not_installed_in_bundled_postgres(self):
+    def test_get_parameter_stub_returns_command_not_supported(self):
         sql_capture = self._configure_postgres_stubs()
 
         result = self._run_entrypoint(extra_env={"START_POSTGRESQL": "true"})
 
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
         sql = sql_capture.read_text(encoding="utf-8")
-        self.assertNotIn("get_parameter", sql)
-        self.assertNotIn("getParameter", result.stdout + result.stderr)
+        self.assertIn(
+            "to_regprocedure('documentdb_api.get_parameter(boolean,boolean,text[])') IS NULL",
+            sql,
+        )
+        self.assertIn(
+            "CREATE FUNCTION documentdb_api.get_parameter(boolean, boolean, text[])",
+            sql,
+        )
+        self.assertIn('"code": 115', sql)
+        self.assertIn('"codeName": "CommandNotSupported"', sql)
+        self.assertIn('"ok": 0.0', sql)
+        self.assertIn(
+            "documentdb-local temporary CommandNotSupported stub for issue #650",
+            sql,
+        )
+        self.assertNotIn("CREATE OR REPLACE FUNCTION", sql)
+        self.assertNotIn("featureCompatibilityVersion", sql)
+        self.assertNotIn("'7.0'", sql)
+        self.assertIn(
+            "Ensuring unsupported getParameter returns CommandNotSupported",
+            result.stdout,
+        )
+
+    def test_get_parameter_stub_install_failure_aborts_startup(self):
+        self._configure_postgres_stubs(psql_exit_code=1)
+
+        result = self._run_entrypoint(extra_env={"START_POSTGRESQL": "true"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "could not install the documentdb-local getParameter rejection stub",
+            result.stdout + result.stderr,
+        )
+        self.assertNotIn("Starting gateway in the background", result.stdout)
 
     def test_get_parameter_stub_is_not_installed_in_external_postgres(self):
         psql_called = self.root / "psql-called"

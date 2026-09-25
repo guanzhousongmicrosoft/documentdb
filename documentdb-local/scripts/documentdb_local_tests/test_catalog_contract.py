@@ -245,12 +245,10 @@ class RealCatalogTests(unittest.TestCase):
             "documentdb_api.compact",
             "documentdb_api.coll_stats",
             "documentdb_api.db_stats",
+            "documentdb_api.get_parameter",
             "documentdb_api.validate",
         ):
             self.assertIn(fn, self.functions)
-
-    def test_get_parameter_does_not_require_a_backend_function(self):
-        self.assertNotIn("documentdb_api.get_parameter", self.functions)
 
     def test_includes_internal_schema_routines(self):
         self.assertIn(

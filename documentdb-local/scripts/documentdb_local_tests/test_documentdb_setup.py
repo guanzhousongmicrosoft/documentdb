@@ -39,6 +39,106 @@ STANDALONE_SPEC = OSS_ROOT / "packaging" / "rpm" / "spec" / "documentdb-local.sp
 PACKAGING_README = OSS_ROOT / "packaging" / "README.md"
 
 
+class GetParameterWorkaroundTests(unittest.TestCase):
+    def _run_setup(self, owner="documentdb-local", port=9718, psql_status=0,
+                   helper_present=True, dry_run=False):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            setup = root / "documentdb-setup.sh"
+            setup.write_text(
+                re.sub(r'(?m)^main[ \t]+"\$@"[ \t]*$', '',
+                       SETUP_SCRIPT.read_text(encoding="utf-8")),
+                encoding="utf-8",
+            )
+            stage_tools_lib(root)
+            if helper_present:
+                shutil.copy2(
+                    SETUP_SCRIPT.parent / "documentdb_install_getparameter_stub.sh",
+                    root,
+                )
+            capture = root / "psql.log"
+            psql = root / "versioned-psql"
+            psql.write_text(
+                "#!/bin/bash\n"
+                f"printf '%s\\n' \"$PGHOST\" \"$PGUSER\" \"$@\" >> {shlex.quote(str(capture))}\n"
+                "sql=$(cat)\n"
+                f"printf '%s\\n' \"$sql\" >> {shlex.quote(str(capture))}\n"
+                "case \"$sql\" in *'SELECT 1 FROM pg_roles'*) echo 1;; esac\n"
+                f"exit {psql_status}\n",
+                encoding="utf-8",
+            )
+            psql.chmod(0o755)
+            harness = (
+                f"source {shlex.quote(str(setup))}\n"
+                'run_as_user() { printf "owner=%s\\n" "$1" >&2; shift; "$@"; }\n'
+                '_create_documentdb_extension_inline() { echo extension-ready; }\n'
+                'reset_documentdb_user_password() { echo admin-ready; }\n'
+                'create_documentdb_user() { echo admin-ready; }\n'
+                f"PG_OWNER={shlex.quote(owner)}; PG_PORT={port}\n"
+                "PG_SOCKET_DIR='/custom socket/postgresql'\n"
+                f"PSQL={shlex.quote(str(psql))}\n"
+                "HAS_EXTENDED_RUM=false; USERNAME=admin; PASSWORD=unused; YES=true\n"
+                f"DRY_RUN={'true' if dry_run else 'false'}\n"
+                "create_required_extensions_and_users\n"
+                "echo setup-complete\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness], stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=10,
+            )
+            return result, capture.read_text(encoding="utf-8") if capture.exists() else ""
+
+    def test_setup_installs_shared_stub_for_selected_instance_before_admin(self):
+        for owner, port in (("documentdb-local", 9718), ("postgres", 6543)):
+            with self.subTest(owner=owner, port=port):
+                result, calls = self._run_setup(owner=owner, port=port)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"owner={owner}", result.stderr)
+                self.assertIn(f"/custom socket/postgresql\n{owner}\n-p\n{port}\n", calls)
+                self.assertIn("-d\npostgres\n-X\n-v\nON_ERROR_STOP=1", calls)
+                self.assertIn("CREATE FUNCTION documentdb_api.get_parameter", calls)
+                self.assertIn("to_regprocedure(", calls)
+                self.assertNotIn("CREATE OR REPLACE FUNCTION", calls)
+                self.assertLess(result.stdout.index("extension-ready"),
+                                result.stdout.index("Ensuring unsupported getParameter"))
+                self.assertLess(result.stdout.index("Ensuring unsupported getParameter"),
+                                result.stdout.index("admin-ready"))
+
+    def test_setup_aborts_if_stub_installation_fails(self):
+        result, calls = self._run_setup(psql_status=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CREATE FUNCTION documentdb_api.get_parameter", calls)
+        self.assertIn("Failed to install the getParameter rejection stub", result.stderr)
+        self.assertNotIn("admin-ready", result.stdout)
+        self.assertNotIn("setup-complete", result.stdout)
+
+    def test_setup_aborts_if_helper_is_missing(self):
+        result, calls = self._run_setup(helper_present=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reinstall documentdb-common", result.stderr)
+        self.assertEqual(calls, "")
+
+    def test_dry_run_does_not_install_stub(self):
+        result, calls = self._run_setup(dry_run=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[dry-run] would: Install temporary getParameter", result.stdout)
+        self.assertNotIn("CREATE FUNCTION", calls)
+
+    def test_both_package_formats_ship_the_shared_helper(self):
+        name = "documentdb_install_getparameter_stub.sh"
+        self.assertIn(
+            f'install -m 0755 "${{REPO_ROOT}}/documentdb-local/scripts/{name}"',
+            COMMON_BUILD_SCRIPT.read_text(encoding="utf-8"),
+        )
+        spec = COMMON_SPEC.read_text(encoding="utf-8")
+        self.assertIn(f"install -Dpm 0755 %{{_sourcedir}}/{name}", spec)
+        self.assertIn(f"%attr(0755,root,root) /usr/share/documentdb/scripts/{name}", spec)
+        self.assertIn(
+            f'cp "${{SCRIPTS_SRC}}/{name}" "${{RPM_TOPDIR}}/SOURCES/"',
+            BUILD_EXTRA_PACKAGES.read_text(encoding="utf-8"),
+        )
+
+
 class DocumentDBSetupTests(unittest.TestCase):
     def test_peer_auth_map_allows_supported_documentdb_user_roles(self):
         script = SETUP_SCRIPT.read_text(encoding="utf-8")
@@ -3037,6 +3137,7 @@ class DocumentDBSetupwizardFlagsTests(unittest.TestCase):
             "Write postgresql.conf managed block via documentdb-tune",
             "Run documentdb-register-gateway --yes",
             "Run CREATE EXTENSION documentdb CASCADE",
+            "Install temporary getParameter rejection stub",
             "Bootstrap first admin user",
         ):
             self.assertRegex(
@@ -3061,6 +3162,7 @@ class DocumentDBSetupwizardFlagsTests(unittest.TestCase):
             "documentdb-tune --yes",
             "documentdb-register-gateway --yes",
             "CREATE EXTENSION documentdb CASCADE",
+            "getParameter rejection stub",
             "bootstrap admin user",
             "documentdb-postgresql@18.service",
             "documentdb-gateway-local@18.service",
