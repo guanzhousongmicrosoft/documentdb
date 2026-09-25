@@ -43,6 +43,8 @@ struct PgConfigurationInner {
     pool_manager: Arc<PoolManager>,
     instance_kind: String,
     enable_pg_file_settings_refresh: bool,
+    max_request_timeout_fallback_sec: u64,
+    transaction_timeout_fallback_sec: u64,
 }
 
 impl PgConfigurationInner {
@@ -232,6 +234,12 @@ impl PgConfiguration {
             enable_pg_file_settings_refresh: setup_configuration
                 .enable_pg_file_settings_refresh()
                 .unwrap_or(false),
+            max_request_timeout_fallback_sec: setup_configuration
+                .postgres_command_timeout_secs()
+                .unwrap_or(MAX_REQUEST_TIMEOUT_DEFAULT_SEC),
+            transaction_timeout_fallback_sec: setup_configuration
+                .transaction_timeout_secs()
+                .unwrap_or(TRANSACTION_TIMEOUT_DEFAULT_SEC),
         };
 
         let values = ArcSwap::from_pointee(inner.load_configurations().await?);
@@ -428,11 +436,17 @@ impl DynamicConfiguration for PgConfiguration {
     }
 
     fn max_request_timeout_sec(&self) -> u64 {
-        self.get_u64(MAX_REQUEST_TIMEOUT_SEC_KEY, MAX_REQUEST_TIMEOUT_DEFAULT_SEC)
+        self.get_u64(
+            MAX_REQUEST_TIMEOUT_SEC_KEY,
+            self.inner.max_request_timeout_fallback_sec,
+        )
     }
 
     fn transaction_timeout_sec(&self) -> u64 {
-        self.get_u64(TRANSACTION_TIMEOUT_SEC_KEY, TRANSACTION_TIMEOUT_DEFAULT_SEC)
+        self.get_u64(
+            TRANSACTION_TIMEOUT_SEC_KEY,
+            self.inner.transaction_timeout_fallback_sec,
+        )
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

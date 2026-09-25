@@ -62,6 +62,14 @@ pub trait SetupConfiguration: DynClone + Send + Sync + Debug {
     /// Returns the password for the data user to connect to the backend `PostgreSQL` server.
     fn postgres_data_user_password(&self) -> Option<&str>;
 
+    /// Returns the configured transaction timeout (in seconds), if any. Used when
+    /// the `transaction_timeout_sec` dynamic setting is not present.
+    fn transaction_timeout_secs(&self) -> Option<u64>;
+
+    /// Returns the configured `PostgreSQL` command timeout (in seconds), if any.
+    /// Used when the `max_request_timeout_sec` dynamic setting is not present.
+    fn postgres_command_timeout_secs(&self) -> Option<u64>;
+
     /// Indicates whether the application should only serve on local host or
     /// be available from all addresses.
     fn use_local_host(&self) -> bool;

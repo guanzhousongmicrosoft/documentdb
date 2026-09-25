@@ -84,12 +84,14 @@ pub struct DocumentDBSetupConfiguration {
 
     #[serde(default)]
     pub allow_transaction_snapshot: Option<bool>,
+    pub transaction_timeout_secs: Option<u64>,
     pub certificate_options: CertificateOptions,
 
     #[serde(default)]
     pub dynamic_configuration_file: String,
     pub dynamic_configuration_refresh_interval_secs: Option<u32>,
     pub host_configuration_watch_interval_ms: Option<u64>,
+    pub postgres_command_timeout_secs: Option<u64>,
     pub postgres_idle_connection_timeout_minutes: Option<u64>,
     pub postgres_startup_wait_time_seconds: Option<u64>,
 
@@ -155,6 +157,7 @@ impl std::fmt::Debug for DocumentDBSetupConfiguration {
                 "allow_transaction_snapshot",
                 &self.allow_transaction_snapshot,
             )
+            .field("transaction_timeout_secs", &self.transaction_timeout_secs)
             .field("certificate_options", &self.certificate_options)
             .field(
                 "dynamic_configuration_file",
@@ -167,6 +170,10 @@ impl std::fmt::Debug for DocumentDBSetupConfiguration {
             .field(
                 "host_configuration_watch_interval_ms",
                 &self.host_configuration_watch_interval_ms,
+            )
+            .field(
+                "postgres_command_timeout_secs",
+                &self.postgres_command_timeout_secs,
             )
             .field(
                 "postgres_idle_connection_timeout_minutes",
@@ -897,6 +904,14 @@ impl SetupConfiguration for DocumentDBSetupConfiguration {
 
     fn host_configuration_watch_interval_ms(&self) -> u64 {
         self.host_configuration_watch_interval_ms.unwrap_or(1000)
+    }
+
+    fn transaction_timeout_secs(&self) -> Option<u64> {
+        self.transaction_timeout_secs
+    }
+
+    fn postgres_command_timeout_secs(&self) -> Option<u64> {
+        self.postgres_command_timeout_secs
     }
 
     fn use_local_host(&self) -> bool {

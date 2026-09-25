@@ -12,7 +12,7 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::time::{interval, Duration};
 
 use crate::{
-    configuration::{DynamicConfiguration, SetupConfiguration},
+    configuration::{DynamicConfiguration, SetupConfiguration, MAX_REQUEST_TIMEOUT_DEFAULT_SEC},
     error::{DocumentDBError, Result},
     postgres::{
         conn_mgmt::{Connection, ConnectionPool, ConnectionPoolStatus, PgPoolSettings},
@@ -286,7 +286,12 @@ fn get_system_connection_pool(
         postgres_system_user,
         None,
         &full_pool_name,
-        PgPoolSettings::system_pool_settings(max_connections),
+        PgPoolSettings::system_pool_settings_with_command_timeout(
+            max_connections,
+            setup_configuration
+                .postgres_command_timeout_secs()
+                .unwrap_or(MAX_REQUEST_TIMEOUT_DEFAULT_SEC),
+        ),
     )
 }
 
@@ -850,6 +855,34 @@ mod tests {
             !Arc::ptr_eq(&initial_pool, &updated_pool),
             "a transaction-timeout change must create a pool with updated connection settings"
         );
+    }
+
+    #[tokio::test]
+    async fn test_system_pool_uses_setup_command_timeout() {
+        yield_now().await;
+
+        let query_catalog = create_query_catalog();
+        let default_pool = get_system_connection_pool(
+            &setup_configuration(),
+            &query_catalog,
+            "SystemRequests",
+            SYSTEM_REQUESTS_MAX_CONNECTIONS,
+        )
+        .unwrap();
+        assert_eq!(default_pool.command_deadline(), Duration::from_secs(121));
+
+        let setup_config = DocumentDBSetupConfiguration {
+            postgres_command_timeout_secs: Some(45),
+            ..setup_configuration()
+        };
+        let configured_pool = get_system_connection_pool(
+            &setup_config,
+            &query_catalog,
+            "SystemRequests",
+            SYSTEM_REQUESTS_MAX_CONNECTIONS,
+        )
+        .unwrap();
+        assert_eq!(configured_pool.command_deadline(), Duration::from_secs(46));
     }
 
     #[test]

@@ -9,7 +9,10 @@
 use std::sync::Arc;
 
 use documentdb_gateway_core::{
-    configuration::{DynamicConfiguration, PgConfiguration},
+    configuration::{
+        DynamicConfiguration, PgConfiguration, MAX_REQUEST_TIMEOUT_DEFAULT_SEC,
+        TRANSACTION_TIMEOUT_DEFAULT_SEC,
+    },
     error::Result,
 };
 use documentdb_tests::test_setup::{config::setup_configuration, postgres::get_pool_manager};
@@ -107,6 +110,40 @@ async fn refresh_configuration_with_file_settings_enabled() -> TestResult {
         max_connections > 0,
         "Expected max_connections > 0 after refresh, got {max_connections}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn timeouts_use_setup_configuration_when_settings_are_absent() -> TestResult {
+    let pool_manager = get_pool_manager();
+
+    let defaults = PgConfiguration::new(
+        &setup_configuration(),
+        Arc::clone(&pool_manager),
+        vec!["documentdb.".to_owned()],
+    )
+    .await?;
+    assert_eq!(
+        defaults.transaction_timeout_sec(),
+        TRANSACTION_TIMEOUT_DEFAULT_SEC
+    );
+    assert_eq!(
+        defaults.max_request_timeout_sec(),
+        MAX_REQUEST_TIMEOUT_DEFAULT_SEC
+    );
+
+    let mut setup_config = setup_configuration();
+    setup_config.transaction_timeout_secs = Some(5);
+    setup_config.postgres_command_timeout_secs = Some(45);
+    let configured = PgConfiguration::new(
+        &setup_config,
+        Arc::clone(&pool_manager),
+        vec!["documentdb.".to_owned()],
+    )
+    .await?;
+    assert_eq!(configured.transaction_timeout_sec(), 5);
+    assert_eq!(configured.max_request_timeout_sec(), 45);
 
     Ok(())
 }
