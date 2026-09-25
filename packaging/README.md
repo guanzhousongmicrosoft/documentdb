@@ -210,14 +210,6 @@ install paths, all served by the four packages above:
 See the design doc for the full prerequisite and rollback semantics of
 each workflow.
 
-For private PostgreSQL instances, `documentdb-setup` prints the active collector
-log files from `DATA_DIR/current_logfiles` when present. On PGDG RPM installs,
-this is typically `DATA_DIR/log/postgresql-<Day>.log`, not the startup-only
-`pglog.log`. PostgreSQL updates `current_logfiles` when logs rotate; consult it
-again for the latest paths. Without collector files, the hint remains the
-systemd journal or `DATA_DIR/pglog.log`, depending on how PostgreSQL was started.
-Setup does not change logging or rotation settings.
-
 > **RHEL / Rocky / AlmaLinux prerequisite (before any `dnf install`).**
 > The DocumentDB RPMs depend on PGDG-provided PostgreSQL extension packages
 > (`pgvector_N`, `pg_cron_N`, `postgis36_N`), which live in the PGDG, EPEL, and
