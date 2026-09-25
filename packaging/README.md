@@ -142,6 +142,13 @@ version to the dotted form (`X.Y-Z` → `X.Y.Z`) once, at extraction time, and
 pass it to every builder via `--version` (either form is accepted and
 normalized where needed).
 
+The extension package changelogs for DEB and RPM are generated from
+`CHANGELOG.md`. Keep the release heading (including its major version) and
+notes there; `packaging/update_spec_changelog.sh` preserves the source file
+when generating both package formats. Run the regression checks on Linux
+with `python3 packaging/test_packages/test_changelog.py -v`; both package
+build workflows run them before building.
+
 ## User-facing install paths
 
 The design (`packaging/gateway/packaging-design.md` §5) defines three
