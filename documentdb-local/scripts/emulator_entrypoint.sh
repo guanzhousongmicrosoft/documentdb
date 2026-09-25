@@ -186,11 +186,9 @@ Optional arguments:
                         localhost at --pg-port, and this entrypoint then
                         performs only the gateway-side setup against it. In
                         that mode it writes no server configuration (so
-                        --toast-compression does not apply) and installs no
-                        compatibility stubs into a database it does not own,
-                        so getParameter reports a raw PostgreSQL
-                        undefined-function error rather than the documented
-                        unsupported-command response.
+                        --toast-compression does not apply). The gateway
+                        returns CommandNotSupported for getParameter in
+                        both bundled and external PostgreSQL modes.
   --pg-port             Specify the port for the PostgreSQL server.
                         Defaults to ${d_pg}.
                         Overrides POSTGRESQL_PORT environment variable.
@@ -1000,7 +998,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     echo "PostgreSQL is running."
 
     # postmaster.pid appears BEFORE crash recovery finishes, but every post-start
-    # step below (lz4 probe, getParameter stub, config reload) needs a server
+    # step below (lz4 probe, config reload) needs a server
     # that ACCEPTS connections. One bounded gate keeps them from individually
     # failing on a volume that is merely slow to replay WAL; on timeout we
     # proceed and let each step report its own failure. The verdict feeds the
@@ -1107,9 +1105,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
                 # fails loudly in both offline-verdict cells. Without that
                 # confirmation (gate timed out, or no pg_isready), no evidence
                 # is treated leniently for explicit and implicit alike: stay
-                # inert this boot, warn, retry next start. A server that is
-                # truly sick still fails the boot at the getParameter stub
-                # right after, with the correct blame.
+                # inert this boot, warn, retry next start.
                 if [ "$toast_pg_accepting" != "true" ]; then
                     if [ "$toast_explicit" = "true" ]; then
                         echo "Warning: PostgreSQL readiness could not be confirmed, so lz4 support cannot be confirmed this boot; the requested DOCUMENTDB_TOAST_COMPRESSION=lz4 is NOT in effect this boot — the server default applies, and the next start retries." >&2
@@ -1201,11 +1197,6 @@ if [ "$START_POSTGRESQL" = "true" ]; then
             echo "Warning: could not reload PostgreSQL configuration; the TOAST compression setting takes effect at the next successful start." >&2
         fi
     fi
-
-    # Install the emulator-only getParameter rejection stub for the bundled
-    # PostgreSQL (issue #650); see that script for the rationale. Through
-    # cleanup, not a bare exit: the server is running (see note above).
-    bash "$(dirname "${BASH_SOURCE[0]}")/documentdb_install_getparameter_stub.sh" "$POSTGRESQL_PORT" || cleanup 1
 else
     echo "Skipping PostgreSQL server start."
 fi
