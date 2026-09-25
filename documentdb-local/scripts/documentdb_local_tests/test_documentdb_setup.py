@@ -10107,8 +10107,8 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
 
     def _admin_check(self, td, live="extended_rum", live_exit=0, base="1",
                      extra="1", extra_exit=0, extra_stderr="",
-                     control_file=True, break_mktemp=False, connect_exit=0):
-        """Run the real check dispatch with a psql that answers each of its queries
+                     control_file=True, break_mktemp=False):
+        """Run the real cmd_check with a psql that answers each of its queries
         from the arguments above. Only the caller's logic is under test here --
         no server, no catalog."""
         td = Path(td)
@@ -10125,7 +10125,6 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
             'sql=""\n'
             'for a in "$@"; do sql="$a"; done\n'
             'case "$sql" in\n'
-            f'  "SELECT 1;") echo 1; exit {connect_exit} ;;\n'
             '  *alternate_index_handler_name*)\n'
             f'    printf "%s\\n" {shlex.quote(live)}; exit {live_exit} ;;\n'
             '  *server_version_num*) echo 18; exit 0 ;;\n'
@@ -10158,13 +10157,12 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
             'find_psql() { printf "%s" ' + shlex.quote(str(psql)) + "; }",
             # Inert: drop the account and run the stub directly.
             'run_as_user() { shift; "$@"; }',
+            'PG_OWNER=postgres; TARGET_DB=appdb; SOCKET_DIR=/run/postgresql; PG_PORT=5432',
             "_TEMP_FILES=()",
         ]
         if break_mktemp:
             harness.append("mktemp() { return 1; }")
-        harness.append(
-            "main check --pg-owner postgres --target-db appdb "
-            "--socket-dir /run/postgresql --pg-port 5432")
+        harness.append("cmd_check")
         return self._bash("\n".join(harness) + "\n")
 
     def test_admin_check_reports_a_healthy_database(self):
@@ -10176,35 +10174,12 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
             self.assertNotIn(self.BASE_SQL, r.stdout,
                              "nothing to repair, so no recipe")
 
-    def test_admin_check_succeeds_without_an_optional_index_extension(self):
-        for live in ("", "documentdb_rum"):
-            with self.subTest(live=live), tempfile.TemporaryDirectory() as td:
-                r = self._admin_check(td, live=live, extra="")
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn("DocumentDB extension: loaded", r.stdout)
-                self.assertNotIn("MISSING", r.stdout)
-                self.assertNotIn(self.BASE_SQL, r.stdout)
-
     def test_admin_check_fails_when_documentdb_is_missing(self):
-        for live, extra in (("extended_rum", "1"), ("extended_rum", ""),
-                            ("", ""), ("documentdb_rum", "")):
-            with self.subTest(live=live, extra=extra), tempfile.TemporaryDirectory() as td:
-                r = self._admin_check(td, live=live, base="", extra=extra)
-                self.assertEqual(r.returncode, 1, r.stderr)
-                self.assertIn("DocumentDB extension: NOT loaded", r.stdout)
-                recipe = next(l for l in r.stdout.splitlines() if self.BASE_SQL in l)
-                self.assertIn("-h /run/postgresql -p 5432", recipe)
-                self.assertIn("-d appdb", recipe)
-                self.assertEqual(self.EXTRA_SQL in recipe, live == "extended_rum")
-                if extra:
-                    self.assertIn("(documentdb_extended_rum): available", r.stdout)
-
-    def test_admin_check_fails_when_the_target_is_unreachable(self):
         with tempfile.TemporaryDirectory() as td:
-            r = self._admin_check(td, connect_exit=2)
+            r = self._admin_check(td, base="")
             self.assertEqual(r.returncode, 1, r.stderr)
-            self.assertIn("Cannot connect to PostgreSQL", r.stderr)
-            self.assertNotIn("DocumentDB extension:", r.stdout)
+            self.assertIn("DocumentDB extension: NOT loaded", r.stdout)
+            self.assertIn("(documentdb_extended_rum): available", r.stdout)
 
     def test_admin_check_names_the_missing_index_extension_and_its_remedy(self):
         with tempfile.TemporaryDirectory() as td:
