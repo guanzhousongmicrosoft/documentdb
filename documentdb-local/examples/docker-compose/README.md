@@ -125,6 +125,12 @@ don't have it installed):
 docker inspect --format '{{json .State.Health}}' <container> | jq
 ```
 
+If the PostgreSQL server that the container started stops and does not come
+back within 30 seconds (for example after a disk-full PANIC), the container
+exits with status 1 instead of staying up as unhealthy, so a `restart:` policy
+or orchestrator can act on it. Set `DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT`
+(seconds) to change that wait.
+
 ## Waiting for DocumentDB in your own services
 
 Add a `depends_on` condition to any service that needs the database:

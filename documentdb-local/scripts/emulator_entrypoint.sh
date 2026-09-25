@@ -1601,7 +1601,10 @@ echo "Example: docker logs <container_name> | grep '[POSTGRES]'"
 echo "=========================="
 echo ""
 
-# Wait for the gateway process to keep the container alive
+# Wait for the gateway process to keep the container alive. When this
+# entrypoint started PostgreSQL, also stop the container once the postmaster
+# has been gone for DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT seconds, since nothing
+# in the container restarts it.
 # The wait will be interrupted by signals, allowing cleanup to run.
 # The `|| gateway_rc=$?` capture matters: sourcing utils.sh above (the
 # CREATE_USER=true path) turns on `set -e` plus an ERR trap, so a bare
@@ -1609,6 +1612,29 @@ echo ""
 # script right here — skipping the clean PostgreSQL stop below, which is
 # the exact crash path it exists for.
 gateway_rc=0
+if [ "${START_POSTGRESQL:-}" = "true" ]; then
+    postmaster_running() {
+        local pid
+        pid="$(sed -n 1p "$DATA_PATH/postmaster.pid" 2>/dev/null | tr -dc 0-9)"
+        [ -n "$pid" ] && { kill -0 "$pid" 2>/dev/null || [ -d "/proc/$pid" ]; }
+    }
+
+    postmaster_exit_timeout="$(sanitize_uint "${DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT:-30}" 30 DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT)"
+    postmaster_exit_timeout=$((10#$postmaster_exit_timeout))
+    postmaster_down_for=0
+    while kill -0 "$gateway_pid" 2>/dev/null; do
+        if postmaster_running; then
+            postmaster_down_for=0
+        elif [ "$postmaster_down_for" -ge "$postmaster_exit_timeout" ]; then
+            echo "Error: PostgreSQL has not been running for ${postmaster_exit_timeout} seconds; stopping the container. See the PostgreSQL server log at $DATA_PATH/pglog.log." >&2
+            cleanup 1
+        else
+            postmaster_down_for=$((postmaster_down_for + 1))
+        fi
+        sleep 1 &
+        wait $! || true
+    done
+fi
 wait $gateway_pid || gateway_rc=$?
 
 # Gateway self-exit path (crash/OOM/normal exit): no signal was delivered, so

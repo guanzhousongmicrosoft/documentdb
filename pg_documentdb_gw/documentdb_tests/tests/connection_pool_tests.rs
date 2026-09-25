@@ -580,6 +580,40 @@ async fn shutdown_connectivity_error_is_returned_after_retries_stop() {
     assert_eq!(error.error_message_user(), "Graceful shutdown requested");
 }
 
+/// A backend that refuses connections ends the request with a retryable
+/// `HostUnreachable` after the short retry policy, long before the request
+/// time limit.
+#[tokio::test]
+async fn refused_backend_fails_fast_with_host_unreachable() {
+    let setup_config = failing_setup_configuration();
+    let pool =
+        build_connection_pool(&setup_config, &setup_config.postgres_system_user.clone(), 1).await;
+    let request_tracker = RequestTracker::new();
+    let ping = ping_request();
+    let request_context = RequestContext::new("", &ping, &request_tracker);
+    let dynamic_configuration = TestConfiguration::default();
+
+    let started = Instant::now();
+    let error = run_request_with_retries(
+        ConnectionSource::Pool(&pool),
+        QueryOptions::builder().retry_request(true).build(),
+        RequestOptions::new(false, None),
+        Duration::from_mins(2),
+        &dynamic_configuration,
+        &request_context,
+        |_| async { Ok::<(), StatementError>(()) },
+    )
+    .await
+    .expect_err("a backend that refuses connections should fail the request");
+    let elapsed = started.elapsed();
+
+    assert_eq!(error.error_code(), ErrorCode::HostUnreachable);
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "request should fail fast, took {elapsed:?}"
+    );
+}
+
 /// A gateway ROLLBACK that fails after a request error must leave the connection
 /// marked in-transaction, so the backstop in `Connection::drop` still fires.
 ///

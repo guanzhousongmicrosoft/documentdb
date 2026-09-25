@@ -414,6 +414,56 @@ exit 0
         result = self._run_entrypoint(*extra_args, extra_env=env)
         return result, conf, args_capture
 
+    def _run_with_postmaster_pid(self, postmaster_pid, gateway_seconds):
+        self._configure_toast_stubs()
+        self._write_exec(
+            self.gateway_scripts / "start_oss_server.sh",
+            f"""#!/bin/sh
+printf '%s\\n' "{postmaster_pid}" > "{self.data_dir / 'postmaster.pid'}"
+touch "{self.data_dir / 'pglog.log'}"
+echo oss-server-stub-started
+""",
+        )
+        self._write_exec(
+            self.gateway_release_dir / "documentdb_gateway",
+            f"#!/bin/sh\nexec sleep {gateway_seconds}\n",
+        )
+        self._write_exec(self.bin_dir / "pg_ctl", "#!/bin/sh\nexit 0\n")
+        started = time.monotonic()
+        result = self._run_entrypoint(
+            extra_env={
+                "START_POSTGRESQL": "true",
+                "TOAST_COMPRESSION_CONF": str(self.root / "toast.conf"),
+                "DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT": "1",
+            }
+        )
+        return result, time.monotonic() - started
+
+    def test_container_exits_when_postmaster_is_gone(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+
+        result, elapsed = self._run_with_postmaster_pid(dead.pid, gateway_seconds=25)
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, msg=output)
+        self.assertIn("PostgreSQL has not been running for 1 seconds", output)
+        self.assertIn("Cleanup completed", output)
+        self.assertLess(elapsed, 20, msg=output)
+
+    def test_container_keeps_running_while_postmaster_is_alive(self):
+        postmaster = subprocess.Popen(["sleep", "30"])
+        try:
+            result, _ = self._run_with_postmaster_pid(postmaster.pid, gateway_seconds=4)
+        finally:
+            postmaster.kill()
+            postmaster.wait()
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, msg=output)
+        self.assertNotIn("PostgreSQL has not been running", output)
+        self.assertIn("Gateway process exited with status 0.", output)
+
     def test_toast_compression_defaults_to_lz4(self):
         result, conf, args_capture = self._run_with_toast()
 

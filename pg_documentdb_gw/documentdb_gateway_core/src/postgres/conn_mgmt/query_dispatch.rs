@@ -75,30 +75,32 @@ const fn is_transient_io_error(kind: io::ErrorKind) -> bool {
     )
 }
 
-fn is_connectivity_error(error: &tokio_postgres::Error) -> bool {
+fn io_error_kind(error: &tokio_postgres::Error) -> Option<io::ErrorKind> {
     use std::error::Error;
 
     let mut source = error.source();
     while let Some(err) = source {
         if let Some(io_err) = err.downcast_ref::<io::Error>() {
-            return is_transient_io_error(io_err.kind());
+            return Some(io_err.kind());
         }
         source = err.source();
     }
-    false
+    None
+}
+
+fn is_connectivity_error(error: &tokio_postgres::Error) -> bool {
+    io_error_kind(error).is_some_and(is_transient_io_error)
 }
 
 fn is_timeout_error(error: &tokio_postgres::Error) -> bool {
-    use std::error::Error;
+    io_error_kind(error) == Some(io::ErrorKind::TimedOut)
+}
 
-    let mut source = error.source();
-    while let Some(err) = source {
-        if let Some(io_err) = err.downcast_ref::<io::Error>() {
-            return io_err.kind() == io::ErrorKind::TimedOut;
-        }
-        source = err.source();
-    }
-    false
+fn is_backend_unreachable_error(error: &tokio_postgres::Error) -> bool {
+    matches!(
+        io_error_kind(error),
+        Some(io::ErrorKind::ConnectionRefused | io::ErrorKind::HostUnreachable)
+    )
 }
 
 fn classify_retry(
@@ -107,7 +109,7 @@ fn classify_retry(
     request_options: RequestOptions,
     is_closed: bool,
     is_connectivity: bool,
-    is_timeout: bool,
+    is_fail_fast_transport: bool,
 ) -> Retry {
     // If the connection is already closed, it's a transient error and we should retry
     if is_closed {
@@ -156,9 +158,9 @@ fn classify_retry(
         return retry;
     }
 
-    // Timeout transport errors are retried with short policy,
-    // other connectivity errors with long policy
-    if is_timeout {
+    // Timeouts and refused/unreachable connections are retried with the short
+    // policy, other connectivity errors with the long policy
+    if is_fail_fast_transport {
         return Retry::Short;
     }
 
@@ -182,7 +184,7 @@ fn retry_policy(
         request_options,
         error.is_closed(),
         is_connectivity_error(error),
-        is_timeout_error(error),
+        is_timeout_error(error) || is_backend_unreachable_error(error),
     )
 }
 
@@ -207,17 +209,22 @@ fn extract_pg_error(error: &DocumentDBError) -> Option<&tokio_postgres::Error> {
     None
 }
 
-fn map_shutdown_connectivity_error(
+fn map_connectivity_error(
     postgres_error: Option<&tokio_postgres::Error>,
     dynamic_configuration: &dyn DynamicConfiguration,
 ) -> Option<DocumentDBError> {
-    (dynamic_configuration.send_shutdown_responses()
-        && postgres_error.is_some_and(is_connectivity_error))
-    .then(|| {
-        DocumentDBError::documentdb_error(
-            ErrorCode::ShutdownInProgress,
-            "Graceful shutdown requested".to_owned(),
-        )
+    postgres_error.is_some_and(is_connectivity_error).then(|| {
+        if dynamic_configuration.send_shutdown_responses() {
+            DocumentDBError::documentdb_error(
+                ErrorCode::ShutdownInProgress,
+                "Graceful shutdown requested".to_owned(),
+            )
+        } else {
+            DocumentDBError::documentdb_error(
+                ErrorCode::HostUnreachable,
+                "Unable to reach the database backend".to_owned(),
+            )
+        }
     })
 }
 
@@ -592,7 +599,7 @@ where
                 }
 
                 mark_span_error(&tracing::Span::current());
-                return Err(map_shutdown_connectivity_error(
+                return Err(map_connectivity_error(
                     extract_pg_error(&error),
                     dynamic_configuration,
                 )
@@ -608,7 +615,7 @@ mod tests {
     use tokio_postgres::NoTls;
 
     use super::*;
-    use crate::{error::ErrorKind, testing::TestDynamicConfiguration};
+    use crate::testing::TestDynamicConfiguration;
 
     async fn mapped_connectivity_error() -> DocumentDBError {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -650,26 +657,59 @@ mod tests {
         let dynamic_configuration = TestDynamicConfiguration::default();
         dynamic_configuration.set_send_shutdown_responses(true);
 
-        let error =
-            map_shutdown_connectivity_error(extract_pg_error(&error), &dynamic_configuration)
-                .expect("connectivity error should be mapped when shutdown responses are enabled");
+        let error = map_connectivity_error(extract_pg_error(&error), &dynamic_configuration)
+            .expect("connectivity error should be mapped when shutdown responses are enabled");
 
         assert_eq!(error.error_code(), ErrorCode::ShutdownInProgress);
         assert_eq!(error.error_message_user(), "Graceful shutdown requested");
     }
 
     #[tokio::test]
-    async fn test_shutdown_connectivity_error_when_disabled_preserves_error() {
+    async fn test_connectivity_error_when_shutdown_disabled_returns_host_unreachable() {
         let error = mapped_connectivity_error().await;
         let dynamic_configuration = TestDynamicConfiguration::default();
 
-        let shutdown_error =
-            map_shutdown_connectivity_error(extract_pg_error(&error), &dynamic_configuration);
+        let error = map_connectivity_error(extract_pg_error(&error), &dynamic_configuration)
+            .expect("connectivity error should be mapped when shutdown responses are disabled");
 
-        assert!(shutdown_error.is_none());
-        assert_eq!(error.error_code(), ErrorCode::InternalError);
-        assert_eq!(error.kind(), &ErrorKind::Gateway);
-        assert!(error.as_postgres_error().is_some());
+        assert_eq!(error.error_code(), ErrorCode::HostUnreachable);
+        assert_eq!(
+            error.error_message_user(),
+            "Unable to reach the database backend"
+        );
+    }
+
+    #[test]
+    fn test_non_connectivity_error_is_not_mapped() {
+        let error = DocumentDBError::documentdb_error(ErrorCode::InternalError, String::new());
+
+        assert!(map_connectivity_error(
+            extract_pg_error(&error),
+            &TestDynamicConfiguration::default()
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_retry_policy_with_refused_connection_returns_short() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let connection_string = format!("host=127.0.0.1 port={port} user=test connect_timeout=1");
+        let Err(pg_error) = tokio_postgres::connect(&connection_string, NoTls).await else {
+            panic!("connection should be refused when nothing listens on the port");
+        };
+
+        assert_eq!(
+            io_error_kind(&pg_error),
+            Some(io::ErrorKind::ConnectionRefused)
+        );
+        assert!(is_connectivity_error(&pg_error));
+        assert_eq!(
+            retry_policy(&pg_error, default_query_context(), non_replica_options()),
+            Retry::Short
+        );
     }
 
     // ── is_transient_io_error ──────────────────────────────────────────
