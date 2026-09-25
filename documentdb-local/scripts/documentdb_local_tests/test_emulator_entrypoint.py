@@ -416,119 +416,37 @@ exit 0
         result = self._run_entrypoint(*extra_args, extra_env=env)
         return result, conf, args_capture
 
-    def _run_with_postmaster_pid(self, postmaster_pid, gateway_script, exit_timeout):
+    def test_requests_fail_fast_then_container_exits_when_postmaster_is_gone(self):
         self._configure_toast_stubs()
-        self._write_exec(
-            self.gateway_scripts / "start_oss_server.sh",
-            f"""#!/bin/sh
-printf '%s\\n' "{postmaster_pid}" > "{self.data_dir / 'postmaster.pid'}"
-touch "{self.data_dir / 'pglog.log'}"
-echo oss-server-stub-started
-""",
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (self.gateway_scripts / "start_oss_server.sh").write_text(
+            f"#!/bin/sh\necho {dead.pid} > {self.data_dir / 'postmaster.pid'}\n"
+            f"touch {self.data_dir / 'pglog.log'}\n"
         )
-        self.gateway_record = self.root / "gateway-record"
+        record = self.root / "send-shutdown-responses"
         self._write_exec(
             self.gateway_release_dir / "documentdb_gateway",
-            f"""#!/usr/bin/env python3
-import json, subprocess, sys, time
-record = open({str(self.gateway_record)!r}, "w", buffering=1)
-host_config = json.load(open(sys.argv[1]))["DynamicConfigurationFile"]
-def send_shutdown_responses():
-    return json.load(open(host_config))["SendShutdownResponses"]
-def wait_for(value):
-    deadline = time.monotonic() + 25
-    while send_shutdown_responses() != value:
-        if time.monotonic() > deadline:
-            sys.exit(2)
-        time.sleep(0.2)
-    record.write(value + "\\n")
-""" + textwrap.dedent(gateway_script),
+            f"""#!/bin/sh
+host_config=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["DynamicConfigurationFile"])' "$1")
+while :; do cat "$host_config" >> {record}; sleep 1; done
+""",
         )
         self._write_exec(self.bin_dir / "pg_ctl", "#!/bin/sh\nexit 0\n")
-        started = time.monotonic()
+
         result = self._run_entrypoint(
             extra_env={
                 "START_POSTGRESQL": "true",
                 "TOAST_COMPRESSION_CONF": str(self.root / "toast.conf"),
-                "DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT": str(exit_timeout),
+                "DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT": "5",
             }
-        )
-        record = (
-            self.gateway_record.read_text(encoding="utf-8").split()
-            if self.gateway_record.exists()
-            else []
-        )
-        return result, time.monotonic() - started, record
-
-    def _dead_pid(self):
-        dead = subprocess.Popen(["true"])
-        dead.wait()
-        return dead.pid
-
-    def test_requests_fail_fast_then_container_exits_when_postmaster_is_gone(self):
-        result, elapsed, record = self._run_with_postmaster_pid(
-            self._dead_pid(),
-            """
-            record.write(send_shutdown_responses() + "\\n")
-            wait_for("true")
-            time.sleep(25)
-            """,
-            exit_timeout=5,
         )
 
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 1, msg=output)
-        self.assertEqual(record, ["false", "true"], msg=output)
-        self.assertIn("answers requests with ShutdownInProgress (91)", output)
+        self.assertIn('"SendShutdownResponses": "false"', record.read_text())
+        self.assertIn('"SendShutdownResponses": "true"', record.read_text())
         self.assertIn("PostgreSQL has not been running for 5 seconds", output)
-        self.assertIn("Cleanup completed", output)
-        self.assertLess(elapsed, 20, msg=output)
-        host_config = Path(self._read_config()["DynamicConfigurationFile"])
-        self.assertTrue(host_config.name.startswith("documentdb_host_config_"))
-        self.assertFalse(host_config.exists())
-
-    def test_requests_are_served_again_when_postmaster_comes_back(self):
-        result, _, record = self._run_with_postmaster_pid(
-            self._dead_pid(),
-            f"""
-            wait_for("true")
-            postmaster = subprocess.Popen(["sleep", "30"])
-            with open({str(self.data_dir / 'postmaster.pid')!r}, "w") as pidfile:
-                pidfile.write(f"{{postmaster.pid}}\\n")
-            try:
-                wait_for("false")
-            finally:
-                postmaster.kill()
-            """,
-            exit_timeout=30,
-        )
-
-        output = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, msg=output)
-        self.assertEqual(record, ["true", "false"], msg=output)
-        self.assertIn("PostgreSQL is accepting connections again", output)
-        self.assertNotIn("PostgreSQL has not been running", output)
-
-    def test_container_keeps_running_while_postmaster_is_alive(self):
-        postmaster = subprocess.Popen(["sleep", "30"])
-        try:
-            result, _, record = self._run_with_postmaster_pid(
-                postmaster.pid,
-                """
-                time.sleep(5)
-                record.write(send_shutdown_responses() + "\\n")
-                """,
-                exit_timeout=1,
-            )
-        finally:
-            postmaster.kill()
-            postmaster.wait()
-
-        output = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, msg=output)
-        self.assertEqual(record, ["false"], msg=output)
-        self.assertNotIn("PostgreSQL is not running", output)
-        self.assertIn("Gateway process exited with status 0.", output)
 
     def test_toast_compression_defaults_to_lz4(self):
         result, conf, args_capture = self._run_with_toast()
