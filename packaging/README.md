@@ -428,6 +428,11 @@ Workflow C (stand-alone). The package only Suggests the gateway and
 extension runtime packages — it can be installed first for preview /
 dry-run use.
 
+`documentdb-gateway-admin check` exits nonzero if it cannot connect to the
+selected database, or if `documentdb` or its required index extension is
+missing. Missing extensions still print their status and repair commands
+before the command exits. Healthy targets exit 0.
+
 To build the DEB:
 
 ```sh
