@@ -2221,14 +2221,28 @@ class AdminPasswordLoggingTests(unittest.TestCase):
         return m.group("body") if m else None
 
     def test_create_and_reset_suppress_statement_logging(self):
-        script = SETUP_SCRIPT.read_text(encoding="utf-8")
-        for name in ("create_documentdb_user", "reset_documentdb_user_password"):
-            body = self._function_body(script, name)
-            self.assertIsNotNone(body, f"{name} not found in documentdb-setup.sh")
-            self.assertIn("SET log_statement = 'none'", body,
-                          f"{name} must disable statement logging around the password payload")
-            self.assertIn("SET log_min_duration_statement = -1", body, name)
-            self.assertIn("SET log_min_error_statement = 'panic'", body, name)
+        for script_path, names in (
+            (SETUP_SCRIPT, ("create_documentdb_user", "reset_documentdb_user_password")),
+            (GATEWAY_ADMIN_SCRIPT, ("cmd_create_user", "cmd_reset_password")),
+        ):
+            script = script_path.read_text(encoding="utf-8")
+            for name in names:
+                with self.subTest(script=script_path.name, function=name):
+                    body = self._function_body(script, name)
+                    self.assertIsNotNone(body, f"{name} not found in {script_path.name}")
+                    query = re.search(r"^SELECT documentdb_api\.(?:create|update)_user\(", body,
+                                      flags=re.MULTILINE)
+                    self.assertIsNotNone(query, f"{name} must invoke the user-management API")
+                    for setting in (
+                        "SET log_statement = 'none';",
+                        "SET log_min_duration_statement = -1;",
+                        "SET log_min_error_statement = 'panic';",
+                        "SET log_min_messages = 'panic';",
+                        "SET client_min_messages = 'notice';",
+                        r"\set VERBOSITY terse",
+                    ):
+                        self.assertIn(setting, body, name)
+                        self.assertLess(body.index(setting), query.start(), name)
 
 
 class GatewayReloadDetectionTests(unittest.TestCase):

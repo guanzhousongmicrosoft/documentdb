@@ -487,6 +487,9 @@ create_documentdb_user() {
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
 SET log_min_error_statement = 'panic';
+SET log_min_messages = 'panic';
+SET client_min_messages = 'notice';
+\set VERBOSITY terse
 \set user_bson `cat "$USER_BSON_FILE"`
 SELECT documentdb_api.create_user(:'user_bson'::documentdb_core.bson);
 SQL
@@ -3169,6 +3172,9 @@ reset_documentdb_user_password() {
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
 SET log_min_error_statement = 'panic';
+SET log_min_messages = 'panic';
+SET client_min_messages = 'notice';
+\set VERBOSITY terse
 \set bson_arg `cat "$BSON_FILE"`
 SELECT documentdb_api.update_user(:'bson_arg'::documentdb_core.bson);
 SQL

@@ -82,6 +82,32 @@ setup is not overwritten, and brownfield or otherwise conflicting package,
 configuration, or data state is refused. This bootstrap makes no upgrade or
 repair promise.
 
+### User-management error privacy
+
+`documentdb-gateway-admin` and `documentdb-setup` use terse client errors and
+suppress server messages below `PANIC` for password-bearing create/reset calls.
+Errors remain visible to the caller, but SQL context and debug messages containing
+SCRAM verifiers are omitted. This also protects CSV and JSON server logs, which
+include error context even with `log_error_verbosity = terse`. A duplicate
+`create-user` still exits with status 3 and leaves the existing role and password
+unchanged. These settings apply only to the helper's PostgreSQL session, not the
+cluster; other sessions retain their configured logging.
+
+Run the regression against a native-architecture DocumentDB image from the
+repository root (the test starts and removes its own isolated PostgreSQL cluster):
+
+```sh
+docker run --rm --network none --entrypoint bash \
+  --mount "type=bind,src=$(pwd),dst=/src,readonly" \
+  ghcr.io/documentdb/documentdb/documentdb-local:latest \
+  /src/packaging/test_packages/test-admin-password-logging.sh
+```
+
+The test includes a control that reproduces the disclosure, then checks stderr,
+text/CSV/JSON server logs with debug logging enabled, exit codes, unchanged
+duplicate-user credentials, and password resets. It also runs in the
+documentdb-local image CI matrix.
+
 ## What CI builds (package-production tiers)
 
 First-party CI does **not** build the full distro × PG-major cartesian product.

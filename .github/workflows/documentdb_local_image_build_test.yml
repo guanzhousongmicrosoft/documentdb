@@ -111,6 +111,12 @@ jobs:
           docker image inspect "$IMAGE_REF" \
             --format 'Built {{.RepoTags}} ({{.Architecture}}, size={{.Size}} bytes)'
 
+      - name: Check admin password error logging
+        run: |
+          docker run --rm --network none --entrypoint bash \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/src,readonly" \
+            "$IMAGE_REF" /src/packaging/test_packages/test-admin-password-logging.sh
+
       - name: Run documentdb-local image test
         env:
           DOCUMENTDB_LOCAL_IMAGE: ${{ env.IMAGE_REF }}
