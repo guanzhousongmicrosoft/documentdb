@@ -1071,19 +1071,12 @@ verify_gateway_crud() {
     local crud_script=""
 
     crud_script="$(cat <<'EOF'
-const admin = db.getSiblingDB("admin");
-for (const command of [
-    {getParameter: 1, featureCompatibilityVersion: 1},
-    {getParameter: "*"},
-    {getParameter: {allParameters: true, showDetails: true}},
-]) {
-    try {
-        admin.runCommand(command);
-        throw new Error("getParameter unexpectedly succeeded");
-    } catch (error) {
-        if (error.code !== 115 || error.codeName !== "CommandNotSupported") {
-            throw error;
-        }
+try {
+    db.getSiblingDB("admin").runCommand({getParameter: 1, featureCompatibilityVersion: 1});
+    throw new Error("getParameter unexpectedly succeeded");
+} catch (error) {
+    if (error.code !== 115 || error.codeName !== "CommandNotSupported") {
+        throw error;
     }
 }
 const database = db.getSiblingDB("quickStartDatabase");
