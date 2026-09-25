@@ -8,6 +8,7 @@
 # Takes an optional exit code (default 0) so the self-exit path can propagate
 # the gateway's status.
 configFile=""
+hostConfigFile=""
 
 # Every operator setting (flag, env var, default, type) is declared once in
 # the sibling settings table; this script parses, defaults and validates from
@@ -82,6 +83,9 @@ cleanup_temp_config() {
     # DOCUMENTDB_CONFIG_FILE, the caller owns the lifecycle.
     if [ -z "${DOCUMENTDB_CONFIG_FILE:-}" ] && [ -n "${configFile:-}" ] && [ -f "$configFile" ]; then
         rm -f "$configFile"
+    fi
+    if [ -n "${hostConfigFile:-}" ]; then
+        rm -f "$hostConfigFile" "$hostConfigFile.tmp"
     fi
 }
 
@@ -1257,6 +1261,26 @@ if ! jq --argjson enforceTls "$enforceTls" '.EnforceTls = $enforceTls' "$configF
 fi
 mv "$configFile.tmp" "$configFile"
 
+write_host_config() {
+    printf '{"SendShutdownResponses": "%s"}\n' "$1" > "$hostConfigFile.tmp" \
+        && chmod 644 "$hostConfigFile.tmp" \
+        && mv -f "$hostConfigFile.tmp" "$hostConfigFile"
+}
+
+if [ "${START_POSTGRESQL:-}" = "true" ]; then
+    if hostConfigFile="$(mktemp /tmp/documentdb_host_config_XXXXXX.json)" \
+            && write_host_config false \
+            && jq --arg hostConfig "$hostConfigFile" '.DynamicConfigurationFile = $hostConfig' \
+                "$configFile" > "$configFile.tmp" \
+            && mv "$configFile.tmp" "$configFile"; then
+        :
+    else
+        echo "Warning: could not set up the gateway host configuration file; requests will not fail fast while PostgreSQL is down." >&2
+        rm -f "${hostConfigFile:-}" "$configFile.tmp"
+        hostConfigFile=""
+    fi
+fi
+
 echo "Starting gateway in the background..."
 if [ "$CREATE_USER" = "false" ]; then
     echo "Skipping user creation and starting the gateway..."
@@ -1602,9 +1626,11 @@ echo "=========================="
 echo ""
 
 # Wait for the gateway process to keep the container alive. When this
-# entrypoint started PostgreSQL, also stop the container once the postmaster
-# has been gone for DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT seconds, since nothing
-# in the container restarts it.
+# entrypoint started PostgreSQL, nothing else restarts it, so also watch the
+# postmaster: once it has been gone for 3 seconds, make the gateway answer
+# requests with ShutdownInProgress (91) until PostgreSQL accepts connections
+# again, and stop the container once it has been gone for
+# DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT seconds.
 # The wait will be interrupted by signals, allowing cleanup to run.
 # The `|| gateway_rc=$?` capture matters: sourcing utils.sh above (the
 # CREATE_USER=true path) turns on `set -e` plus an ERR trap, so a bare
@@ -1619,17 +1645,29 @@ if [ "${START_POSTGRESQL:-}" = "true" ]; then
         [ -n "$pid" ] && { kill -0 "$pid" 2>/dev/null || [ -d "/proc/$pid" ]; }
     }
 
-    postmaster_exit_timeout="$(sanitize_uint "${DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT:-30}" 30 DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT)"
+    postmaster_exit_timeout="$(sanitize_uint "${DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT:-20}" 20 DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT)"
     postmaster_exit_timeout=$((10#$postmaster_exit_timeout))
     postmaster_down_for=0
+    backend_marked_down=false
     while kill -0 "$gateway_pid" 2>/dev/null; do
         if postmaster_running; then
             postmaster_down_for=0
-        elif [ "$postmaster_down_for" -ge "$postmaster_exit_timeout" ]; then
-            echo "Error: PostgreSQL has not been running for ${postmaster_exit_timeout} seconds; stopping the container. See the PostgreSQL server log at $DATA_PATH/pglog.log." >&2
-            cleanup 1
+            if [ "$backend_marked_down" = "true" ] \
+                    && pg_isready -q -h localhost -p "$POSTGRESQL_PORT" -t 1 >/dev/null 2>&1 \
+                    && write_host_config false; then
+                backend_marked_down=false
+                echo "PostgreSQL is accepting connections again; the gateway serves requests normally."
+            fi
         else
             postmaster_down_for=$((postmaster_down_for + 1))
+            if [ "$postmaster_down_for" -gt "$postmaster_exit_timeout" ]; then
+                echo "Error: PostgreSQL has not been running for ${postmaster_exit_timeout} seconds; stopping the container. See the PostgreSQL server log at $DATA_PATH/pglog.log." >&2
+                cleanup 1
+            elif [ "$postmaster_down_for" -ge 3 ] && [ "$backend_marked_down" = "false" ] \
+                    && [ -n "$hostConfigFile" ] && write_host_config true; then
+                backend_marked_down=true
+                echo "Warning: PostgreSQL is not running; the gateway answers requests with ShutdownInProgress (91) until it is back." >&2
+            fi
         fi
         sleep 1 &
         wait $! || true

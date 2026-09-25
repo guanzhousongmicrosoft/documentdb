@@ -1,5 +1,5 @@
 ### documentdb v1.0-0 (Unreleased) ###
-* Fail fast with the retryable `HostUnreachable` (6) error when the gateway cannot connect to PostgreSQL at all, instead of retrying for up to `max_request_timeout_sec` (120 s) and then returning `InternalError` (1). A restarting or recovering server is still retried as before. The documentdb-local container now exits when its PostgreSQL server has been gone for `DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT` seconds (default 30). *[Bugfix]*
+* documentdb-local: when the container's PostgreSQL server stops, the gateway answers new requests with the retryable `ShutdownInProgress` (91) error after 3 seconds instead of retrying each one for up to 120 s and then returning `InternalError` (1), and serves them again once PostgreSQL is back. The container exits when PostgreSQL has been gone for `DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT` seconds (default 20). *[Bugfix]*
 * Release executable memory allocated for PCRE2 JIT-compiled regular expressions when their memory context resets. *[Bugfix]* (work item 5530914)
 * Prevent RUM vacuum from processing internal entry-tree and posting-tree roots as leaf pages after concurrent root splits. *[Bugfix]*
 * Restore vacuum cost delays and interrupt handling between RUM posting-tree leaf pages. *[Bugfix]*
