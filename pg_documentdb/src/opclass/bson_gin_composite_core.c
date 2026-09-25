@@ -557,8 +557,8 @@ UpdateRunDataForOrderedBounds(CompositeQueryRunData *runData,
 				SetUpperBound(&runData->indexBounds[i].upperBound,
 							  &entry->boundsSet->bounds[entry->currentOperatorIndex].
 							  upperBound, indexCollation);
-				runData->indexBounds->requiresRuntimeRecheck =
-					runData->indexBounds->requiresRuntimeRecheck ||
+				runData->indexBounds[i].requiresRuntimeRecheck =
+					runData->indexBounds[i].requiresRuntimeRecheck ||
 					entry->boundsSet->bounds[entry
 											 ->currentOperatorIndex].
 					requiresRuntimeRecheck;
