@@ -9,7 +9,6 @@ There is **no allowlist**. The full suite runs under
 `xfail(strict=True)` and a **flaky** list as `xfail(strict=False)`. The gate
 fails on any residual `failed`/`error` — a real regression, or an `XPASS(strict)`
 where a listed expected-failure now passes (the baseline must then be updated).
-The failing and flaky lists must be disjoint; an overlap aborts pytest collection.
 A third list, `config/ci_crash_tests.txt`, holds **engine-crasher** tests,
 applied as `skip` (never executed): an xfailed crasher would still run, crash
 the backend, and cascade connection errors onto every concurrent test. Unlike
@@ -30,8 +29,8 @@ tools/     conftest_known_failures.py (the xfail plugin) and functional_gate.py
 scripts/   run-functional-tests.sh — local runner;
            run_pytest_split.sh — one CI matrix leg (slice + gate), used by
            .github/workflows/functional_tests.yml.
-tests/     Unit tests for functional_gate.py, OSS baseline loading and strict
-           xfail behavior, and the split runner's guard tests (test_run_pytest_split.sh).
+tests/     Unit tests for functional_gate.py + the split runner's guard tests
+           (test_run_pytest_split.sh).
 ```
 
 The suite version is pinned by `source_sha` in `config/image.yml`. Each gateway
@@ -117,9 +116,3 @@ tests, preserves comments/prefix style, and flags anything needing a human
 (listed tests that *errored*, failures already on the flaky list). Re-run the
 gate afterward — strict xfail proves the list is exactly right (an over- or
 under-edited list cannot pass).
-
-Check baseline loading without an engine before running the gate:
-
-```bash
-python3 -m pytest -q documentdb-local/functional-tests/tests/test_known_failures.py
-```
