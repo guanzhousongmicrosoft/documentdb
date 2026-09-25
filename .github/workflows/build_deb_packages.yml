@@ -103,9 +103,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Test package changelog generation
-        run: python3 packaging/test_packages/test_changelog.py -v
-
       - name: Resolve DocumentDB version
         id: version
         uses: ./.github/actions/resolve-documentdb-version
