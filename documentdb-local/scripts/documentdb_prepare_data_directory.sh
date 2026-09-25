@@ -62,7 +62,13 @@ data_path="${1:?usage: documentdb_prepare_data_directory.sh <data_path>}"
 while [ "${#data_path}" -gt 1 ] && [ "${data_path%/}" != "$data_path" ]; do
     data_path="${data_path%/}"
 done
-template_path="${DOCUMENTDB_PGDATA_TEMPLATE:-/data}"
+# The baked template lives at the image's default data path.
+# shellcheck source=documentdb_local_settings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/documentdb_local_settings.sh" || {
+    echo "Error: cannot load documentdb_local_settings.sh beside this script." >&2
+    exit 1
+}
+template_path="${DOCUMENTDB_PGDATA_TEMPLATE:-$(documentdb_local_setting_default DATA_PATH)}"
 template_marker_rel=".documentdb-local/baked_template"
 needs_reinit=false
 

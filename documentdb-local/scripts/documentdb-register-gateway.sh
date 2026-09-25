@@ -333,10 +333,9 @@ resolve_cluster_paths() {
                 [[ "${_pm_sock}" == /* ]] && SOCKET_DIR="${_pm_sock}"
             fi
         fi
-        # /var/run/postgresql is the convention on both Debian and RHEL
-        # packaged PostgreSQL. Operators using a non-default socket dir on a
-        # stopped cluster (no postmaster.pid) must still pass --socket-dir.
-        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="/var/run/postgresql"
+        # Operators using a non-default socket dir on a stopped cluster (no
+        # postmaster.pid) must still pass --socket-dir.
+        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="$(documentdb_distro_pg_socket_dir || true)"
         return 0
     fi
 
@@ -345,12 +344,12 @@ resolve_cluster_paths() {
         PGDATA="/var/lib/postgresql/${PG_VERSION}/${CLUSTER_NAME}"
         HBA_FILE="${pg_conf_dir}/pg_hba.conf"
         IDENT_FILE="${pg_conf_dir}/pg_ident.conf"
-        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="/var/run/postgresql"
+        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="$(documentdb_distro_pg_socket_dir || true)"
     else
         PGDATA="/var/lib/pgsql/${PG_VERSION}/data"
         HBA_FILE="${PGDATA}/pg_hba.conf"
         IDENT_FILE="${PGDATA}/pg_ident.conf"
-        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="/var/run/postgresql"
+        [[ -z "${SOCKET_DIR}" ]] && SOCKET_DIR="$(documentdb_distro_pg_socket_dir || true)"
     fi
     # Explicit return so the function's exit status never reflects the trailing
     # `[[ -z SOCKET_DIR ]] && ...` short-circuit (which returns 1 when
@@ -445,7 +444,7 @@ resolve_target_pg_major() {
         # falling back to 'postgres'. server_version_num is available from any
         # database, and probing TARGET_DB gives the cross-check the same
         # reachability as the operations that follow.
-        vnum="$(run_as_user "${PG_OWNER:-postgres}" "${PSQL}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
+        vnum="$(run_as_user "${PG_OWNER:-${DOCUMENTDB_DISTRO_PG_OWNER}}" "${PSQL}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
             -d "${TARGET_DB:-postgres}" -X -tA -c 'SHOW server_version_num;' 2>/dev/null | tr -d '[:space:]' || true)"
         [[ "${vnum}" =~ ^[0-9]+$ ]] && live=$(( vnum / 10000 ))
     fi
@@ -677,7 +676,7 @@ do_setup() {
         elif [[ "${has_systemd}" == "1" ]]; then
             local reload_cmd="sudo systemctl reload postgresql"
         else
-            local reload_cmd="sudo -u ${PG_OWNER:-postgres} psql -c 'SELECT pg_reload_conf();'  # (no systemd detected)"
+            local reload_cmd="sudo -u ${PG_OWNER:-${DOCUMENTDB_DISTRO_PG_OWNER}} psql -c 'SELECT pg_reload_conf();'  # (no systemd detected)"
         fi
     fi
 
@@ -691,8 +690,44 @@ do_setup() {
         ext_check="$(run_as_user "${PG_OWNER}" "${PSQL}" -h "${SOCKET_DIR}" -p "${PG_PORT}" \
             -d "${TARGET_DB}" -X -tA -c "SELECT 1 FROM pg_extension WHERE extname = 'documentdb';" 2>/dev/null || true)"
         if [[ "${ext_check}" != "1" ]]; then
+            # Name every extension the database needs, not just 'documentdb':
+            # that alone cannot build an index when the config pins an
+            # alternate handler. This runs post-tune/pre-restart, where the
+            # handler GUC does not exist yet, so resolve via
+            # documentdb_required_index_extension (which falls back to the
+            # installed control file) rather than the raw GUC read. Status
+            # captured explicitly: set -e would abort on a bare assignment, and
+            # status 2 is an answer, not a failure.
+            local required_ext="" resolution_rc=0
+            required_ext="$(documentdb_required_index_extension "${PSQL}" "${SOCKET_DIR}" \
+                "${PG_PORT}" "${TARGET_DB}" "${PG_OWNER}" "${TARGET_PG_MAJOR}")" || resolution_rc=$?
+            case "${resolution_rc}" in
+                0|2) ;;
+                *) die "Cannot determine which index extension database '${TARGET_DB}' requires (status ${resolution_rc})." ;;
+            esac
+
             log "WARNING: The DocumentDB extension is not loaded in the '${TARGET_DB}' database."
-            log "Run:  sudo -u ${PG_OWNER} psql -d ${TARGET_DB} -c 'CREATE EXTENSION documentdb CASCADE;'"
+            if (( resolution_rc != 0 )); then
+                # Nothing live answered — the libraries may not be loaded yet,
+                # or the read itself failed. Either way they load only from
+                # shared_preload_libraries, so pre-restart even the base
+                # CASCADE errors out of _PG_init, which the "Then: reload"
+                # underneath cannot rescue. The advice stays conditional
+                # because a server that already restarted needs no action.
+                log "First: restart PostgreSQL if you have not done so since documentdb-tune ran"
+                log "       (DocumentDB's libraries load only from shared_preload_libraries)."
+                if [[ -z "${required_ext}" ]]; then
+                    log "       Which index extension this database needs could not be confirmed,"
+                    log "       so the command below may be incomplete: re-check with"
+                    log "       'documentdb-gateway-admin check' once the server is back up."
+                fi
+            fi
+            local advice_prefix="Run: " advice_line=""
+            while IFS= read -r advice_line; do
+                log "${advice_prefix} ${advice_line}"
+                advice_prefix="     "
+            done < <(documentdb_create_extension_advice "${PG_OWNER}" "${TARGET_DB}" \
+                        "${required_ext}" -h "${SOCKET_DIR}" -p "${PG_PORT}")
             log "Then: ${reload_cmd}"
         fi
     fi
@@ -752,7 +787,7 @@ do_setup() {
     # 10260 default. A wildcard/unspecified host is not connectable, so fall back
     # to loopback.
     local connect_host="127.0.0.1"
-    local connect_port="10260"
+    local connect_port="${DOCUMENTDB_DEFAULT_GATEWAY_PORT}"
     if [[ -n "${GATEWAY_LISTEN_ADDR:-}" ]]; then
         local _la="${GATEWAY_LISTEN_ADDR}"
         if [[ "${_la}" =~ ^:[0-9]+$ ]]; then
@@ -1873,10 +1908,10 @@ main() {
     fi
 
     # Default socket/port if not set
-    [[ -z "${PG_PORT}" ]] && PG_PORT="5432"
-    # PG_OWNER defaults to "postgres" (distro-managed PG instances). For
-    # stand-alone greenfield, the wizard passes --pg-owner documentdb-local.
-    [[ -z "${PG_OWNER}" ]] && PG_OWNER="postgres"
+    [[ -z "${PG_PORT}" ]] && PG_PORT="${DOCUMENTDB_DISTRO_PG_PORT}"
+    # PG_OWNER defaults to the distro's PostgreSQL OS user. For stand-alone
+    # greenfield, the wizard passes --pg-owner documentdb-local.
+    [[ -z "${PG_OWNER}" ]] && PG_OWNER="${DOCUMENTDB_DISTRO_PG_OWNER}"
 
     # Determine secret/state file paths.
     # Track 1 paths (per packaging-design.md §4.4):
