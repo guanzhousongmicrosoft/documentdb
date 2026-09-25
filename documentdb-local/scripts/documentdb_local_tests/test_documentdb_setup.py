@@ -10176,10 +10176,17 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
             self.assertNotIn(self.BASE_SQL, r.stdout,
                              "nothing to repair, so no recipe")
 
+    def test_admin_check_fails_when_documentdb_is_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._admin_check(td, base="")
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("DocumentDB extension: NOT loaded", r.stdout)
+            self.assertIn("(documentdb_extended_rum): available", r.stdout)
+
     def test_admin_check_names_the_missing_index_extension_and_its_remedy(self):
         with tempfile.TemporaryDirectory() as td:
             r = self._admin_check(td, extra="")
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("(documentdb_extended_rum): MISSING", r.stdout)
             self.assertIn("New index builds fail", r.stdout)
             recipe = next(l for l in r.stdout.splitlines() if self.BASE_SQL in l)
@@ -10205,7 +10212,7 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             r = self._admin_check(td, live="__documentdb_guc_absent__",
                                   base="", extra="")
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 1, r.stderr)
             lines = r.stdout.splitlines()
             self.assertIn("installed control file", r.stdout)
             restart_at = next(i for i, l in enumerate(lines) if "restart" in l.lower())
@@ -10219,7 +10226,7 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             r = self._admin_check(td, live="__documentdb_guc_absent__",
                                   base="", extra="", control_file=False)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("cannot tell which index extension", r.stdout)
             self.assertIn("may be incomplete", r.stdout)
 
@@ -10236,7 +10243,7 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
         # strength of a failed observation.
         with tempfile.TemporaryDirectory() as td:
             r = self._admin_check(td, live="", live_exit=1, base="", extra="")
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 1, r.stderr)
             # The diagnosis wraps across log lines, each with its own prefix;
             # compare it as one sentence.
             flat = " ".join(" ".join(

@@ -799,7 +799,7 @@ print_extension_remedy() {
 }
 
 cmd_check() {
-    local psql_bin ext_check
+    local psql_bin ext_check check_status=0
     psql_bin="$(find_psql)"
 
     log "Checking PostgreSQL connectivity..."
@@ -852,6 +852,7 @@ cmd_check() {
     if [[ "${ext_check}" == "1" ]]; then
         log "DocumentDB extension: loaded"
     else
+        check_status=1
         log "DocumentDB extension: NOT loaded"
         print_extension_remedy "${required_ext}"
     fi
@@ -875,6 +876,7 @@ cmd_check() {
         if [[ "${am_ext_check}" == "1" ]]; then
             log "Index access method '${handler_name}' (${required_ext}): available"
         elif [[ "${ext_check}" == "1" ]]; then
+            check_status=1
             log "Index access method '${handler_name}' (${required_ext}): MISSING"
             if (( resolution_rc == 0 )); then
                 # PGC_USERSET: this is the setting in effect for the connection
@@ -889,6 +891,7 @@ cmd_check() {
             print_extension_remedy "${required_ext}"
         fi
     fi
+    return "${check_status}"
 }
 
 # ── Argument parsing ────────────────────────────────────────────────
