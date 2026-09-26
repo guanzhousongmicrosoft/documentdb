@@ -416,20 +416,36 @@ exit 0
         result = self._run_entrypoint(*extra_args, extra_env=env)
         return result, conf, args_capture
 
-    def test_requests_fail_fast_then_container_exits_when_postmaster_is_gone(self):
+    def _start_postmaster_stub(self, directory):
+        executable = self.root / "postgres"
+        shutil.copy2(shutil.which("sleep"), executable)
+        process = subprocess.Popen([str(executable), "30"], cwd=directory)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.terminate)
+        return process
+
+    def _run_postmaster_watch(self, pid, recovery_pid=None):
         self._configure_toast_stubs()
-        dead = subprocess.Popen(["true"])
-        dead.wait()
+        pidfile = self.data_dir / "postmaster.pid"
         (self.gateway_scripts / "start_oss_server.sh").write_text(
-            f"#!/bin/sh\necho {dead.pid} > {self.data_dir / 'postmaster.pid'}\n"
-            f"touch {self.data_dir / 'pglog.log'}\n"
+            f"#!/bin/sh\necho {pid} > '{pidfile}'\n"
+            f"touch '{self.data_dir / 'pglog.log'}'\n"
         )
         record = self.root / "send-shutdown-responses"
+        recover = (
+            f'if [ "$attempt" = 4 ]; then echo {recovery_pid} > "{pidfile}"; fi'
+            if recovery_pid is not None else ""
+        )
         self._write_exec(
             self.gateway_release_dir / "documentdb_gateway",
             f"""#!/bin/sh
 host_config=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["DynamicConfigurationFile"])' "$1")
-while :; do cat "$host_config" >> {record}; sleep 1; done
+for attempt in 1 2 3 4 5 6 7; do
+    cat "$host_config" >> "{record}"
+    {recover}
+    sleep 1
+done
+exit 7
 """,
         )
         self._write_exec(self.bin_dir / "pg_ctl", "#!/bin/sh\nexit 0\n")
@@ -441,12 +457,71 @@ while :; do cat "$host_config" >> {record}; sleep 1; done
                 "DOCUMENTDB_POSTMASTER_EXIT_TIMEOUT": "5",
             }
         )
+        return result, record.read_text()
+
+    def test_postmaster_watch_exits_when_postmaster_is_gone(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        result, record = self._run_postmaster_watch(dead.pid)
 
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 1, msg=output)
-        self.assertIn('"SendShutdownResponses": "false"', record.read_text())
-        self.assertIn('"SendShutdownResponses": "true"', record.read_text())
+        self.assertIn('"SendShutdownResponses": "false"', record)
+        self.assertIn('"SendShutdownResponses": "true"', record)
         self.assertIn("PostgreSQL has not been running for 5 seconds", output)
+
+    def test_postmaster_watch_rejects_unrelated_live_pid(self):
+        unrelated = subprocess.Popen(["sleep", "30"], cwd=self.data_dir)
+        self.addCleanup(unrelated.wait)
+        self.addCleanup(unrelated.terminate)
+        result, record = self._run_postmaster_watch(unrelated.pid)
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, msg=output)
+        self.assertIn('"SendShutdownResponses": "true"', record)
+        self.assertIn("PostgreSQL has not been running for 5 seconds", output)
+
+    @unittest.skipUnless(Path("/proc/self/exe").is_symlink(), "requires Linux procfs")
+    def test_postmaster_watch_rejects_zombie_pid(self):
+        zombie = subprocess.Popen(["true"])
+        self.addCleanup(zombie.wait)
+        os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+        result, record = self._run_postmaster_watch(zombie.pid)
+
+        self.assertEqual(result.returncode, 1, msg=result.stdout + result.stderr)
+        self.assertIn('"SendShutdownResponses": "true"', record)
+
+    @unittest.skipUnless(Path("/proc/self/exe").is_symlink(), "requires Linux procfs")
+    def test_postmaster_watch_accepts_matching_process_without_listener(self):
+        postmaster = self._start_postmaster_stub(self.data_dir)
+        result, record = self._run_postmaster_watch(postmaster.pid)
+
+        self.assertEqual(result.returncode, 7, msg=result.stdout + result.stderr)
+        self.assertIn('"SendShutdownResponses": "false"', record)
+        self.assertNotIn('"SendShutdownResponses": "true"', record)
+
+    @unittest.skipUnless(Path("/proc/self/exe").is_symlink(), "requires Linux procfs")
+    def test_postmaster_watch_rejects_other_data_directory(self):
+        postmaster = self._start_postmaster_stub(self.root)
+        result, record = self._run_postmaster_watch(postmaster.pid)
+
+        self.assertEqual(result.returncode, 1, msg=result.stdout + result.stderr)
+        self.assertIn('"SendShutdownResponses": "true"', record)
+
+    @unittest.skipUnless(Path("/proc/self/exe").is_symlink(), "requires Linux procfs")
+    def test_postmaster_watch_resumes_for_restarted_postmaster(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        postmaster = self._start_postmaster_stub(self.data_dir)
+        result, record = self._run_postmaster_watch(dead.pid, postmaster.pid)
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 7, msg=output)
+        flags = [json.loads(line)["SendShutdownResponses"] for line in record.splitlines()]
+        self.assertIn("true", flags)
+        self.assertEqual(flags[0], "false")
+        self.assertEqual(flags[-1], "false")
+        self.assertIn("PostgreSQL is accepting connections again", output)
 
     def test_toast_compression_defaults_to_lz4(self):
         result, conf, args_capture = self._run_with_toast()
