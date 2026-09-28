@@ -96,14 +96,22 @@ jobs:
         with:
           version: ${{ inputs.version }}
 
-      # Pin every build-generated timestamp to the commit — see the matching
-      # step in build_deb_packages.yml. RPM keeps its changelog in the header
-      # rather than the payload, so this matters less here than for DEB, but
-      # it keeps BUILDTIME deterministic and the two formats symmetric.
+      # Same pin as build_deb_packages.yml, forwarded into the containers for
+      # parity. rpm acts on it only via %clamp_mtime_to_source_date_epoch and
+      # %use_source_date_epoch_as_buildtime; under the current EL9 defaults
+      # forwarding alone does not pin BUILDTIME or clamp payload mtimes.
       - name: Pin SOURCE_DATE_EPOCH to the commit timestamp
         run: |
           echo "DOCUMENTDB_VERSION=${{ steps.version.outputs.version }}" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # documentdb_local_tests.yml ignores **/*.md, so a README-only PR would
+      # never run this pin. One cell is enough; nothing here varies by cell.
+      - name: Check the prerequisite copies match packaging/README.md
+        if: matrix.arch == 'amd64' && matrix.pg_version == env.PAVED_PG_MAJOR
+        # Named class, not -k: a renamed class then errors instead of "Ran 0 tests".
+        working-directory: documentdb-local/scripts/documentdb_local_tests
+        run: python3 -m unittest test_configuration_registry.RhelPrerequisitePinTests
 
       - name: Build RPM Package
         run: |
@@ -127,11 +135,12 @@ jobs:
           compression-level: 0
       # rpmbuild must be present before the gateway clean-install test, which
       # exercises the RPM extras path (build_extra_packages.sh --type rpm) on
-      # the runner. It is also reused by the noarch extras build below.
-      - name: Install rpmbuild
+      # the runner. The repository tools are also used by the installer E2E
+      # after every package has been assembled.
+      - name: Install RPM build and repository tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rpm
+          sudo apt-get install -y --no-install-recommends rpm createrepo-c gnupg
 
       - name: Build Gateway RPM Package
         run: |
@@ -198,6 +207,26 @@ jobs:
             --version ${{ env.DOCUMENTDB_VERSION }} \
             --output-dir "$(pwd)/packaging" \
             --default-pg-major ${{ env.PAVED_PG_MAJOR }}
+
+      # Execute install.sh against a signed temporary DNF repository in a
+      # clean systemd container. The PR matrix contains native amd64 and arm64
+      # cells, and the full/release matrix runs every PG and architecture cell.
+      - name: Run clean-container installer E2E
+        run: |
+          if ! ./packaging/test_packages/installer/run-installer-e2e.sh \
+              --type rpm \
+              --pg ${{ matrix.pg_version }} \
+              --arch ${{ matrix.arch }} \
+              --os-prefix ${{ matrix.os }} \
+              --packages-dir "$(pwd)/packaging"; then
+            echo "::warning::Installer E2E failed; retrying once to absorb upstream repository failures."
+            ./packaging/test_packages/installer/run-installer-e2e.sh \
+              --type rpm \
+              --pg ${{ matrix.pg_version }} \
+              --arch ${{ matrix.arch }} \
+              --os-prefix ${{ matrix.os }} \
+              --packages-dir "$(pwd)/packaging"
+          fi
 
       # Package lint, v1 = informational only (continue-on-error): the first
       # runs establish the real rpmlint baseline; the follow-up is a curated

@@ -109,19 +109,23 @@ jobs:
         with:
           version: ${{ inputs.version }}
 
-      # Pin every build-generated timestamp to the commit. Without this,
-      # deb_install_changelog stamps the current HH:MM:SS into the shipped
-      # /usr/share/doc/<pkg>/changelog.gz, so the SAME noarch package built in
-      # two matrix cells seconds apart differs in payload — which both makes
-      # the release date meaningless ("whenever this cell happened to run")
-      # and trips the aggregate bundle's cross-cell identity check. dpkg-deb
-      # additionally clamps payload mtimes to this value, moving the packages
-      # toward byte-reproducibility. Every cell checks out the same SHA, so
-      # every cell derives the same epoch.
+      # Pin the gateway changelog date and clamp newer payload mtimes to the
+      # commit timestamp. Unpinned, deb_install_changelog stamps each cell's own
+      # HH:MM:SS into changelog.gz, and the gateway deb is built under one name
+      # in every PG cell, so the bundle's cross-cell identity check fails at
+      # random (run 32409058369). The build scripts forward this into the
+      # containers. The extension's debian/changelog date comes from
+      # CHANGELOG.md or wall clock, not from this pin.
       - name: Pin SOURCE_DATE_EPOCH to the commit timestamp
         run: |
           echo "DOCUMENTDB_VERSION=${{ steps.version.outputs.version }}" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # Keep the installer contract test on the paved Ubuntu cell. The
+      # deterministic suite covers both supported package families.
+      - name: Test clean-host installer contract
+        if: matrix.os == 'ubuntu24.04' && matrix.arch == 'amd64' && matrix.pg_version == env.PAVED_PG_MAJOR
+        run: bash packaging/test_packages/test-install-script.sh
 
       - name: Build Debian Package
         run: |
@@ -217,6 +221,36 @@ jobs:
             --output-dir "$(pwd)/packaging" \
             --default-pg-major ${{ env.PAVED_PG_MAJOR }} \
             --os-prefix ${{ matrix.os }}
+
+      # Execute the public bootstrap itself in a clean systemd container. This
+      # is separate from the gateway package E2E above: that suite installs
+      # local files directly, while this path creates a signed temporary APT
+      # repository and proves repository setup, dependency resolution, setup,
+      # and service readiness through install.sh. Both native architectures
+      # are required on PRs and every full/release matrix cell runs it.
+      - name: Install installer E2E repository tools
+        if: matrix.os == 'ubuntu24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev gnupg
+
+      - name: Run clean-container installer E2E
+        if: matrix.os == 'ubuntu24.04'
+        run: |
+          if ! ./packaging/test_packages/installer/run-installer-e2e.sh \
+              --type deb \
+              --pg ${{ matrix.pg_version }} \
+              --arch ${{ matrix.arch }} \
+              --os-prefix ${{ matrix.os }} \
+              --packages-dir "$(pwd)/packaging"; then
+            echo "::warning::Installer E2E failed; retrying once to absorb upstream repository failures."
+            ./packaging/test_packages/installer/run-installer-e2e.sh \
+              --type deb \
+              --pg ${{ matrix.pg_version }} \
+              --arch ${{ matrix.arch }} \
+              --os-prefix ${{ matrix.os }} \
+              --packages-dir "$(pwd)/packaging"
+          fi
 
       # Package lint, v1 = informational only (continue-on-error): the first
       # runs establish the real lintian baseline; the follow-up is a curated

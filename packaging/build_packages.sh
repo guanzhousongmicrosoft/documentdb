@@ -105,6 +105,17 @@ if [[ -z "$PG" ]]; then
     exit 1
 fi
 
+# shellcheck source=documentdb-version.sh
+source "$script_dir/packaging/documentdb-version.sh"
+# Any RC spelling (1.0-rc1, v1.0-RC1, 1.0.0-rc1) builds as 1.0~rc1. With no
+# --version, a checkout on a release tag builds that release, not the control
+# file's GA version.
+DOCUMENTDB_VERSION="$(documentdb_package_version "$DOCUMENTDB_VERSION")"
+if [[ -z "$DOCUMENTDB_VERSION" ]]; then
+    DOCUMENTDB_VERSION="$(documentdb_tag_version "$script_dir")"
+    [[ -z "$DOCUMENTDB_VERSION" ]] || echo "DOCUMENTDB_VERSION taken from the release tag: $DOCUMENTDB_VERSION"
+fi
+
 # get the version from control file
 if [[ -z "$DOCUMENTDB_VERSION" ]]; then
     DOCUMENTDB_VERSION=$(grep -E "^default_version" pg_documentdb_core/documentdb_core.control | sed -E "s/.*'([0-9]+\.[0-9]+-[0-9]+)'.*/\1/")
@@ -185,15 +196,16 @@ if [[ "$PACKAGE_TYPE" == "deb" ]]; then
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg POSTGRES_VERSION="$PG" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
-    # Run the Docker container to build the packages
-    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env DEB_BUILD_OPTIONS="$DEB_BUILD_OPTIONS_VALUE" -v "$abs_output_dir:/output" "$TAG"
+    # Run the Docker container to build the packages. SOURCE_DATE_EPOCH is
+    # forwarded so dpkg-deb clamps mtimes to the workflow pin, not wall clock.
+    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env DEB_BUILD_OPTIONS="$DEB_BUILD_OPTIONS_VALUE" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 elif [[ "$PACKAGE_TYPE" == "rpm" ]]; then
     docker build -t "$TAG" -f "$DOCKERFILE" \
         --build-arg BASE_IMAGE="$DOCKER_IMAGE" \
         --build-arg POSTGRES_VERSION="$PG" \
         --build-arg DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" "$script_dir"
     # Run the Docker container to build the packages
-    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" -v "$abs_output_dir:/output" "$TAG"
+    docker run --rm --env OS="$OS" --env POSTGRES_VERSION="$PG" --env DOCUMENTDB_VERSION="$DOCUMENTDB_VERSION" --env SOURCE_DATE_EPOCH -v "$abs_output_dir:/output" "$TAG"
 fi
 
 echo "Packages built successfully!!"
