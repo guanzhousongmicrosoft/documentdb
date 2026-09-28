@@ -33,7 +33,7 @@ docker compose ps
 
 # 4. Connect (from the host), using the credentials generated in step 1
 mongosh "mongodb://localhost:10260/?tls=true&tlsAllowInvalidCertificates=true" \
-    --username "$DOCUMENTDB_USERNAME" --password "$DOCUMENTDB_PASSWORD"
+    --username "$DOCUMENTDB_USERNAME"
 ```
 
 On Windows, run the same steps from PowerShell with:
@@ -170,7 +170,7 @@ gone.
 ## Seeding data
 
 - **Built-in sample data:** add `INIT_DATA: "true"` to the `environment:`
-  block to load the sample `sampledb` database on first boot.
+  block to load the sample `StoreData` database on first boot.
 - **Your own scripts:** uncomment the `./init-data:/init_doc_db.d:ro` volume
   in `docker-compose.yml` and put `.js` files (run with mongosh, in
   alphabetical order) in `./init-data/`.

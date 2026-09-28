@@ -19,6 +19,98 @@ below, which is the authoritative statement of the CI scope); other OS/PG
 combinations are exposed by the build scripts below for community packagers and
 validation runs.
 
+## Clean-host installer
+
+`packaging/install.sh` bootstraps a new installation from the signed package
+repositories on these hosts:
+
+| Distribution | Architectures | PostgreSQL |
+|---|---|---|
+| Ubuntu 24.04 LTS | amd64, arm64 | 17, 18 |
+| EL9 family, including RHEL, Rocky Linux, AlmaLinux, and CentOS Stream | amd64 (x86_64), arm64 (aarch64) | 17, 18 |
+
+Full setup requires a running systemd environment and root or `sudo` access.
+This includes clean systemd-enabled containers. `--packages-only` does not
+require systemd because it does not configure or start an instance. "Clean"
+means no conflicting DocumentDB packages, repository configuration, setup
+state, or residual data; it does not require a dedicated physical or virtual
+machine.
+
+Download the installer before executing it:
+
+```sh
+curl -fsSLo documentdb-install.sh \
+  https://github.com/documentdb/documentdb/releases/latest/download/install.sh &&
+sh documentdb-install.sh
+```
+
+Direct piping is also compatible:
+
+```sh
+curl -fsSL \
+  https://github.com/documentdb/documentdb/releases/latest/download/install.sh |
+sh
+```
+
+PostgreSQL 18 is the default. An interactive PostgreSQL 17 install is:
+
+```sh
+sh documentdb-install.sh --pg-major 17
+```
+
+For unattended setup, provide a protected password file and acknowledge the
+listener behavior:
+
+```sh
+sh documentdb-install.sh \
+  --yes \
+  --pg-major 18 \
+  --admin-user admin \
+  --admin-password-file /secure/path/admin-password \
+  --listen-port 10260 \
+  --accept-external-listen
+```
+
+Use `--dry-run` to preview operations, `--packages-only` to install packages
+without configuring an instance, and `--no-enable` to configure the new
+instance without starting or enabling its gateway.
+
+The installer selects the repositories required for the detected operating
+system and verifies trusted signing keys before installing packages. It does
+not replace conflicting repository or key configuration. An already configured
+setup is not overwritten, and brownfield or otherwise conflicting package,
+configuration, or data state is refused. This bootstrap makes no upgrade or
+repair promise.
+
+### Temporary getParameter workaround
+
+The OSS gateway calls a `get_parameter` function that the extension does not
+provide. After creating/updating the extension, `documentdb-setup` installs the
+same temporary rejection stub used by `documentdb-local`, in the selected
+instance's `postgres` database. Existing functions are preserved. Setup fails
+if the helper cannot install the stub.
+
+This returns `CommandNotSupported` (115), not `InternalError`, for valid
+`getParameter` requests. It does not implement server parameters or advertise
+a compatibility version. The helper ships in `documentdb-common` for both DEB
+and RPM; no gateway binary change is required. An existing installation needs
+the helper applied once; upgrading the package alone does not modify databases.
+
+For a default package-private PostgreSQL 18 instance, an administrator can apply
+the workaround without rerunning the full setup or restarting services:
+
+```sh
+sudo -u documentdb-local env \
+  PGHOST=/run/documentdb-local/18/postgresql PGUSER=documentdb-local \
+  bash /usr/share/documentdb/scripts/documentdb_install_getparameter_stub.sh \
+  9718 /usr/lib/postgresql/18/bin/psql
+```
+
+On RPM systems, use `/usr/pgsql-18/bin/psql`. For PostgreSQL 17, custom ports,
+or adopted instances, use that instance's actual owner, socket, port, and
+`psql` path. The stub persists across restarts and must be reconsidered when
+the gateway/extension gains real `getParameter` support.
+
 ## What CI builds (package-production tiers)
 
 First-party CI does **not** build the full distro × PG-major cartesian product.
@@ -33,7 +125,10 @@ majors), the build is tiered:
   and **RHEL/Rocky 9** (RPM), for **amd64 + arm64**. The install/start E2E
   (install → `documentdb-setup` → wire protocol) runs on **every cell of that
   matrix**, not just the paved-road default — a combination we ship is a
-  combination we installed and started at least once.
+  combination we installed and started at least once. The package workflows
+  also invoke `install.sh` against signed temporary repositories in clean
+  systemd containers on native amd64 and arm64 runners. Pull requests gate on
+  both architectures, and full/release runs cover both PostgreSQL majors.
 - **Tier 2 / 3 — build on demand (not built by CI).** Every other supported
   combination — **PostgreSQL 15/16**, **Debian 11/12/13**, **Ubuntu 22.04**,
   **RHEL/Rocky 8** — is produced by running the version-parametric build scripts
@@ -91,9 +186,19 @@ install paths, all served by the four packages above:
 
 - **Workflow A — Extension only into a managed PostgreSQL instance
   (advanced):** `apt install postgresql-18-documentdb documentdb-postgresql-tools`
-  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`.
-  No gateway runtime, no wire-protocol endpoint — useful for ops /
-  migration tooling that talks SQL directly.
+  then `sudo documentdb-tune --pg-version 18 --cluster main --yes`,
+  restart PostgreSQL, then run the `CREATE EXTENSION` statements
+  `documentdb-tune` prints — both of them, since
+  `CREATE EXTENSION documentdb CASCADE` does not pull in
+  `documentdb_extended_rum`, and without it no new index can be built.
+  On Debian/Ubuntu, after the packages are installed,
+  `sudo documentdb-createcluster 18 <cluster> --start` does the rest —
+  create, tune, start, and create the extensions — in one step. It wraps
+  `pg_createcluster`, so it needs a cluster name that does not exist yet:
+  not the `main` cluster the `postgresql-18` package auto-creates on
+  install, which `pg_createcluster` refuses to recreate. No gateway
+  runtime, no wire-protocol endpoint — useful for ops / migration tooling
+  that talks SQL directly.
 
 - **Workflow B — Extension + gateway with BYO local PostgreSQL
   (advanced):** Workflow A plus `apt install documentdb-gateway` and
@@ -109,24 +214,49 @@ each workflow.
 > The DocumentDB RPMs depend on PGDG-provided PostgreSQL extension packages
 > (`pgvector_N`, `pg_cron_N`, `postgis36_N`), which live in the PGDG, EPEL, and
 > CodeReady Builder (CRB) repositories. On a stock RHEL-family host `dnf install
-> documentdb` fails dependency resolution until those repos are enabled. Enable
-> them once (adjust the EL major/arch for your host; use `powertools` instead of
-> `crb` on EL8):
+> documentdb` fails dependency resolution until those repos are enabled. **CRB
+> is disabled by default and required**: `postgis36_N` pulls in `gdal*-libs`,
+> which needs `libqhull_r.so.7`, and only CRB ships it. `packaging/install.sh`
+> does this itself; the block below is for hand installs. Adjust the EL
+> major/arch for your host:
 >
 > ```bash
 > sudo dnf install -y dnf-plugins-core
 > sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-> sudo dnf install -y epel-release
-> sudo dnf config-manager --set-enabled crb
+> sudo dnf install -y epel-release || sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+> sudo dnf config-manager --set-enabled crb || sudo subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
 > sudo dnf -qy module disable postgresql
 > ```
 >
-> On EL8 replace `EL-9` with `EL-8` in the PGDG URL and use `--set-enabled
-> powertools` instead of `crb`; on arm64 replace `x86_64` with `aarch64`.
+> The `||` lines fall back to the subscribed-RHEL form, which has no `crb`
+> repo id and no `epel-release` package. RHUI cloud images have neither:
+> enable the `codeready-builder-for-rhel-9-<arch>-rhui-rpms` id that
+> `dnf repolist --all` lists. On EL8 replace `EL-9` with `EL-8` in the PGDG
+> URL, `crb` with `powertools`, and `rhel-9` / `latest-9` with `rhel-8` /
+> `latest-8`; on arm64 replace `x86_64` with `aarch64`.
 > Then the RHEL install commands mirror the Debian workflows above with `dnf`
 > (for example `sudo dnf install documentdb` for Workflow C). This guidance is
 > also embedded in the `%description` of the extension and meta RPMs, so it is
 > visible via `dnf info` before install.
+
+> **Troubleshooting: `nothing provides libqhull_r.so.7()(64bit)`.**
+> A `dnf install` that ends in ~20 near-identical lines like
+>
+> ```text
+> - nothing provides libqhull_r.so.7()(64bit) needed by gdal313-libs-...PGDG.rhel9.x86_64 from pgdg-common
+> ```
+>
+> means the **CRB repository is not enabled**. The message never names the
+> repository that provides `libqhull_r`, and the GDAL candidates are noise from
+> the `postgis36_N` -> `gdal*-libs` -> `libqhull_r` chain. Fix it with the
+> prerequisite block above — the missing line is usually:
+>
+> ```bash
+> sudo dnf config-manager --set-enabled crb   # EL8: --set-enabled powertools
+> ```
+>
+> Confirm with `dnf provides "libqhull_r.so.7()(64bit)"`, which should report a
+> `libqhull_r` package from `Repo : crb` (`powertools` on EL8).
 
 > **Multi-major side-by-side on Debian/Ubuntu (advanced capability).**
 > The major-agnostic files (`documentdb-setup`, the `@`-templated units, helper
@@ -338,3 +468,82 @@ To build the DEB:
 `documentdb-gateway` runtime package) and exits with a clear prerequisite
 error otherwise. This keeps the boundary explicit: tools mutate
 PostgreSQL on behalf of an already-installed gateway.
+
+## Where the DocumentDB defaults live
+
+Each value has one owner. Where a copy is unavoidable, the last column names
+the test that holds it equal to the owner, so a change to the owner that misses
+a copy fails CI instead of drifting.
+
+### How a value travels
+
+There are two surfaces, and they share values only through
+`documentdb-local/scripts/documentdb-tools-lib.sh`.
+
+**Container image.** `documentdb_local_settings.sh` declares each setting the
+entrypoint takes as a flag once (flag, env var, default, type);
+`--skip-init-data`, the deprecated no-op `--disable-extended-rum`, and the
+operator-only env knobs (`DOCUMENTDB_PG_READY_*`,
+`DOCUMENTDB_FORCE_OWNERSHIP_REPAIR`,
+`DOCUMENTDB_FORCE_REMOVE_STALE_POSTMASTER_PID`,
+`DOCUMENTDB_ALLOW_DEFAULT_PASSWORD`) are handled by the entrypoint and its
+data-directory claim helper. The Dockerfile `ENV` block mirrors the defaults.
+`emulator_entrypoint.sh` parses flags into the same env vars,
+applies defaults and validates from the table, then hands values on: ports and
+credentials to `scripts/start_oss_server.sh` as arguments, the resolved ports to
+a state file that `healthcheck.sh` reads, seed-data arguments to
+`init_documentdb_data.sh`, and the gateway port, PostgreSQL port, certificate
+paths and `EnforceTls` into a jq-edited copy of `SetupConfiguration.json` that
+the gateway binary reads. The image's PostgreSQL settings block is written by
+`scripts/utils.sh` at initdb time, not by the library.
+
+`documentdb_claim_data_directory.sh` takes the directory lock and checks for an
+existing `postmaster.pid` before ownership or permission repair. If the runtime
+user cannot access the directory, a privileged bootstrap performs the claim
+first, repairs access, then returns to the original user while retaining the
+same locked file descriptor.
+
+**Host packages.** `documentdb-setup` owns the wizard defaults and reads the
+shared ones from the library. It persists what it chose to
+`/etc/documentdb/local/N/setup.conf`, renders the PostgreSQL block through
+`documentdb-tune` (which calls the library's renderer), and registers the
+gateway through `documentdb-register-gateway`, which writes the gateway env
+file and the `pg-url` file that the systemd unit hands to the gateway binary.
+`documentdb-gateway-admin`, the PostgreSQL service script and `reset` read the
+persisted files back.
+
+**Gateway binary.** Reads the JSON file, then env vars on top (env wins), then
+its compiled defaults. It has no per-setting command-line flag.
+
+### Owners
+
+| Value | Default | Owner | Copies, and what pins them |
+| --- | --- | --- | --- |
+| Image settings the entrypoint takes as flags: gateway port, PostgreSQL port `9712`, username, password, data path, seed-data path, init-data, create-user, start-pg, allow-external-connections, log level, TLS mode, cert/key path, TOAST compression | see the table | `documentdb-local/scripts/documentdb_local_settings.sh` | The Dockerfile `ENV` block mirrors every default except the password and the TOAST value (`ImageDefaultPinTests`); its `OWNER`, `PG_VERSION_USED` and `PATH` lines are image facts, not table rows. `emulator_entrypoint.sh`, `healthcheck.sh`, `init_documentdb_data.sh` and `documentdb_prepare_data_directory.sh` source the table (same test). The shipped `SetupConfiguration.json` and the gateway's compiled defaults also spell `10260` and `9712`; the entrypoint always overwrites both in the JSON it hands the gateway |
+| Gateway port | `10260` | `DOCUMENTDB_DEFAULT_GATEWAY_PORT` in `documentdb-tools-lib.sh` | The image table's row (`ImageDefaultPinTests`); `standalone/build-meta-deb.sh` reads it from the library at build time for its post-install hint |
+| TOAST compression default | `lz4` | `DOCUMENTDB_DEFAULT_TOAST_COMPRESSION` in `documentdb-tools-lib.sh` | The image table's row (`ImageDefaultPinTests`, `test_container_entrypoint_shares_the_same_default`) |
+| PostgreSQL settings block (`cron.*`, `documentdb.*`, `default_toast_compression`, the extended-RUM overlay) | see the renderer | `render_documentdb_pg_conf` in `documentdb-tools-lib.sh` | `documentdb-setup` and `documentdb-tune` call it; `documentdb.conf.sample` is generated from it by `generate-conf-sample.sh` (`test_generated_sample_matches_its_generator`); the wizard's live-value restart check reads its output (`RenderedValueTests`) |
+| Required `shared_preload_libraries` | `pg_cron, pg_documentdb_core, pg_documentdb` (+ `pg_documentdb_extended_rum`) | `GetDocumentDBBasePreloadLibraries` in `scripts/preload_libraries.sh`, reached through `documentdb_required_preload_libraries` | None. The tools packages install the file beside the library (`test_the_shared_files_the_library_needs_are_actually_packaged`; the deb build fails on its own if the file is missing) |
+| Per-major PostgreSQL port | `9700 + major` | `DOCUMENTDB_PG_PORT_BASE_PER_MAJOR` in `documentdb-tools-lib.sh` | None. `documentdb-setup --help` and its port-in-use error interpolate it |
+| Distro PostgreSQL defaults for an adopted instance: port, OS user, socket directory | `5432`, `postgres`, `/var/run/postgresql` else `/run/postgresql` | `DOCUMENTDB_DISTRO_PG_PORT`, `DOCUMENTDB_DISTRO_PG_OWNER`, `documentdb_distro_pg_socket_dir` in `documentdb-tools-lib.sh` | None in `documentdb-setup`, `documentdb-register-gateway` and `documentdb-gateway-admin`. `documentdb-tune` keeps its own socket rule (by distro, not by what exists) because its value lands in the managed block and a change would force a restart |
+| Gateway JSON connection fields stripped on hosts | six field names | none: three pinned copies | `documentdb-setup`'s per-major cleanup and the jq and python branches of `gateway/strip-setup-config.sh` cannot read one another (the gateway package build stages no library), so `GatewayJsonStripFieldsTests` holds all three equal |
+| Managed-block markers | | `DOCUMENTDB_MANAGED_BLOCK_START` / `_END` in `documentdb-tools-lib.sh` | The postrm cleanup in `standalone/build-standalone-deb.sh` and `rpm/spec/documentdb-local.spec` spells them again, unpinned: postrm runs after the library may already be removed, and the marker is on-disk ABI (renaming it orphans every existing block), so it never changes |
+| Paved-road PostgreSQL major | `18` | `PUBLIC_ALIAS_PG_MAJOR` in `documentdb-setup.sh` | `standalone/build-meta-deb.sh`, `build_extra_packages.sh` and `rpm/spec/documentdb-local-meta.spec` (`test_public_alias_major_agrees_with_meta_build_defaults`) |
+| Image PostgreSQL settings block | | `SetupPostgresConfigurations` in `scripts/utils.sh` (extension-owned) | None. It differs from the host block on purpose (no `cron.use_background_workers`, `ssl = off`) and is not rendered by the library |
+
+Two defaults differ between the surfaces on purpose. The image allows plain
+connections (`EnforceTls` false unless `--tlsMode requireTLS`); the packages
+never write `EnforceTls`, so the gateway's compiled default enforces TLS. The
+image runs one cluster on `9712`; the packages run one per major on
+`9700 + major`.
+
+Not in this table: OS account names, the `/etc`, `/var/lib`, `/run` and
+`/var/log` roots, the persisted state-file keys and the systemd unit names.
+Those are not defaults but a contract between installed files, written where
+they are used, because changing one is a migration of every existing install.
+
+To change a default: edit the owner, run
+`documentdb_local_tests/test_configuration_registry.py`, and fix whichever copy
+it names. To add an image setting: add a row to `documentdb_local_settings.sh`
+and its mirror line to the Dockerfile `ENV` block. To add a value the host
+tools share: add it to `documentdb-tools-lib.sh` and add a row here.

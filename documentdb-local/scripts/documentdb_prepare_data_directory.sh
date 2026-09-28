@@ -45,17 +45,14 @@
 # Usage: documentdb_prepare_data_directory.sh <data_path>
 #
 # Environment:
-#   DISABLE_EXTENDED_RUM       "true" when the operator asked for extended RUM
-#                              to be off. The baked template is built WITH it,
-#                              so this conflicts with adopting the template.
 #   DOCUMENTDB_PGDATA_TEMPLATE Path of the image-baked template (default /data).
 #
 # Exit codes (the caller acts on these; anything else is a hard failure):
 #   0   Nothing more to do -- the directory was adopted, populated from the
 #       template, or is ordinary user data. Start the server normally.
-#   10  A PROVEN-pristine baked template conflicts with the requested options
-#       or with this image's PostgreSQL major version; the caller must force a
-#       clean re-initialization (start_oss_server.sh -c).
+#   10  A PROVEN-pristine baked template has a different PostgreSQL major
+#       version; the caller must force a clean re-initialization
+#       (start_oss_server.sh -c).
 
 set -u
 
@@ -65,7 +62,13 @@ data_path="${1:?usage: documentdb_prepare_data_directory.sh <data_path>}"
 while [ "${#data_path}" -gt 1 ] && [ "${data_path%/}" != "$data_path" ]; do
     data_path="${data_path%/}"
 done
-template_path="${DOCUMENTDB_PGDATA_TEMPLATE:-/data}"
+# The baked template lives at the image's default data path.
+# shellcheck source=documentdb_local_settings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/documentdb_local_settings.sh" || {
+    echo "Error: cannot load documentdb_local_settings.sh beside this script." >&2
+    exit 1
+}
+template_path="${DOCUMENTDB_PGDATA_TEMPLATE:-$(documentdb_local_setting_default DATA_PATH)}"
 template_marker_rel=".documentdb-local/baked_template"
 needs_reinit=false
 
@@ -208,12 +211,6 @@ if [ -f "$data_path/$template_marker_rel" ]; then
         # non-destructive.
         echo "Re-initializing data directory: the pre-initialized template holds a PostgreSQL ${data_pg_major} cluster but this image runs PostgreSQL ${image_pg_major}."
         needs_reinit=true
-    elif [ "${DISABLE_EXTENDED_RUM:-false}" = "true" ]; then
-        # The fingerprint proof above established the cluster never ran, so
-        # there is no user data and re-initializing with the requested options
-        # is safe (this is the pre-template fresh-boot path).
-        echo "Re-initializing data directory: --disable-extended-rum requested but the pre-initialized template was built with extended RUM enabled."
-        needs_reinit=true
     else
         echo "Adopting pre-initialized data directory template (fast start)."
     fi
@@ -222,7 +219,6 @@ elif [ "$data_path" != "$template_path" ] && \
      [ -f "$template_path/$template_marker_rel" ] && \
      [ ! -f "$data_path/PG_VERSION" ] && \
      [ -z "$(ls -A "$data_path" 2>/dev/null)" ] && \
-     [ "${DISABLE_EXTENDED_RUM:-false}" != "true" ] && \
      template_is_pristine "$template_path"; then
     # A custom, still-empty data path: instantiate it from the pristine baked
     # template instead of running full initialization.
@@ -250,16 +246,6 @@ elif [ "$data_path" = "$template_path" ] && \
     # empty. Tell the user why this boot is slower than the advertised fast
     # start instead of silently falling through to full initialization.
     echo "Data directory $data_path is empty and was not populated from the image template (host bind mounts are not populated by Docker); running full initialization, so this first boot will be slower."
-fi
-
-if [ "${DISABLE_EXTENDED_RUM:-false}" = "true" ] && [ "$needs_reinit" = "false" ] \
-        && [ -f "$data_path/PG_VERSION" ]; then
-    # Deliberately not "the flag is ignored": whatever was selected when this
-    # directory was initialized is still in effect -- including a previous boot
-    # that this very flag re-initialized. Only *changing* it is impossible, so
-    # a restart of a container that did re-initialize must not be told its
-    # setting was dropped.
-    echo "Note: the extended RUM setting is fixed when a data directory is initialized and cannot be changed for an existing one; whichever setting that directory was initialized with stays in effect. Start with a fresh data volume to change it."
 fi
 
 if [ "$needs_reinit" = "true" ]; then

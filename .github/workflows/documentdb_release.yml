@@ -2,11 +2,11 @@
 #
 # Package production goes through the consolidated build_all_packages.yml
 # reusable workflow, which fans out to the DEB/RPM builds over the Tier-1
-# matrix and emits ONE verified bundle: every .deb/.rpm, SHA256SUMS,
-# manifest.txt, gated by a per-category presence check. The release job
-# attaches that bundle verbatim, so a release can never ship a silently
-# partial package set (the v0.114-0 release shipped no RPMs at all —
-# exactly the failure mode the presence check exists to stop).
+# matrix and emits ONE verified bundle: every .deb/.rpm, the native install.sh
+# bootstrap, SHA256SUMS, and manifest.txt, gated by a per-category presence
+# check. The release job attaches that bundle verbatim, so a release can never
+# ship a silently partial package set (the v0.114-0 release shipped no RPMs at
+# all — exactly the failure mode the presence check exists to stop).
 #
 # Downstream: the documentdb.github.io deploy workflow downloads the
 # published release assets, GPG-signs them, and publishes the apt/yum
@@ -123,7 +123,7 @@ jobs:
 
       # Only the consolidated, presence-checked bundle is attached — not the
       # raw per-cell artifacts. It already contains every .deb/.rpm (deduped,
-      # dbgsym excluded) plus SHA256SUMS and manifest.txt.
+      # dbgsym excluded), install.sh, SHA256SUMS, and manifest.txt.
       - name: Download consolidated package bundle
         uses: actions/download-artifact@v4
         with:
@@ -199,13 +199,34 @@ jobs:
 
           ## 📦 Packages
 
-          All \`.deb\` / \`.rpm\` files are attached below, together with \`SHA256SUMS\` and \`manifest.txt\`. Verify after downloading:
+          All \`.deb\` / \`.rpm\` files and the clean-host \`install.sh\` bootstrap are attached below, together with \`SHA256SUMS\` and \`manifest.txt\`. Verify after downloading:
 
           \`\`\`sh
           gh release download v${VERSION_DASH} -R ${{ github.repository }} -D pkgs && cd pkgs && sha256sum -c SHA256SUMS
           \`\`\`
 
+          After repository publication completes, download, inspect, and run
+          the clean-host installer:
+
+          \`\`\`sh
+          curl -fsSLo documentdb-install.sh https://github.com/${{ github.repository }}/releases/download/v${VERSION_DASH}/install.sh && sh documentdb-install.sh
+          \`\`\`
+
           **Repository-backed install (recommended):** see <https://documentdb.io> → Package Installation. Repository publication follows shortly after this release.
+
+          ### ⚠️ RHEL / Rocky / AlmaLinux: enable PGDG + EPEL + CRB first
+
+          \`dnf install\` fails dependency resolution until these repositories are enabled: PGDG's \`postgis36_N\` needs \`libqhull_r.so.7\`, which only CRB ships, and CRB is off by default. EL9 x86_64 example:
+
+          \`\`\`sh
+          sudo dnf install -y dnf-plugins-core
+          sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+          sudo dnf install -y epel-release || sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+          sudo dnf config-manager --set-enabled crb || sudo subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
+          sudo dnf -qy module disable postgresql
+          \`\`\`
+
+          The \`||\` lines fall back to the subscribed-RHEL form. EL8, arm64, RHUI and troubleshooting: [packaging/README.md](https://github.com/${{ github.repository }}/blob/v${VERSION_DASH}/packaging/README.md).
 
           ### First-party (Tier 1) targets
 
