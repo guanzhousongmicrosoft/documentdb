@@ -32,7 +32,7 @@
 * Return retryable or specific error codes from the gateway for backend connection, transport, and pool failures and for malformed legacy wire-protocol requests instead of `InternalError`. *[Bugfix]*
 * Require insert and/or update permission on a `$merge` or `$out` target collection according to the stage's configured actions, instead of only read permission, so a read-only user can no longer write through these stages. *[Bugfix/Security]*
 
-### documentdb v0.117-0 (Unreleased) ###
+### documentdb v0.117-0 (September 10, 2026) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
 * Reject NaN `$bucketAuto` group values when `granularity` is specified instead of reporting an internal preferred-number-series error. *[Bugfix]*
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*
