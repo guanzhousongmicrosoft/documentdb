@@ -2466,6 +2466,10 @@ ApplyFindSpec(const FindSpec *spec, MongoCollection *collection,
 										  spec->collectionUuid, &spec->indexHint,
 										  context);
 	Query *baseQuery = query;
+	if (context->requiresSubQuery)
+	{
+		query = MigrateQueryToSubQuery(query, context);
+	}
 
 	return ApplyFindSpecCore(spec, query, baseQuery, queryData, cursorParamKind, context);
 }
@@ -2869,12 +2873,21 @@ GenerateCountQuery(text *databaseDatum, pgbson *countSpec, bool setStatementTime
 
 	Query *query = GenerateBaseTableQuery(databaseDatum, &collectionName, collectionUuid,
 										  &indexHint, &context);
+	if (context.requiresSubQuery)
+	{
+		query = MigrateQueryToSubQuery(query, &context);
+	}
+
+	bool isView = context.mongoCollection != NULL &&
+				  strcmp(collectionName.string,
+						 context.mongoCollection->name.collectionName) != 0;
 
 	/*
 	 * the count() query which has no filter/skip/limit/etc can be done via an estimatedDocumentCount
 	 * In this case, we rewrite the query as a collStats aggregation query with a project to make it the appropriate output.
 	 */
-	if (!hasQueryModifier && context.mongoCollection != NULL)
+	if (!hasQueryModifier && context.mongoCollection != NULL &&
+		!isView)
 	{
 		/* Collection exists, get a collStats: { "count": {} } */
 		pgbson_writer collStatsWriter;
@@ -3109,6 +3122,10 @@ GenerateDistinctQuery(text *databaseDatum, pgbson *distinctSpec, bool setStateme
 	context.allowShardBaseTable = true;
 	Query *query = GenerateBaseTableQuery(databaseDatum, &collectionName, collectionUuid,
 										  &indexHint, &context);
+	if (context.requiresSubQuery)
+	{
+		query = MigrateQueryToSubQuery(query, &context);
+	}
 
 	/* First apply match */
 	if (filter.value_type != BSON_TYPE_EOD)
