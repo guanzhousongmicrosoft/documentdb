@@ -166,10 +166,13 @@ Optional arguments:
                         DOCUMENTDB_FORCE_OWNERSHIP_REPAIR=true to force a
                         full recursive ownership repair on the next start.
                         A leftover postmaster.pid from an unclean stop
-                        (docker kill, OOM, host crash) refuses to start,
-                        because another container may still be serving the
-                        volume. Once no other container uses it, create or
-                        recreate the container with
+                        (docker kill, OOM, host crash) is removed on the next
+                        start when this image's directory lock shows its
+                        postmaster wrote it. Any other postmaster.pid refuses
+                        to start, because a container without the lock (an
+                        older image) may still be serving the volume. Once no
+                        other container uses it, create or recreate the
+                        container with
                         DOCUMENTDB_FORCE_REMOVE_STALE_POSTMASTER_PID=true
                         (docker start cannot add it) to remove the file; it
                         stays in force on every later start until removed.
@@ -1042,6 +1045,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
         i=$((i + 1))
     done
     echo "PostgreSQL is running."
+    record_postmaster_owner "$DATA_PATH"
 
     # postmaster.pid appears BEFORE crash recovery finishes, but every post-start
     # step below (lz4 probe, getParameter stub, config reload) needs a server
