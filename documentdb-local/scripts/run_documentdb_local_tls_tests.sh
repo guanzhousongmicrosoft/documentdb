@@ -89,7 +89,7 @@ wait_for_sample_data() {
 # rejects plain connections.
 echo "=== Test: Default mode (allowTLS - plain and TLS both accepted) ==="
 
-docker run -d --name "$DEFAULT_CONTAINER" "$IMAGE_NAME" --password mypassword --init-data true
+docker run -d --name "$DEFAULT_CONTAINER" -e DOCUMENTDB_USAGE_TELEMETRY=false "$IMAGE_NAME" --password mypassword --init-data true
 wait_for_ping "$DEFAULT_CONTAINER" true
 wait_for_sample_data "$DEFAULT_CONTAINER" true
 
@@ -140,7 +140,7 @@ docker rm -f "$DEFAULT_CONTAINER" >/dev/null
 echo ""
 echo "=== Test: --tlsMode requireTLS ==="
 
-docker run -d --name "$ENFORCE_CONTAINER" "$IMAGE_NAME" \
+docker run -d --name "$ENFORCE_CONTAINER" -e DOCUMENTDB_USAGE_TELEMETRY=false "$IMAGE_NAME" \
     --password mypassword --tlsMode requireTLS --init-data true
 wait_for_ping "$ENFORCE_CONTAINER" true
 wait_for_sample_data "$ENFORCE_CONTAINER" true
@@ -196,7 +196,7 @@ echo ""
 echo "=== Test: Environment variable path ==="
 
 echo "Test 7: -e TLS_MODE=requireTLS - TLS-only behavior..."
-docker run -d --name "$ENVVAR_CONTAINER" -e TLS_MODE=requireTLS \
+docker run -d --name "$ENVVAR_CONTAINER" -e TLS_MODE=requireTLS -e DOCUMENTDB_USAGE_TELEMETRY=false \
     "$IMAGE_NAME" --password mypassword
 wait_for_ping "$ENVVAR_CONTAINER" true
 
