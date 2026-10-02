@@ -64,7 +64,7 @@ COPY ${DEB_PACKAGE_REL_PATH} /tmp/install_setup/
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates locales sudo wget gnupg2 lsb-release jq openssl lsof netcat-openbsd && \
+    ca-certificates locales sudo wget gnupg2 lsb-release jq openssl lsof netcat-openbsd curl && \
     echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
     locale-gen && \
     install -d -m 0755 /etc/apt/keyrings && \
@@ -137,6 +137,7 @@ ENV CERT_PATH="" \
     DATA_PATH="/data" \
     DOCUMENTDB_PORT="10260" \
     ENABLE_TELEMETRY="false" \
+    DOCUMENTDB_USAGE_TELEMETRY="true" \
     LOG_LEVEL="info" \
     USERNAME="default_user" \
     CREATE_USER="true" \
@@ -172,7 +173,14 @@ COPY documentdb-local/scripts/documentdb_validate_username.sh /home/documentdb/g
 COPY documentdb-local/scripts/documentdb_install_getparameter_stub.sh /home/documentdb/gateway/scripts/documentdb_install_getparameter_stub.sh
 COPY documentdb-local/scripts/documentdb_prepare_data_directory.sh /home/documentdb/gateway/scripts/documentdb_prepare_data_directory.sh
 COPY documentdb-local/scripts/documentdb_report_extended_rum.sh /home/documentdb/gateway/scripts/documentdb_report_extended_rum.sh
+COPY documentdb-local/scripts/usage_telemetry.sh /home/documentdb/gateway/scripts/usage_telemetry.sh
 COPY documentdb-local/scripts/healthcheck.sh /home/documentdb/gateway/scripts/healthcheck.sh
+# The usage-telemetry disclosure ships inside the image. Telemetry is on by
+# default, so the document describing it has to be readable from the container
+# itself rather than only from a URL: an air-gapped or offline deployment
+# cannot fetch the GitHub copy, and that is exactly where an operator is most
+# likely to want to read it before deciding whether to opt out.
+COPY documentdb-local/PRIVACY.md /home/documentdb/PRIVACY.md
 COPY scripts/utils.sh /home/documentdb/gateway/scripts/utils.sh
 COPY scripts/preload_libraries.sh /home/documentdb/gateway/scripts/preload_libraries.sh
 COPY scripts/setup_psqlrc.sh /home/documentdb/gateway/scripts/setup_psqlrc.sh
