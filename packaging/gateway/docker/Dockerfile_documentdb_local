@@ -17,7 +17,6 @@ ARG DEB_PACKAGE_REL_PATH
 # the same binary without it).
 FROM ${BASE_IMAGE} AS stage
 ARG DEBIAN_FRONTEND
-ARG DOCUMENTDB_VERSION=unknown
 
 RUN apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -40,9 +39,13 @@ COPY . /build
 WORKDIR /build/pg_documentdb_gw
 
 # `documentdb-gateway --version` prints the Cargo version, so stamp it like the
-# package builds do (1.0-rc2 -> 1.0.0-rc2). Unstamped local builds keep 0.1.0.
+# package builds do (packaging/documentdb-version.sh). Unstamped local
+# builds keep 0.1.0. The ARG is declared here, not at the top of the stage, so
+# a version change does not invalidate the toolchain layers above.
+ARG DOCUMENTDB_VERSION=unknown
 RUN if [ -n "${DOCUMENTDB_VERSION}" ] && [ "${DOCUMENTDB_VERSION}" != "unknown" ]; then \
-        cargo_version="$(printf '%s' "${DOCUMENTDB_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+)[-~]rc([0-9]+)$/\1.0-rc\2/')" && \
+        cargo_version="$(. ../packaging/documentdb-version.sh && documentdb_cargo_version "${DOCUMENTDB_VERSION}")" && \
+        echo "${cargo_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$' || { echo "ERROR: DOCUMENTDB_VERSION '${DOCUMENTDB_VERSION}' is not a release version Cargo can carry" >&2; exit 1; } && \
         sed -i -E "s/^version = \".*\"/version = \"${cargo_version}\"/" Cargo.toml && \
         grep -Eq "^version = \"${cargo_version}\"$" Cargo.toml; \
     fi

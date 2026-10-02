@@ -59,6 +59,13 @@ runs:
         # built with the input left blank and shipped as 1.0.0.
         tag=""
         case "${GITHUB_REF:-}" in refs/tags/v*) tag="${GITHUB_REF#refs/tags/}" ;; esac
+        # install.sh downloads an RC from v<X.Y>-RC<N> and GitHub paths are
+        # case-sensitive, so a tag spelled any other way would publish a
+        # release the installer cannot find.
+        if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+-(RC[1-9][0-9]*|[0-9]+)$ ]]; then
+          echo "::error::Tag '${tag}' must be spelled vX.Y-Z or vX.Y-RCN (for example v1.0-RC2); install.sh downloads that exact name."
+          exit 1
+        fi
 
         if [ -n "$INPUT_VERSION" ]; then
           parse "$INPUT_VERSION"

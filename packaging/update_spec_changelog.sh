@@ -119,6 +119,10 @@ trap 'rm -f "$temp_changelog"' EXIT
     sed -n "${start_line},${end_line}p" "$CHANGELOG" \
         | sed "1s/v${VER_DASH//./\\.}\([^0-9~]\)/v${PKG_TITLE}\1/"
 } > "$temp_changelog"
+if ! head -n 1 "$temp_changelog" | grep -q "documentdb v${PKG_TITLE}"; then
+    echo "Error: could not retitle the CHANGELOG section for v${VER_DASH} as v${PKG_TITLE}; the package would ship as the wrong version." >&2
+    exit 1
+fi
 
 # Determine packager (try git config, else default)
 # Stable release identity: shipped changelog metadata must not depend on

@@ -105,10 +105,10 @@ if [[ -z "$PG" ]]; then
     exit 1
 fi
 
-# The release spelling 1.0-rc2 builds as the package version 1.0~rc2.
-if [[ "$DOCUMENTDB_VERSION" =~ ^([0-9]+\.[0-9]+)-rc([0-9]+)$ ]]; then
-    DOCUMENTDB_VERSION="${BASH_REMATCH[1]}~rc${BASH_REMATCH[2]}"
-fi
+# shellcheck source=documentdb-version.sh
+source "$script_dir/packaging/documentdb-version.sh"
+# A release candidate given as 1.0-rc2 or 1.0.0-rc2 builds as 1.0~rc2.
+DOCUMENTDB_VERSION="$(documentdb_package_version "$DOCUMENTDB_VERSION")"
 
 # get the version from control file
 if [[ -z "$DOCUMENTDB_VERSION" ]]; then

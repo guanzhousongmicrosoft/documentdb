@@ -129,7 +129,7 @@ jobs:
         esac
         echo "Provenance OK: $vtxt"
         gw=$(docker run --rm --entrypoint /home/documentdb/gateway/pg_documentdb_gw/target/release-with-symbols/documentdb_gateway "$IMAGE" --version)
-        expected="documentdb-gateway $(printf '%s' "$IMAGE_VERSION" | sed -E 's/^([0-9]+\.[0-9]+)-rc([0-9]+)$/\1.0-rc\2/')"
+        expected="documentdb-gateway $(. packaging/documentdb-version.sh && documentdb_cargo_version "$IMAGE_VERSION")"
         [ "$gw" = "$expected" ] || { echo "embedded gateway reports '$gw', expected '$expected'" >&2; exit 1; }
         SMOKE_DIR=$(mktemp -d)
         chmod 755 "$SMOKE_DIR"
