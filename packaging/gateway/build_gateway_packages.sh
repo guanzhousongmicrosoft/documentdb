@@ -135,9 +135,9 @@ fi
 # metadata and cause confusing failures (e.g. rpmbuild rejecting the spec
 # late, cargo refusing to compile because the workspace version is empty,
 # or operators seeing a literal placeholder in `dpkg -l` output).
-if ! [[ "$DOCUMENTDB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+if ! [[ "$DOCUMENTDB_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+([.-][0-9A-Za-z.-]+)?|~rc[0-9]+)$ ]]; then
     echo "Error: DOCUMENTDB_VERSION '$DOCUMENTDB_VERSION' is not a valid SemVer-compatible version string." >&2
-    echo "Expected: MAJOR.MINOR.PATCH (with optional .N or -PRERELEASE suffix), e.g. 0.113.0 or 1.2.3-rc1." >&2
+    echo "Expected: MAJOR.MINOR.PATCH (with optional .N or -PRERELEASE suffix), e.g. 0.113.0, 1.2.3-rc1, or a release candidate X.Y~rcN such as 1.0~rc2." >&2
     exit 1
 fi
 

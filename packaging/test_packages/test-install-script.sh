@@ -293,12 +293,14 @@ unknown option|Unknown option: --bogus|--bogus
 positional argument|Unexpected positional arguments|-- extra
 missing pg-major value|--pg-major requires a value|--pg-major
 missing release value|--version requires a value|--version
-stable release tag|--version must be stable or an RC tag|--version v0.117-0
-moving release name|--version must be stable or an RC tag|--version latest
-RC suffix|--version must be stable or an RC tag|--version v1.0-RC1x
-RC without minor|--version must be stable or an RC tag|--version v1-RC1
-RC non-numeric version|--version must be stable or an RC tag|--version v1garbage-RC1
-release path traversal|--version must be stable or an RC tag|--version ../latest
+stable release tag|--version must be stable or an RC such as|--version v0.117-0
+moving release name|--version must be stable or an RC such as|--version latest
+RC suffix|--version must be stable or an RC such as|--version v1.0-RC1x
+RC without minor|--version must be stable or an RC such as|--version v1-RC1
+RC non-numeric version|--version must be stable or an RC such as|--version v1garbage-RC1
+release path traversal|--version must be stable or an RC such as|--version ../latest
+RC zero|--version must be stable or an RC such as|--version 1.0-rc0
+RC leading zero|--version must be stable or an RC such as|--version 01.0-rc2
 missing admin-user value|--admin-user requires a value|--admin-user
 missing password-file value|--admin-password-file requires a value|--admin-password-file
 missing listen-port value|--listen-port requires a value|--listen-port
@@ -394,6 +396,9 @@ test_release_selection() {
     expect_success "explicit stable" run_installer "${root}" --version stable
     assert_has "stable transaction unchanged" "install -y documentdb-18"
     assert_lacks "stable never downloads RC" "v1.0-RC1"
+    rc_root="$(new_root ubuntu 24.04)"
+    expect_success "RC as users type it" run_installer "${rc_root}" --version 1.0-rc2
+    assert_has "1.0-rc2 downloads release v1.0-RC2" "releases/download/v1.0-RC2/SHA256SUMS"
     for mode in --packages-only --no-enable; do
         expect_success "RC ${mode}" run_installer "${root}" --version v1.0-RC1 "${mode}"
         if [[ "${mode}" == --packages-only ]]; then
@@ -483,7 +488,7 @@ set -eu
 . "$1"
 fixture="$2"
 mode="$3"
-RELEASE_VERSION=v1.0-RC1
+RELEASE_VERSION=1.0-rc1
 PACKAGE_FAMILY="${RELEASE_TEST_FAMILY:-apt}"
 APT_ARCH=arm64
 RPM_ARCH=x86_64
@@ -516,7 +521,7 @@ RUNNER
     expect_success "verified selected packages" sh "${runner}" "${library}" "${fixture}" good
     assert_has "verified packages reach one transaction" "TRANSACTION <install> <-y>"
     assert_has "RC origin recorded before package installation" \
-        $'RC-MARKER /etc/documentdb/installer-release-candidate 0644 v1.0-RC1\nTRANSACTION'
+        $'RC-MARKER /etc/documentdb/installer-release-candidate 0644 1.0-rc1\nTRANSACTION'
     assert_has "apt arm64 pg18 selects exactly its packages" \
         "<install> <-y> <ubuntu24.04-documentdb-18_1.0.0_all.deb> <ubuntu24.04-documentdb-common_1.0.0_all.deb> <ubuntu24.04-documentdb-postgresql-tools_1.0.0_all.deb> <ubuntu24.04-documentdb-gateway_1.0.0_arm64.deb> <ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb>"
     expect_success "rpm x86_64 pg17 selection" env RELEASE_TEST_FAMILY=rpm RELEASE_TEST_PG=17 \

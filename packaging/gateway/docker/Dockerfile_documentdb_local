@@ -256,11 +256,12 @@ RUN v="$(dpkg-query -W -f='${Version}' "postgresql-${POSTGRES_VERSION}-documentd
         && [ -n "$v" ] \
         || { echo "ERROR: cannot resolve the installed postgresql-${POSTGRES_VERSION}-documentdb version; /version.txt would misreport this build" >&2; exit 1; }; \
     if [ "${DOCUMENTDB_VERSION}" != "unknown" ] \
-        && [ "$(printf '%s' "${DOCUMENTDB_VERSION}" | tr - .)" != "$(printf '%s' "$v" | tr - .)" ]; then \
+        && [ "$(printf '%s' "${DOCUMENTDB_VERSION}" | tr '~-' '..')" != "$(printf '%s' "$v" | tr '~-' '..')" ]; then \
         echo "ERROR: DOCUMENTDB_VERSION build arg '${DOCUMENTDB_VERSION}' does not match the installed package version '$v'" >&2; exit 1; \
     fi; \
+    # A release candidate's package is 1.0~rc2; users see 1.0-rc2.
     printf '%s (commit %s, built %s, postgresql %s)\n' \
-        "$v" "${GIT_COMMIT}" "${BUILD_DATE:-unknown}" "${POSTGRES_VERSION}" \
+        "$(printf '%s' "$v" | tr '~' '-')" "${GIT_COMMIT}" "${BUILD_DATE:-unknown}" "${POSTGRES_VERSION}" \
     | sudo tee /version.txt >/dev/null
 
 # Built-in health probe: healthy once the entrypoint finished initialization,

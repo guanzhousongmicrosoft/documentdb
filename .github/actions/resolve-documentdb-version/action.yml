@@ -51,12 +51,19 @@ runs:
         # package filenames — the old inline snippets emitted whatever sed
         # produced, so a control-file format change surfaced much later as an
         # oddly named package instead of a failed step.
-        if [[ ! "$raw" =~ ^([0-9]+)\.([0-9]+)[.-]([0-9]+)$ ]]; then
-          echo "::error::Could not resolve a DocumentDB version (got '${raw}'); expected X.Y-Z or X.Y.Z."
+        # A release candidate (1.0-rc2, v1.0-RC2) builds as X.Y~rcN: the ~ sorts
+        # it below the X.Y.Z / X.Y-Z release in both dpkg and rpm.
+        rc="$(printf '%s' "${raw#[vV]}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$rc" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)[-~]rc([1-9][0-9]*)$ ]]; then
+          dots="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}~rc${BASH_REMATCH[3]}"
+          dash="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-0"
+        elif [[ "$raw" =~ ^([0-9]+)\.([0-9]+)[.-]([0-9]+)$ ]]; then
+          dots="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          dash="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+        else
+          echo "::error::Could not resolve a DocumentDB version (got '${raw}'); expected X.Y-Z, X.Y.Z or a release candidate such as 1.0-rc2."
           exit 1
         fi
-        dots="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-        dash="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
 
         echo "Resolved version: ${dots} (control-file form ${dash})"
         echo "version=${dots}" >> "$GITHUB_OUTPUT"
