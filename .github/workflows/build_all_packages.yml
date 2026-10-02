@@ -332,7 +332,7 @@ jobs:
           )
 
           {
-            echo "DocumentDB packages — version ${DOCUMENTDB_VERSION}"
+            echo "DocumentDB packages — version ${DOCUMENTDB_VERSION//\~/-}"
             echo "Total package files: ${total}"
             echo
             printf '%-18s %-6s %s\n' "CATEGORY" "COUNT" "EXPECTED"
