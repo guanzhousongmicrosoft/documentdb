@@ -938,7 +938,7 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "sumavg_ext
 psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:324: ERROR:  Conversion would exceed target type limit
 SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "sumavg_extreme_test", "pipeline": [ { "$match": { "group": "mixednums" } }, { "$group": { "_id": "$group", "total": { "$sum": "$val" }, "average": { "$avg": "$val" } } } ] }');
-psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:324: ERROR:  Conversion would exceed target type limit
+psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:326: ERROR:  Conversion would exceed target type limit
 -- All groups
 SET documentdb.enableNewMinMaxAccumulators TO off;
 SET documentdb.enableNewWithExprAccumulators TO off;
@@ -946,7 +946,7 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "sumavg_ext
 psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:331: ERROR:  Conversion would exceed target type limit
 SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "sumavg_extreme_test", "pipeline": [ { "$group": { "_id": "$group", "total": { "$sum": "$val" }, "average": { "$avg": "$val" } } }, { "$sort": { "_id": 1 } } ] }');
-psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:331: ERROR:  Conversion would exceed target type limit
+psql:sql/bson_aggregation_pipeline_tests_sumavg_group.sql:333: ERROR:  Conversion would exceed target type limit
 -- =============================================================================
 -- Test 17: Using $$variable in $sum/$avg expression
 -- =============================================================================
