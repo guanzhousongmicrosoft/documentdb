@@ -87,8 +87,8 @@ fi
 # repository publisher. Reconciling the two version grammars is a separate
 # change; see packaging/README.md ("Package version formats").
 VER_DASH="$DOCUMENTDB_VERSION"
-if [[ "$VER_DASH" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    VER_DASH="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+if [[ "$VER_DASH" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(~[0-9A-Za-z.]+)?$ ]]; then
+    VER_DASH="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
 fi
 first_entry=$(awk '/^%changelog/{f=1;next} f && /^\* /{print; exit}' rpm/documentdb.spec)
 if [[ "$first_entry" != *"- ${VER_DASH}"* ]]; then

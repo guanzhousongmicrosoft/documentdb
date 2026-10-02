@@ -258,6 +258,10 @@ jobs:
             exit 1
           fi
 
+          # GitHub release uploads rename ~ to ., so a pre-release's files
+          # (1.0.0~rc2) take their published names before they are checksummed.
+          for f in *~*; do if [ -e "$f" ]; then mv -- "$f" "${f//\~/.}"; fi; done
+
           # Reproducible, sorted checksum manifest over packages and the
           # clean-host installer. Package category/total math below continues
           # to count only .deb/.rpm files.
@@ -279,7 +283,7 @@ jobs:
           tools_rpm=$(count_glob 'documentdb-postgresql-tools-*.rpm')
           common_rpm=$(count_glob 'documentdb-common-*.rpm')
           sa_rpm=$(count_glob 'documentdb-1[5-9]-*.rpm')
-          meta_rpm=$(count_glob "documentdb-${DOCUMENTDB_VERSION}-*.noarch.rpm")
+          meta_rpm=$(count_glob "documentdb-${DOCUMENTDB_VERSION//\~/.}-*.noarch.rpm")
 
           # Expected counts are DERIVED from the Tier-1 matrix dimensions
           # rather than hand-written twelve times: keep these two lists in step

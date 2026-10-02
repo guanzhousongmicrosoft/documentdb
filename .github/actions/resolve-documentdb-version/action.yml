@@ -51,12 +51,13 @@ runs:
         # package filenames — the old inline snippets emitted whatever sed
         # produced, so a control-file format change surfaced much later as an
         # oddly named package instead of a failed step.
-        if [[ ! "$raw" =~ ^([0-9]+)\.([0-9]+)[.-]([0-9]+)$ ]]; then
-          echo "::error::Could not resolve a DocumentDB version (got '${raw}'); expected X.Y-Z or X.Y.Z."
+        # A pre-release keeps a ~ suffix (X.Y.Z~rcN) so deb and rpm sort it below X.Y.Z.
+        if [[ ! "$raw" =~ ^([0-9]+)\.([0-9]+)[.-]([0-9]+)(~(alpha|beta|rc)[0-9]+)?$ ]]; then
+          echo "::error::Could not resolve a DocumentDB version (got '${raw}'); expected X.Y-Z or X.Y.Z, optionally with ~rcN."
           exit 1
         fi
-        dots="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-        dash="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+        dots="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+        dash="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
 
         echo "Resolved version: ${dots} (control-file form ${dash})"
         echo "version=${dots}" >> "$GITHUB_OUTPUT"

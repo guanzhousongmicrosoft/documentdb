@@ -10,6 +10,10 @@ on:
         default: false
         required: false
         type: boolean
+      version:
+        description: 'DocumentDB version to build, e.g. 1.0.0~rc2 (blank = derive from the control file)'
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       push_images:
@@ -19,6 +23,10 @@ on:
         default: false
         required: false
         type: boolean
+      version:
+        description: 'DocumentDB version to build, e.g. 1.0.0~rc2 (blank = derive from the control file)'
+        required: false
+        type: string
 
   push:
     branches:
@@ -68,9 +76,11 @@ jobs:
     - name: Extract and Format Default Version
       id: extract_version
       uses: ./.github/actions/resolve-documentdb-version
+      with:
+        version: ${{ inputs.version }}
     - name: Build Debian Package
       run: |
-        ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts
+        ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --version "${{ steps.extract_version.outputs.version }}" --output-dir downloaded-artifacts
         ls -R downloaded-artifacts
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -224,7 +234,9 @@ jobs:
       run: echo "Using DOCUMENTDB_VERSION=${{ needs.build-and-push.outputs.documentdb_version }}"
     - name: Set Default Values
       run: |
-        echo "MANIFEST_TAG=pg${{ matrix.pg_version }}-${{ needs.build-and-push.outputs.documentdb_version }}" >> $GITHUB_ENV
+        # Docker tags cannot hold ~, so 1.0.0~rc2 is published as pgN-1.0.0-rc2.
+        version="${{ needs.build-and-push.outputs.documentdb_version }}"
+        echo "MANIFEST_TAG=pg${{ matrix.pg_version }}-${version//\~/-}" >> $GITHUB_ENV
     - name: Create & push manifest for all PG versions
       run: |
         docker manifest create ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.MANIFEST_TAG }} \
@@ -265,8 +277,8 @@ jobs:
   create-manifest-latest:
     name: Create & push 'latest' manifest
     # Must match the per-arch push gate above: a manifest can only reference
-    # images that were actually published.
-    if: inputs.push_images || startsWith(github.ref, 'refs/tags/')
+    # images that were actually published. A pre-release never moves latest.
+    if: (inputs.push_images || startsWith(github.ref, 'refs/tags/')) && !contains(needs.build-and-push.outputs.documentdb_version, '~')
     runs-on: ubuntu-22.04
     needs: build-and-push
     steps:

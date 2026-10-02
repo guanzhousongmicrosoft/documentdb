@@ -21,8 +21,11 @@ fi
 INPUT_VER="$1"
 
 # normalize to dashed form if dotted provided (0.106.0 -> 0.106-0)
-if [[ "$INPUT_VER" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+# A pre-release (X.Y.Z~rcN) is documented under its release's X.Y-Z section.
+PRE_RELEASE=""
+if [[ "$INPUT_VER" =~ ^([0-9]+)\.([0-9]+)[.-]([0-9]+)(~[0-9A-Za-z.]+)?$ ]]; then
     VER_DASH="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    PRE_RELEASE="${BASH_REMATCH[4]}"
 else
     VER_DASH="$INPUT_VER"
 fi
@@ -109,8 +112,11 @@ trap 'rm -f "$temp_changelog"' EXIT
     if [[ -n "$synthesize_version" ]]; then
         printf '### documentdb v%s (Unreleased) ###\n' "$synthesize_version"
     fi
-    sed -n "${start_line},${end_line}p" "$CHANGELOG"
+    # Retitle the release's section so the newest entry carries the pre-release version.
+    sed -n "${start_line},${end_line}p" "$CHANGELOG" \
+        | sed "1s/v${VER_DASH//./\\.}\([^0-9~]\)/v${VER_DASH}${PRE_RELEASE}\1/"
 } > "$temp_changelog"
+VER_DASH="${VER_DASH}${PRE_RELEASE}"
 
 # Determine packager (try git config, else default)
 # Stable release identity: shipped changelog metadata must not depend on
@@ -207,7 +213,7 @@ while IFS= read -r line; do
             flush_section
         fi
         # Extract version: look for 'v' followed by digits.digits- digits (e.g. v0.105-0 or v1.108-0)
-        if [[ "$line" =~ v([0-9]+\.[0-9]+-[0-9]+) ]]; then
+        if [[ "$line" =~ v([0-9]+\.[0-9]+-[0-9]+(~[0-9A-Za-z.]+)?) ]]; then
             current_ver="${BASH_REMATCH[1]}"
         else
             # fallback: capture anything after 'v' up to a space or '('

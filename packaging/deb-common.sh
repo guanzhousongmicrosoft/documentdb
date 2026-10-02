@@ -97,8 +97,8 @@ deb_install_mit_copyright() {
 # that conversion here; see packaging/README.md ("Package version formats").
 deb_extension_dep_version() {
     local version="$1"
-    if [[ "${version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-        printf '%s.%s-%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    if [[ "${version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(~[0-9A-Za-z.]+)?$ ]]; then
+        printf '%s.%s-%s%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
     else
         printf '%s' "${version}"
     fi
