@@ -17,7 +17,7 @@ function show_help {
     echo "  --pg                 PG version to build packages for. Possible values: [15, 16, 17, 18]"
     echo ""
     echo "Optional Arguments:"
-    echo "  --version            The version of documentdb to build. Examples: [0.100.0, 0.101.0]"
+    echo "  --version            The version of documentdb to build. Examples: [0.100.0, 0.101.0, 1.0-rc2]"
     echo "  --test-clean-install Test installing the packages in a clean Docker container."
     echo "  --output-dir         Relative path from the repo root of the directory where to drop the packages. The directory will be created if it doesn't exist. Default: packaging"
     echo "  -h, --help           Display this help message."
@@ -127,6 +127,11 @@ if [[ -z "$DOCUMENTDB_VERSION" ]]; then
     echo "Error: --version is required and could not be found in the control file."
     show_help
     exit 1
+fi
+
+# The release spelling 1.0-rc2 builds as the package version 1.0~rc2.
+if [[ "$DOCUMENTDB_VERSION" =~ ^([0-9]+\.[0-9]+)-rc([0-9]+)$ ]]; then
+    DOCUMENTDB_VERSION="${BASH_REMATCH[1]}~rc${BASH_REMATCH[2]}"
 fi
 
 # Validate that DOCUMENTDB_VERSION is a SemVer-compatible string before we

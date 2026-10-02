@@ -301,6 +301,8 @@ RC non-numeric version|--version must be stable or an RC such as|--version v1gar
 release path traversal|--version must be stable or an RC such as|--version ../latest
 RC zero|--version must be stable or an RC such as|--version 1.0-rc0
 RC leading zero|--version must be stable or an RC such as|--version 01.0-rc2
+RC of a patch release|--version must be stable or an RC such as|--version 1.0.1-rc2
+RC double tilde|--version must be stable or an RC such as|--version 1.0~~rc2
 missing admin-user value|--admin-user requires a value|--admin-user
 missing password-file value|--admin-password-file requires a value|--admin-password-file
 missing listen-port value|--listen-port requires a value|--listen-port
@@ -399,6 +401,11 @@ test_release_selection() {
     rc_root="$(new_root ubuntu 24.04)"
     expect_success "RC as users type it" run_installer "${rc_root}" --version 1.0-rc2
     assert_has "1.0-rc2 downloads release v1.0-RC2" "releases/download/v1.0-RC2/SHA256SUMS"
+    for spelling in V1.0-RC2 1.0~rc2 1.0.0-rc2 v1.0.0-RC2; do
+        alias_root="$(new_root ubuntu 24.04)"
+        expect_success "RC spelled ${spelling}" run_installer "${alias_root}" --version "${spelling}"
+        assert_has "${spelling} downloads release v1.0-RC2" "releases/download/v1.0-RC2/SHA256SUMS"
+    done
     for mode in --packages-only --no-enable; do
         expect_success "RC ${mode}" run_installer "${root}" --version v1.0-RC1 "${mode}"
         if [[ "${mode}" == --packages-only ]]; then

@@ -36,7 +36,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'DocumentDB version to build (blank = derive from the control file)'
+        description: 'DocumentDB version to build (blank = the tag this run was started from, else the control file)'
         required: false
         type: string
       use_full_matrix:
@@ -50,7 +50,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: 'DocumentDB version to build (blank = derive from the control file)'
+        description: 'DocumentDB version to build (blank = the tag this run was started from, else the control file)'
         required: false
         type: string
       use_full_matrix:

@@ -289,16 +289,17 @@ parse_arguments() {
 }
 
 validate_arguments() {
-    # The tag becomes a URL path segment, so only X.Y-rcN passes (any case,
-    # optional v); the charset check first keeps a newline from hiding a
-    # second line from grep.
+    # The tag becomes a URL path segment, so only an RC passes, in any
+    # spelling a user can copy from the release: 1.0-rc2, v1.0-RC2, the
+    # package's 1.0~rc2 or the gateway's 1.0.0-rc2. The charset check first
+    # keeps a newline from hiding a second line from grep.
     case "${RELEASE_VERSION}" in
         stable) ;;
-        *[!A-Za-z0-9.-]*) die "--version must be stable or an RC such as 1.0-rc2." ;;
+        *[!A-Za-z0-9.~-]*) die "--version must be stable or an RC such as 1.0-rc2." ;;
         *)
-            printf '%s\n' "${RELEASE_VERSION}" | grep -Eiqx 'v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc[1-9][0-9]*' ||
+            printf '%s\n' "${RELEASE_VERSION}" | grep -Eiqx 'v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.0)?[-~]rc[1-9][0-9]*' ||
                 die "--version must be stable or an RC such as 1.0-rc2."
-            RELEASE_VERSION="$(printf '%s' "${RELEASE_VERSION#[vV]}" | tr 'RC' 'rc')"
+            RELEASE_VERSION="$(printf '%s' "${RELEASE_VERSION#[vV]}" | tr 'RC~' 'rc-' | sed -E 's/^([0-9]+\.[0-9]+)\.0-rc/\1-rc/')"
             ;;
     esac
     case "${PG_MAJOR}" in
