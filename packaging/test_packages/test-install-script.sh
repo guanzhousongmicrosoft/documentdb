@@ -479,7 +479,7 @@ test_release_checksums() {
     local runner="${WORK_DIR}/release-runner.sh" name mode
     sed '/^# BEGIN EXECUTION BARRIER$/,$d' "${INSTALLER}" > "${library}"
     mkdir -p "${fixture}"
-    # Every RC1 asset, so selection must pick this host's five among them.
+    # Every RC2 asset, so selection must pick this host's five among them.
     for name in ubuntu24.04-documentdb{,-17,-18,-common,-postgresql-tools}_1.0-rc2_all.deb \
         ubuntu24.04-documentdb-gateway_1.0-rc2_{amd64,arm64}.deb \
         ubuntu24.04-postgresql-{17,18}-documentdb_1.0-rc2_{amd64,arm64}.deb \
@@ -531,6 +531,26 @@ RUNNER
         $'RC-MARKER /etc/documentdb/installer-release-candidate 0644 1.0-rc2\nTRANSACTION'
     assert_has "apt arm64 pg18 selects exactly its packages" \
         "<install> <-y> <ubuntu24.04-documentdb-18_1.0-rc2_all.deb> <ubuntu24.04-documentdb-common_1.0-rc2_all.deb> <ubuntu24.04-documentdb-postgresql-tools_1.0-rc2_all.deb> <ubuntu24.04-documentdb-gateway_1.0-rc2_arm64.deb> <ubuntu24.04-postgresql-18-documentdb_1.0-rc2_arm64.deb>"
+    # v1.0-RC1 is still an accepted --version and its published assets carry
+    # GA-shaped names (1.0.0, extension 1.0-0); selection must keep matching them.
+    local rc1="${WORK_DIR}/release-fixture-rc1"
+    mkdir -p "${rc1}"
+    for name in ubuntu24.04-documentdb{,-17,-18,-common,-postgresql-tools}_1.0.0_all.deb \
+        ubuntu24.04-documentdb-gateway_1.0.0_{amd64,arm64}.deb \
+        ubuntu24.04-postgresql-{17,18}-documentdb_1.0-0_{amd64,arm64}.deb \
+        documentdb{,-17,-18,-common,-postgresql-tools}-1.0.0-1.noarch.rpm \
+        documentdb-gateway-1.0.0-1.el9.{x86_64,aarch64}.rpm \
+        rhel9-postgresql{17,18}-documentdb-1.0.0-1.el9.{x86_64,aarch64}.rpm; do
+        printf 'fixture for %s\n' "${name}" > "${rc1}/${name}"
+    done
+    (cd "${rc1}" && sha256sum ./*.deb ./*.rpm | sed 's|  ./|  |' > SHA256SUMS)
+    expect_success "RC1-shaped assets still selected" sh "${runner}" "${library}" "${rc1}" good
+    assert_has "apt arm64 pg18 selects RC1-shaped packages" \
+        "<install> <-y> <ubuntu24.04-documentdb-18_1.0.0_all.deb> <ubuntu24.04-documentdb-common_1.0.0_all.deb> <ubuntu24.04-documentdb-postgresql-tools_1.0.0_all.deb> <ubuntu24.04-documentdb-gateway_1.0.0_arm64.deb> <ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb>"
+    expect_success "rpm x86_64 pg17 RC1-shaped selection" env RELEASE_TEST_FAMILY=rpm RELEASE_TEST_PG=17 \
+        sh "${runner}" "${library}" "${rc1}" good
+    assert_has "rpm x86_64 pg17 selects RC1-shaped packages" \
+        "<install> <-y> <documentdb-17-1.0.0-1.noarch.rpm> <documentdb-common-1.0.0-1.noarch.rpm> <documentdb-postgresql-tools-1.0.0-1.noarch.rpm> <documentdb-gateway-1.0.0-1.el9.x86_64.rpm> <rhel9-postgresql17-documentdb-1.0.0-1.el9.x86_64.rpm>"
     expect_success "rpm x86_64 pg17 selection" env RELEASE_TEST_FAMILY=rpm RELEASE_TEST_PG=17 \
         sh "${runner}" "${library}" "${fixture}" good
     assert_has "rpm x86_64 pg17 selects exactly its packages" \
