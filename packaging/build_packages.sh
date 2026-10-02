@@ -107,8 +107,14 @@ fi
 
 # shellcheck source=documentdb-version.sh
 source "$script_dir/packaging/documentdb-version.sh"
-# A release candidate given as 1.0-rc2 or 1.0.0-rc2 builds as 1.0~rc2.
+# Any RC spelling (1.0-rc2, v1.0-RC2, 1.0.0-rc2) builds as 1.0~rc2. With no
+# --version, a checkout on a release tag builds that release, not the control
+# file's GA version.
 DOCUMENTDB_VERSION="$(documentdb_package_version "$DOCUMENTDB_VERSION")"
+if [[ -z "$DOCUMENTDB_VERSION" ]]; then
+    DOCUMENTDB_VERSION="$(documentdb_tag_version "$script_dir")"
+    [[ -z "$DOCUMENTDB_VERSION" ]] || echo "DOCUMENTDB_VERSION taken from the release tag: $DOCUMENTDB_VERSION"
+fi
 
 # get the version from control file
 if [[ -z "$DOCUMENTDB_VERSION" ]]; then

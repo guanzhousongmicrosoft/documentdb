@@ -80,7 +80,7 @@ jobs:
         version: ${{ inputs.version }}
     - name: Build Debian Package
       run: |
-        ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --version "${{ steps.extract_version.outputs.version }}" --output-dir downloaded-artifacts
+        ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts --version "${{ steps.extract_version.outputs.version }}"
         ls -R downloaded-artifacts
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
