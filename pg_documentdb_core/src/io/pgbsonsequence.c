@@ -353,15 +353,14 @@ PgbsonSequenceInitFromJson(const char *jsonString)
 							BsonTypeName(element.bsonValue.value_type))));
 	}
 
+	/*
+	 * Copy each document directly into the sequence instead of using
+	 * bson_writer_t: bson_writer_begin zeroes one byte past the buffer when
+	 * the previous document ends exactly 5 bytes before the buffer end, which
+	 * corrupts the adjacent allocation.
+	 */
 	bson_iter_t arrayIterator;
-
-	bson_writer_t *writer;
-	uint8_t *buf = NULL;
-	size_t buflen = 0;
-	bson_t *doc;
-	bson_t currentbson;
-
-	writer = bson_writer_new(&buf, &buflen, 0, bson_realloc_ctx, NULL);
+	uint32_t sequenceDataSize = 0;
 
 	BsonValueInitIterator(&element.bsonValue, &arrayIterator);
 	while (bson_iter_next(&arrayIterator))
@@ -374,12 +373,7 @@ PgbsonSequenceInitFromJson(const char *jsonString)
 								   BsonTypeName(currentValue->value_type))));
 		}
 
-		if (!bson_writer_begin(writer, &doc))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
-							errmsg("Could not initialize bson writer for sequence")));
-		}
-
+		bson_t currentbson;
 		if (!bson_init_static(&currentbson,
 							  currentValue->value.v_doc.data,
 							  currentValue->value.v_doc.data_len))
@@ -389,24 +383,22 @@ PgbsonSequenceInitFromJson(const char *jsonString)
 								"Failed to initialize bson object from provided value")));
 		}
 
-		if (!bson_concat(doc, &currentbson))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
-							errmsg(
-								"Could not write value into bson writer for sequence")));
-		}
-
-		bson_writer_end(writer);
+		sequenceDataSize += currentValue->value.v_doc.data_len;
 	}
 
-	buflen = bson_writer_get_length(writer);
-	bson_writer_destroy(writer);
-
-	uint32_t sequenceSize = VARHDRSZ + buflen;
+	uint32_t sequenceSize = VARHDRSZ + sequenceDataSize;
 	pgbsonsequence *sequence = palloc(sequenceSize);
 	SET_VARSIZE(sequence, sequenceSize);
-	memcpy(VARDATA(sequence), buf, buflen);
 
-	bson_free(buf);
+	uint8_t *sequenceData = (uint8_t *) VARDATA(sequence);
+	BsonValueInitIterator(&element.bsonValue, &arrayIterator);
+	while (bson_iter_next(&arrayIterator))
+	{
+		const bson_value_t *currentValue = bson_iter_value(&arrayIterator);
+		memcpy(sequenceData, currentValue->value.v_doc.data,
+			   currentValue->value.v_doc.data_len);
+		sequenceData += currentValue->value.v_doc.data_len;
+	}
+
 	return sequence;
 }
