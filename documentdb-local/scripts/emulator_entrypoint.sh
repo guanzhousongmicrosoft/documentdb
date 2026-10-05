@@ -30,6 +30,7 @@ PG_LOG_TAIL_PID=""
 SYSTEM_PG_LOG_TAIL_PID=""
 OSS_LOG_TAIL_PID=""
 GATEWAY_LOG_TAIL_PID=""
+USAGE_TELEMETRY_PID=""
 POSTGRES_STOPPED=false
 
 cleanup() {
@@ -48,6 +49,13 @@ cleanup() {
         fi
     done
     
+    # Kill the usage-telemetry emitter if it is running. It is a plain sleep
+    # loop with no state to flush, so a kill is a clean stop.
+    if [ -n "${USAGE_TELEMETRY_PID:-}" ]; then
+        echo "Stopping usage telemetry emitter (PID: $USAGE_TELEMETRY_PID)"
+        kill $USAGE_TELEMETRY_PID 2>/dev/null || true
+    fi
+
     # Kill gateway process if it exists
     if [ -n "${gateway_pid:-}" ]; then
         echo "Stopping gateway process (PID: $gateway_pid)"
@@ -175,7 +183,28 @@ Optional arguments:
                         Defaults to ${d_gw}
                         Overrides DOCUMENTDB_PORT environment variable.
   --enable-telemetry    Enable telemetry data sent to the usage colletor (Azure Application Insights). 
+                        This is the gateway's OPERATIONAL telemetry and is a separate setting from
+                        the anonymous usage telemetry below: ENABLE_TELEMETRY=false does not turn
+                        that off. Use --usage-telemetry false for it.
                         Overrides ENABLE_TELEMETRY environment variable.
+  --usage-telemetry <true|false>
+                        Anonymous usage telemetry that reports only this image's version, platform
+                        and CPU architecture at startup and periodically, so the project can count
+                        running deployments. No database, collection or user names, queries, document
+                        contents or credentials are ever sent. Separate from --enable-telemetry,
+                        which controls the gateway's operational metrics.
+                        Defaults to $(documentdb_local_setting_default DOCUMENTDB_USAGE_TELEMETRY) (on). Skipped when CI, GITHUB_ACTIONS or
+                        TF_BUILD is set in this container; docker run does not forward those
+                        from the host, so in a pipeline set this to false explicitly.
+                        Overrides DOCUMENTDB_USAGE_TELEMETRY environment variable.
+                        DOCUMENTDB_USAGE_TELEMETRY_ENDPOINT and DOCUMENTDB_USAGE_TELEMETRY_INTERVAL_S
+                        tune where and how often it reports. Details in
+                        /home/documentdb/PRIVACY.md in this container, or
+                        https://github.com/documentdb/documentdb/blob/main/documentdb-local/PRIVACY.md
+  --disable-usage-telemetry
+                        Turn off the usage telemetry above. Equivalent to --usage-telemetry false.
+                        Setting NO_ANALYTICS=1 or DO_NOT_TRACK=1 also turns it off and wins
+                        over any enable.
   --log-level           The verbosity of logs that will be emitted.
                         Overrides LOG_LEVEL environment variable.
                           $(documentdb_local_setting_allowed LOG_LEVEL)
@@ -312,6 +341,12 @@ while [ $# -gt 0 ]; do
             export DISABLE_EXTENDED_RUM=true
             shift
             continue ;;
+        --disable-usage-telemetry)
+            # Negative spelling of --usage-telemetry false, matching the
+            # standard opt-out wording users expect.
+            export DOCUMENTDB_USAGE_TELEMETRY=false
+            shift
+            continue ;;
     esac
     if ! _setting_row="$(documentdb_local_setting_row_by_flag "$1")"; then
         echo "Unknown option $1" >&2
@@ -399,6 +434,15 @@ for _setting_row in "${DOCUMENTDB_LOCAL_SETTINGS[@]}"; do
                 echo "Invalid ${_setting_label} value ${_setting_value}, must be true or false" >&2
                 exit 1
             fi ;;
+        boolish)
+            # Accept any reasonable spelling and normalize it, rather than
+            # aborting: every boolish setting is an off switch, so rejecting
+            # an unusual spelling would make turning the feature off break
+            # the container instead.
+            if ! _setting_normalized="$(documentdb_local_parse_boolish "${_setting_value}")"; then
+                echo "Warning: unrecognized ${_setting_label} value '${_setting_value}'; treating it as false. Use true or false." >&2
+            fi
+            export "${_setting_var}=${_setting_normalized}" ;;
         enum:*)
             case ",${_setting_type#enum:}," in
                 *",${_setting_value},"*) ;;
@@ -408,7 +452,7 @@ for _setting_row in "${DOCUMENTDB_LOCAL_SETTINGS[@]}"; do
             esac ;;
     esac
 done
-unset _setting_row _f _setting_var _setting_default _setting_type _setting_label _setting_value
+unset _setting_row _f _setting_var _setting_default _setting_type _setting_label _setting_value _setting_normalized
 
 # Cross-setting rules the table cannot express.
 if { [ -n "${CERT_PATH:-}" ] && [ -z "${KEY_FILE:-}" ]; } || \
@@ -1605,6 +1649,20 @@ if printf 'DOCUMENTDB_PORT=%s\nPOSTGRESQL_PORT=%s\n' \
     echo "Runtime state for the health check written to $DOCUMENTDB_RUNTIME_STATE_FILE"
 else
     echo "Warning: could not write $DOCUMENTDB_RUNTIME_STATE_FILE; the container health check will keep reporting unhealthy." >&2
+fi
+
+# Start the anonymous usage-telemetry emitter. Started only after the gateway
+# is serving so a launch event means a deployment that actually came up, and
+# backgrounded with its PID in the cleanup trap so it stops with everything
+# else. The script exits immediately when telemetry is disabled or opted out,
+# and every request it makes is fire-and-forget, so nothing here can delay or
+# fail the container.
+telemetry_script="$SCRIPT_DIR/usage_telemetry.sh"
+if [ -f "$telemetry_script" ]; then
+    bash "$telemetry_script" &
+    USAGE_TELEMETRY_PID=$!
+else
+    echo "Warning: usage telemetry emitter not found at $telemetry_script; skipping." >&2
 fi
 
 echo ""
