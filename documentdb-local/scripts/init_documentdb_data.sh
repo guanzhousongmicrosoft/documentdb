@@ -6,20 +6,27 @@
 set -e
 set -u
 
-# Defaults come from the image's settings table beside this script; the
-# entrypoint passes every value explicitly, so these only apply standalone.
-# shellcheck source=documentdb_local_settings.sh
-. "$(dirname "${BASH_SOURCE[0]}")/documentdb_local_settings.sh"
-USERNAME="$(documentdb_local_setting_default USERNAME)"
+# Default values
+USERNAME="default_user"
 PASSWORD=""
-INIT_DATA_PATH="$(documentdb_local_setting_default INIT_DATA_PATH)"
+INIT_DATA_PATH="/init_doc_db.d"
 VERBOSE="false"
 DOCUMENTDB_HOST="localhost"
-DOCUMENTDB_PORT="$(documentdb_local_setting_default DOCUMENTDB_PORT)"
+DOCUMENTDB_PORT="10260"
 # When set (custom user-provided initialization only), this marker is written immediately
 # before the first user script runs, so a non-idempotent init that fails partway is not
 # re-run on a restart and cannot loop. Empty for built-in sample data, which is idempotent.
 ATTEMPT_MARKER=""
+LOG_FILE="${ENTRYPOINT_LOG:-/var/log/documentdb/gateway_entrypoint.log}"
+LOG_FILE_AVAILABLE="false"
+
+if [ -n "$LOG_FILE" ]; then
+    if touch "$LOG_FILE" 2>/dev/null; then
+        LOG_FILE_AVAILABLE="true"
+    else
+        echo "Warning: Unable to append to log file: $LOG_FILE"
+    fi
+fi
 
 # Print usage information
 usage() {
@@ -31,10 +38,10 @@ Usage: $0 [OPTIONS]
 Options:
   -h, --help                    Show this help message
   -H, --host HOST              DocumentDB host (default: localhost)
-  -P, --port PORT              DocumentDB port (default: $(documentdb_local_setting_default DOCUMENTDB_PORT))
-  -u, --username USERNAME      DocumentDB username (default: $(documentdb_local_setting_default USERNAME))
+  -P, --port PORT              DocumentDB port (default: 10260)
+  -u, --username USERNAME      DocumentDB username (default: default_user)
   -d, --data-path PATH         Path to directory containing .js initialization files
-                               (default: $(documentdb_local_setting_default INIT_DATA_PATH))
+                               (default: /init_doc_db.d)
   -v, --verbose                Enable verbose output
   --attempt-marker PATH        Internal: marker file recorded immediately before the first
                                user script runs, making custom initialization one-shot per
@@ -165,6 +172,23 @@ log() {
     fi
 }
 
+print_and_log() {
+    local message="$1"
+    echo "$message"
+    if [ "$LOG_FILE_AVAILABLE" = "true" ]; then
+        printf '%s\n' "$message" >> "$LOG_FILE"
+    fi
+}
+
+print_file_and_log() {
+    local file_path="$1"
+    if [ "$LOG_FILE_AVAILABLE" = "true" ]; then
+        tee -a "$LOG_FILE" < "$file_path"
+    else
+        cat "$file_path"
+    fi
+}
+
 # Record the one-shot custom-init marker right before the first user script mutates data.
 # This must happen BEFORE any data is written: user scripts may be non-idempotent, so if the
 # marker cannot be persisted we refuse to run rather than mutate-then-fail-to-mark, which
@@ -245,6 +269,9 @@ run_init_scripts() {
 
             echo "Executing initialization script: $(basename "$init_file")"
             log "Full path: $init_file"
+            print_and_log "---- Begin init data: $(basename "$init_file") ----"
+            print_file_and_log "$init_file"
+            print_and_log "---- End init data: $(basename "$init_file") ----"
 
             if run_mongosh_script "$init_file"; then
                 log "Successfully executed: $(basename "$init_file")"

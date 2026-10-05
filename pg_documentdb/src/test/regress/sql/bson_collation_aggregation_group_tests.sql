@@ -7,6 +7,7 @@ SET search_path TO documentdb_api,documentdb_api_catalog,documentdb_core,pg_cata
 SET documentdb.next_collection_id TO 25700000;
 SET documentdb.next_collection_index_id TO 25700000;
 SET documentdb_core.enableCollation TO on;
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 SELECT documentdb_api.insert_one('db', 'group_collation_test',
     '{ "_id": 1, "category": "Cat", "region": "North", "value": 10 }');
@@ -242,6 +243,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
         { "$group": { "_id": null, "n": { "$count": {} }, "total": { "$sum": 1 } } }
     ], "collation": { "locale": "en", "strength": 1 } }');
 
+-- Legacy accumulator paths cannot evaluate collation-sensitive expressions.
+SET documentdb.enableNewWithExprAccumulators TO off;
 SELECT document FROM bson_aggregation_pipeline('db',
     '{ "aggregate": "group_collation_test", "pipeline": [
         { "$group": { "_id": null, "acc": { "$avg": "$value" } } }
@@ -258,6 +261,8 @@ SELECT document FROM bson_aggregation_pipeline('db',
     '{ "aggregate": "group_collation_test", "pipeline": [
         { "$group": { "_id": null, "acc": { "$last": "$value" } } }
     ], "collation": { "locale": "en", "strength": 1 } }');
+RESET documentdb.enableNewWithExprAccumulators;
+
 -- After a $sort, $first and $last use the sorted accumulator, which sorts the
 -- values itself byte by byte and cannot honor the collation.
 SELECT document FROM bson_aggregation_pipeline('db',
@@ -311,4 +316,5 @@ RESET documentdb.skipFailOnCollation;
 
 SELECT documentdb_api.drop_collection('db', 'group_collation_test');
 
+RESET documentdb.enableNewWithExprAccumulators;
 RESET documentdb_core.enableCollation;

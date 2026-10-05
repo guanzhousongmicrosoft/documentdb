@@ -23,8 +23,8 @@
 #include "utils/documentdb_errors.h"
 #include "types/pcre_regex.h"
 
-/* Resources allocated during PCRE2 compile and match operations. */
-typedef struct PcreResources
+/* Data needed during the PCRE2 lib usage for regex compile and match */
+typedef struct PcreData
 {
 	/* Compile Context for regex compilation */
 	pcre2_compile_context *compileContext;
@@ -43,38 +43,6 @@ typedef struct PcreResources
 
 	/* stack for use by the code compiled by the JIT compiler */
 	pcre2_jit_stack *jitStack;
-} PcreResources;
-
-
-/*
- * Owner of the PCRE2 resources and of the reset callback that releases them.
- *
- * This struct is private to this file: it is never handed out to callers and
- * is never pfree'd. That is what makes it safe for the MemoryContextCallback
- * to live here. MemoryContextRegisterResetCallback() stores the address of the
- * callback node and its argument in the context's callback list rather than
- * copying them, so both must stay valid until the owning MemoryContext is
- * reset or deleted. Embedding them in the caller visible PcreData would break
- * that guarantee as soon as a caller pfree'd its handle.
- */
-typedef struct PcreResourceState
-{
-	PcreResources resources;
-
-	/* Callback used to release the resources when the MemoryContext that owns
-	 * this struct is reset or deleted. Registered by RegexCompileCore(). */
-	MemoryContextCallback resetCallback;
-} PcreResourceState;
-
-
-/* Data needed during the PCRE2 lib usage for regex compile and match */
-typedef struct PcreData
-{
-	/* Borrowed pointer into the PcreResourceState allocated by
-	 * RegexCompileCore(). This struct does not own the resources, so callers
-	 * are free to pfree a PcreData without disturbing the registered
-	 * callback. */
-	PcreResources *pcreResources;
 } PcreData;
 
 /* --------------------------------------------------------- */
@@ -88,8 +56,6 @@ static inline void InvalidRegexError(int errorCode, const char *errorMessage, in
 static bool RegexCompileCore(char *regexPatternStr, char *options, PcreData **pcreData,
 							 int *pcreErrorCode, int maxPatternLength,
 							 uint32_t compileOptions);
-static void ReleasePcreResources(PcreResources *pcreResources);
-static void FreePcreResourceStateCallback(void *pcreResourceState);
 void * extension_pcre_malloc(PCRE2_SIZE size, void *ignore);
 void extension_pcre_free(void *memPtr, void *ignore);
 
@@ -134,14 +100,8 @@ RegexCompileDuringPlanning(char *regexPatternStr, char *options)
 						  "The provided regular expression format is invalid",
 						  pcreErrorCode, pcreData);
 	}
-
-	/* The compiled pattern is only needed for validation here, so release
-	 * everything RegexCompileCore() created. FreePcreData() is used rather
-	 * than freeing the two contexts individually because the JIT compiled
-	 * block hanging off compiledRegex is not allocated through the
-	 * palloc/pfree hooks registered on generalContext, and is therefore only
-	 * released by pcre2_code_free(). */
-	FreePcreData(pcreData);
+	pcre2_compile_context_free(pcreData->compileContext);
+	pcre2_general_context_free(pcreData->generalContext);
 }
 
 
@@ -160,11 +120,9 @@ RegexCompile(char *regexPatternStr, char *options)
 						  pcreErrorCode, pcreData);
 	}
 
-	PcreResources *pcreResources = pcreData->pcreResources;
-
 	/* Creates a new matchData block to hold the result of a match */
-	pcreResources->matchData =
-		pcre2_match_data_create_from_pattern(pcreResources->compiledRegex, NULL);
+	pcreData->matchData =
+		pcre2_match_data_create_from_pattern(pcreData->compiledRegex, NULL);
 	return pcreData;
 }
 
@@ -187,30 +145,25 @@ RegexCompileForAggregation(char *regexPatternStr, char *options, bool enableNoAu
 						  pcreData);
 	}
 
-	PcreResources *pcreResources = pcreData->pcreResources;
-
 	/* we pass pcre2_general_context to the input so for memory allocation we use custom function of general context : palloc and pfree */
-	pcreResources->matchContext =
-		pcre2_match_context_create(pcreResources->generalContext);
-	pcre2_set_recursion_limit(pcreResources->matchContext, PCRE2_RECURSION_LIMIT);
+	pcreData->matchContext = pcre2_match_context_create(pcreData->generalContext);
+	pcre2_set_recursion_limit(pcreData->matchContext, PCRE2_RECURSION_LIMIT);
 
 	/* create a stack for use by the code compiled by the JIT compiler */
-	pcreResources->jitStack = pcre2_jit_stack_create(MIN_JIT_STACK_SIZE,
-													 MAX_JIT_STACK_SIZE,
-													 pcreResources->generalContext);
-	if (pcreResources->jitStack == NULL)
+	pcreData->jitStack = pcre2_jit_stack_create(MIN_JIT_STACK_SIZE, MAX_JIT_STACK_SIZE,
+												pcreData->generalContext);
+	if (pcreData->jitStack == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_EXCEEDEDMEMORYLIMIT), errmsg(
 							"PCRE2 stack creation failure.")));
 	}
 
 	/* provides control over the memory used by JIT as a run-time stack */
-	pcre2_jit_stack_assign(pcreResources->matchContext, NULL,
-						   pcreResources->jitStack);
+	pcre2_jit_stack_assign(pcreData->matchContext, NULL, pcreData->jitStack);
 
 	/* Creates a new matchData block to hold the result of a match */
-	pcreResources->matchData =
-		pcre2_match_data_create_from_pattern(pcreResources->compiledRegex, NULL);
+	pcreData->matchData =
+		pcre2_match_data_create_from_pattern(pcreData->compiledRegex, NULL);
 	return pcreData;
 }
 
@@ -225,65 +178,29 @@ RegexCompileCore(char *regexPatternStr, char *options, PcreData **pcreData,
 {
 	PCRE2_SIZE errorOffset;
 
-	/* Allocate the resource owner first so that it is registered before
-	 * anything that needs releasing exists. It is deliberately a separate
-	 * allocation from *pcreData: the reset callback node and its argument must
-	 * outlive any pfree a caller performs on its own handle. */
-	PcreResourceState *pcreResourceState = palloc0(sizeof(PcreResourceState));
-	PcreResources *pcreResources = &pcreResourceState->resources;
-
-	(*pcreData)->pcreResources = pcreResources;
-
 	/* PCRE2_SPTR is a pointer to unsigned code units of the appropriate width
 	 * (in this case, 8 bits).*/
 	PCRE2_SPTR pattern = (PCRE2_SPTR) regexPatternStr;
 
 	compileOptions |= ProcessRegexCompileOptions(options);
 
-	/* The palloc/pfree hooks registered by CreatePcreCompileContext() below put
-	 * nearly everything this function allocates under the control of the
-	 * current MemoryContext. The one exception is the block produced by
-	 * pcre2_jit_compile() below: that API takes no general context, so its
-	 * output is allocated by the JIT compiler itself and is only released by
-	 * pcre2_code_free(). Register the cleanup before anything is compiled so
-	 * that the block is owned from the moment it exists, including when one of
-	 * the ereport() paths below or in a caller unwinds after a partially
-	 * successful compile.
-	 *
-	 * This mirrors SetCachedFunctionStateCleanupCallback() in fmgr_utils.h,
-	 * which exists for the same reason: state that is not allocated by PG.
-	 * That macro is not used directly because it needs an fcinfo, which is
-	 * not available to every caller of this function.
-	 *
-	 * pcreResourceState is allocated from CurrentMemoryContext, is never
-	 * handed to a caller and is never pfree'd, so the callback node and its
-	 * argument stay valid until the context that owns them is reset or
-	 * deleted. The context reclaims the struct itself at that point, so the
-	 * callback must not free it. A caller that releases the resources early
-	 * through FreePcreData() stays correct because ReleasePcreResources() is
-	 * idempotent. */
-	pcreResourceState->resetCallback.func = FreePcreResourceStateCallback;
-	pcreResourceState->resetCallback.arg = (void *) pcreResourceState;
-	MemoryContextRegisterResetCallback(CurrentMemoryContext,
-									   &pcreResourceState->resetCallback);
-
 	/* Creates PCRE2 general and compile contexts. This will be needed to
 	 * register the PG's memory management functions with PCRE2 lib */
 	CreatePcreCompileContext(*pcreData);
 
-	pcre2_set_max_pattern_length(pcreResources->compileContext, maxPatternLength);
+	pcre2_set_max_pattern_length((*pcreData)->compileContext, maxPatternLength);
 
-	pcreResources->compiledRegex =
+	(*pcreData)->compiledRegex =
 		pcre2_compile(pattern,                   /* the pattern */
 					  PCRE2_ZERO_TERMINATED,     /* indicates pattern is zero-terminated */
 					  compileOptions,            /* RE Compile options */
 					  pcreErrorCode,              /* for error number */
 					  &errorOffset,              /* for error offset */
-					  pcreResources->compileContext);
+					  (*pcreData)->compileContext);
 
-	if (pcreResources->compiledRegex != NULL)
+	if ((*pcreData)->compiledRegex != NULL)
 	{
-		if (pcre2_jit_compile(pcreResources->compiledRegex, PCRE2_JIT_COMPLETE) ==
+		if (pcre2_jit_compile((*pcreData)->compiledRegex, PCRE2_JIT_COMPLETE) ==
 			PCRE2_ERROR_NOMEMORY)
 		{
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_EXCEEDEDMEMORYLIMIT),
@@ -309,14 +226,12 @@ PcreRegexExecute(char *regexPatternStr, char *options,
 	bool matched = true;
 
 	Assert(pcreData != NULL);
-	PcreResources *pcreResources = pcreData->pcreResources;
 
 	/* Now run the match. */
-	int returnCode = pcre2_match(pcreResources->compiledRegex,
+	int returnCode = pcre2_match(pcreData->compiledRegex,
 								 (PCRE2_SPTR) subjectString->string,
 								 (PCRE2_SIZE) subjectString->length,
-								 0, 0, pcreResources->matchData,
-								 pcreResources->matchContext);
+								 0, 0, pcreData->matchData, pcreData->matchContext);
 
 	if (returnCode == PCRE2_ERROR_RECURSIONLIMIT)
 	{
@@ -347,7 +262,7 @@ PcreRegexExecute(char *regexPatternStr, char *options,
 size_t *
 GetResultVectorUsingPcreData(PcreData *pcreData)
 {
-	return pcre2_get_ovector_pointer(pcreData->pcreResources->matchData);
+	return pcre2_get_ovector_pointer(pcreData->matchData);
 }
 
 
@@ -357,7 +272,7 @@ GetResultVectorUsingPcreData(PcreData *pcreData)
 int
 GetResultLengthUsingPcreData(PcreData *pcreData)
 {
-	return pcre2_get_ovector_count(pcreData->pcreResources->matchData);
+	return pcre2_get_ovector_count(pcreData->matchData);
 }
 
 
@@ -456,37 +371,6 @@ ProcessRegexCompileOptions(char *options)
 }
 
 
-/*
- * Release everything PCRE2 allocated for a compiled pattern.
- *
- * Idempotent: the pointers are cleared afterwards so that a second call is a
- * no-op. This matters because a reset callback registered by
- * RegexCompileCore() cannot be unregistered, so resources released early
- * through FreePcreData() would otherwise be double freed once the owning
- * context is reset.
- */
-static void
-ReleasePcreResources(PcreResources *pcreResources)
-{
-	if (!pcreResources)
-	{
-		return;
-	}
-
-	/* below all functions : If the argument is NULL, the function returns immediately without doing anything. */
-	pcre2_compile_context_free(pcreResources->compileContext);
-	pcre2_general_context_free(pcreResources->generalContext);
-	pcre2_match_context_free(pcreResources->matchContext);
-	pcre2_match_data_free(pcreResources->matchData);
-	pcre2_code_free(pcreResources->compiledRegex);
-	pcre2_jit_stack_free(pcreResources->jitStack);
-
-	/* Clear the pointers so that a second call is a no-op. The PCRE2 free
-	 * functions take their argument by value and cannot do this themselves. */
-	MemSet(pcreResources, 0, sizeof(PcreResources));
-}
-
-
 /* function to free all internal data members of the PcreData struct */
 void
 FreePcreData(PcreData *pcreData)
@@ -496,22 +380,13 @@ FreePcreData(PcreData *pcreData)
 		return;
 	}
 
-	ReleasePcreResources(pcreData->pcreResources);
-}
-
-
-/*
- * MemoryContextCallback registered by RegexCompileCore() so that the resources
- * PCRE2 allocates outside of the palloc/pfree hooks are released when the
- * owning context is reset.
- *
- * The PcreResourceState itself is palloc'd from the context being reset and is
- * reclaimed with it, so it must not be pfree'd here.
- */
-static void
-FreePcreResourceStateCallback(void *pcreResourceState)
-{
-	ReleasePcreResources(&((PcreResourceState *) pcreResourceState)->resources);
+	/* below all functions : If the argument is NULL, the function returns immediately without doing anything. */
+	pcre2_compile_context_free(pcreData->compileContext);
+	pcre2_general_context_free(pcreData->generalContext);
+	pcre2_match_context_free(pcreData->matchContext);
+	pcre2_match_data_free(pcreData->matchData);
+	pcre2_code_free(pcreData->compiledRegex);
+	pcre2_jit_stack_free(pcreData->jitStack);
 }
 
 
@@ -521,20 +396,17 @@ FreePcreResourceStateCallback(void *pcreResourceState)
 static inline void
 CreatePcreCompileContext(PcreData *pcreData)
 {
-	PcreResources *pcreResources = pcreData->pcreResources;
-	pcreResources->generalContext =
-		pcre2_general_context_create(extension_pcre_malloc,
-									 extension_pcre_free,
-									 NULL);
-	if (pcreResources->generalContext == NULL)
+	pcreData->generalContext = pcre2_general_context_create(extension_pcre_malloc,
+															extension_pcre_free,
+															NULL);
+	if (pcreData->generalContext == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_EXCEEDEDMEMORYLIMIT), errmsg(
 							"PCRE2 general context creation failure.")));
 	}
 
-	pcreResources->compileContext =
-		pcre2_compile_context_create(pcreResources->generalContext);
-	if (pcreResources->compileContext == NULL)
+	pcreData->compileContext = pcre2_compile_context_create(pcreData->generalContext);
+	if (pcreData->compileContext == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_EXCEEDEDMEMORYLIMIT), errmsg(
 							"PCRE2 compile context creation failure.")));

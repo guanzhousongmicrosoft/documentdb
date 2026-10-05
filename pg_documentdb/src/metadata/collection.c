@@ -1919,13 +1919,21 @@ command_ensure_valid_db_coll(PG_FUNCTION_ARGS)
 }
 
 
-/* Validates database name syntax for database- and collection-scoped resources. */
+/*
+ * Validation function that ensures that the database/collections created in
+ * documentdb_api are valid.
+ */
 void
-ValidateDatabaseName(Datum databaseDatum)
+ValidateDatabaseCollection(Datum databaseDatum, Datum collectionDatum)
 {
 	text *databaseName = DatumGetTextP(databaseDatum);
+	text *collectionName = DatumGetTextP(collectionDatum);
+
 	StringView databaseView = {
 		.length = VARSIZE_ANY_EXHDR(databaseName), .string = VARDATA_ANY(databaseName)
+	};
+	StringView collectionView = {
+		.length = VARSIZE_ANY_EXHDR(collectionName), .string = VARDATA_ANY(collectionName)
 	};
 
 	if (databaseView.length >= MAX_DATABASE_NAME_LENGTH)
@@ -1945,23 +1953,6 @@ ValidateDatabaseName(Datum databaseDatum)
 								   CharactersNotAllowedInDatabaseNames[i])));
 		}
 	}
-}
-
-
-/* Validates database and collection name syntax. */
-void
-ValidateDatabaseCollection(Datum databaseDatum, Datum collectionDatum)
-{
-	ValidateDatabaseName(databaseDatum);
-
-	text *databaseName = DatumGetTextP(databaseDatum);
-	text *collectionName = DatumGetTextP(collectionDatum);
-	StringView databaseView = {
-		.length = VARSIZE_ANY_EXHDR(databaseName), .string = VARDATA_ANY(databaseName)
-	};
-	StringView collectionView = {
-		.length = VARSIZE_ANY_EXHDR(collectionName), .string = VARDATA_ANY(collectionName)
-	};
 
 	if (collectionView.string == NULL || collectionView.length == 0)
 	{

@@ -336,7 +336,6 @@ extern bool EnableExtendedExplainPlans;
 extern bool EnableExplainScanIndexCosts;
 extern bool EnableOrderByIndexTerm;
 extern bool EnableIndexOnlyScanForFindProject;
-extern bool EnableMultiKeyFilterIndexOnlyScan;
 extern bool TrackIndexOnlyScanFindCandidate;
 extern bool EnableObjectIdFuncExprConversion;
 extern bool EnableExtendedIndexes;
@@ -346,6 +345,7 @@ extern bool EnableCollationWithNonUniqueOrderedIndexes;
 extern bool EnablePerPathMultiKeySortPushdown;
 extern bool EnableSupportFunctionIdPushdown;
 extern bool EnableGroupByMultiKeySortPushdown;
+extern bool EnableCompositeReducedCorrelatedPrefixTrim;
 extern bool EnableCompositeReducedCorrelatedBoundsPlanning;
 extern bool EnableMergeSortForBitmapOr;
 extern bool EnableCrossIndexBitmapOrSortMerge;
@@ -450,9 +450,7 @@ static void PrimaryKeyLookupUnableToFindIndex(void);
 static bool IndexClauseIsValidForIndexOnlyScan(const IndexClause *clause,
 											   bytea *indexOptions,
 											   const IndexOnlyScanMultiKeyState *
-											   multiKeyState,
-											   int32_t perPathMultiKeyQualsCount[
-												   INDEX_MAX_KEYS]);
+											   multiKeyState);
 static OpExpr * CreateMergeSortInPrefixMarkerOpExpr(Expr *documentExpr);
 static List * RemoveMergeSortInPrefixMarkerClauses(List *indexClauses,
 												   bool *removedMarker);
@@ -2188,8 +2186,7 @@ IsBsonValueArgumentValidForIndexOnlyScan(const bson_value_t *bsonValue)
 static bool
 CheckOpArgIsValidForIndexOnlyScan(Const *arg, bytea *indexOptions, BsonIndexStrategy
 								  indexStrategy,
-								  const IndexOnlyScanMultiKeyState *multiKeyState,
-								  int32_t perPathMultiKeyQualsCount[INDEX_MAX_KEYS])
+								  const IndexOnlyScanMultiKeyState *multiKeyState)
 {
 	if (indexOptions == NULL)
 	{
@@ -2212,104 +2209,8 @@ CheckOpArgIsValidForIndexOnlyScan(Const *arg, bytea *indexOptions, BsonIndexStra
 	int32_t columnNumber = GetCompositeOpClassColumnNumber(queryElement.path,
 														   indexOptions,
 														   &sortDirectionIgnored);
-
-	IndexMultiKeyStatus status = GetIndexColumnMultiKeyStatus(multiKeyState,
-															  columnNumber);
-	bool isMultiKeyFilter = false;
-	if (EnableMultiKeyFilterIndexOnlyScan &&
-		multiKeyState->isPerPathMultiKeyTracked &&
-		status == IndexMultiKeyStatus_HasArrays)
-	{
-		/* For per path tracking, if the path is *known* to be multi-key, we still can support
-		 * index only scans for specific operator types.
-		 */
-		isMultiKeyFilter = true;
-		switch (indexStrategy)
-		{
-			case BSON_INDEX_STRATEGY_DOLLAR_EQUAL:
-			case BSON_INDEX_STRATEGY_DOLLAR_GREATER:
-			case BSON_INDEX_STRATEGY_DOLLAR_GREATER_EQUAL:
-			case BSON_INDEX_STRATEGY_DOLLAR_LESS:
-			case BSON_INDEX_STRATEGY_DOLLAR_LESS_EQUAL:
-			{
-				/* For these cases, we *can* potentially do index only scans */
-				switch (queryElement.bsonValue.value_type)
-				{
-					case BSON_TYPE_MINKEY:
-					{
-						if (indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_GREATER)
-						{
-							return false;
-						}
-
-						break;
-					}
-
-					case BSON_TYPE_MAXKEY:
-					{
-						if (indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_LESS)
-						{
-							return false;
-						}
-
-						break;
-					}
-
-					case BSON_TYPE_BOOL:
-					case BSON_TYPE_INT32:
-					case BSON_TYPE_INT64:
-					case BSON_TYPE_DOUBLE:
-					case BSON_TYPE_TIMESTAMP:
-					case BSON_TYPE_DECIMAL128:
-					case BSON_TYPE_DATE_TIME:
-					case BSON_TYPE_OID:
-					{
-						/* These types with the operators above
-						 * generally do not do runtime recheck even with
-						 * multi-key - it's safe to push down if the index doesn't ahve
-						 * truncation.
-						 */
-						break;
-					}
-
-					case BSON_TYPE_UTF8:
-					case BSON_TYPE_BINARY:
-					{
-						/* The assumption here is that this path is not truncated.
-						 * Consequently, string queries don't need to recheck on the runtime
-						 * Ensure that this is covered by the check for IsCompositeIndexOnlyScanCandidate
-						 */
-						break;
-					}
-
-					default:
-					{
-						return false;
-					}
-				}
-
-				break;
-			}
-
-			case BSON_INDEX_STRATEGY_DOLLAR_EXISTS:
-			{
-				bool existsPositiveMatch = BsonValueAsBool(&queryElement.bsonValue);
-				if (!existsPositiveMatch)
-				{
-					return false;
-				}
-
-				break;
-			}
-
-			default:
-			{
-				/* For all other cases, skip for now defensively */
-				return false;
-			}
-		}
-	}
-	else if (status != IndexMultiKeyStatus_HasNoArrays)
+	if (GetIndexColumnMultiKeyStatus(multiKeyState, columnNumber) !=
+		IndexMultiKeyStatus_HasNoArrays)
 	{
 		return false;
 	}
@@ -2342,16 +2243,8 @@ CheckOpArgIsValidForIndexOnlyScan(Const *arg, bytea *indexOptions, BsonIndexStra
 		}
 	}
 
-	bool isValid = ValidateIndexForQualifierElement(indexOptions, &queryElement,
-													queryCollation,
-													indexStrategy);
-
-	if (isValid && isMultiKeyFilter && perPathMultiKeyQualsCount != NULL)
-	{
-		perPathMultiKeyQualsCount[columnNumber]++;
-	}
-
-	return isValid;
+	return ValidateIndexForQualifierElement(indexOptions, &queryElement, queryCollation,
+											indexStrategy);
 }
 
 
@@ -2414,8 +2307,7 @@ ConsiderObjectIdFuncForIndexOnlyScan(FuncExpr *funcExpr, bytea *indexOptions)
 static bool
 ExprIsValidForIndexOnlyScan(Expr *expr, bytea *indexOptions, bool *isShardKeyExpr,
 							int64 *shardKeyValue,
-							const IndexOnlyScanMultiKeyState *multiKeyState,
-							int32_t perPathMultiKeyQualsCount[INDEX_MAX_KEYS])
+							const IndexOnlyScanMultiKeyState *multiKeyState)
 {
 	check_stack_depth();
 	CHECK_FOR_INTERRUPTS();
@@ -2472,8 +2364,7 @@ ExprIsValidForIndexOnlyScan(Expr *expr, bytea *indexOptions, bool *isShardKeyExp
 				{
 					return CheckOpArgIsValidForIndexOnlyScan(
 						(Const *) secondArg, indexOptions,
-						BSON_INDEX_STRATEGY_DOLLAR_RANGE, multiKeyState,
-						perPathMultiKeyQualsCount);
+						BSON_INDEX_STRATEGY_DOLLAR_RANGE, multiKeyState);
 				}
 
 				return false;
@@ -2502,8 +2393,7 @@ ExprIsValidForIndexOnlyScan(Expr *expr, bytea *indexOptions, bool *isShardKeyExp
 
 		return CheckOpArgIsValidForIndexOnlyScan((Const *) secondArg, indexOptions,
 												 operator->indexStrategy,
-												 multiKeyState,
-												 perPathMultiKeyQualsCount);
+												 multiKeyState);
 	}
 	else if (IsA(expr, BoolExpr))
 	{
@@ -2515,8 +2405,7 @@ ExprIsValidForIndexOnlyScan(Expr *expr, bytea *indexOptions, bool *isShardKeyExp
 			Expr *boolArg = (Expr *) lfirst(boolArgs);
 			bool isShardKeyExprInner = false;
 			if (!ExprIsValidForIndexOnlyScan(boolArg, indexOptions, &isShardKeyExprInner,
-											 shardKeyValue, multiKeyState,
-											 perPathMultiKeyQualsCount))
+											 shardKeyValue, multiKeyState))
 			{
 				return false;
 			}
@@ -2536,8 +2425,7 @@ ExprIsValidForIndexOnlyScan(Expr *expr, bytea *indexOptions, bool *isShardKeyExp
 
 static bool
 IndexClauseIsValidForIndexOnlyScan(const IndexClause *clause, bytea *indexOptions,
-								   const IndexOnlyScanMultiKeyState *multiKeyState,
-								   int32_t perPathMultiKeyQualsCount[INDEX_MAX_KEYS])
+								   const IndexOnlyScanMultiKeyState *multiKeyState)
 {
 	if (clause->lossy)
 	{
@@ -2555,10 +2443,8 @@ IndexClauseIsValidForIndexOnlyScan(const IndexClause *clause, bytea *indexOption
 
 	/* We ignore if it is a shard key expression or not as for rum indexes a shard key value opExpr will never be valid to be pushed down. */
 	bool isShardKeyExpr = false;
-	int64_t *shardKeyValue = NULL;
 	return ExprIsValidForIndexOnlyScan(rinfo->clause, indexOptions, &isShardKeyExpr,
-									   shardKeyValue, multiKeyState,
-									   perPathMultiKeyQualsCount);
+									   NULL, multiKeyState);
 }
 
 
@@ -2575,12 +2461,10 @@ IndexRestrictInfoSupportIndexOnlyScan(const RestrictInfo *rinfo,
 	}
 
 	bool isShardKeyExpr = false;
-	int32_t *perPathMultiKeyState = NULL;
 	bool supportsIndexOnlyScan = ExprIsValidForIndexOnlyScan(rinfo->clause, indexOptions,
 															 &isShardKeyExpr,
 															 shardKeyValue,
-															 multiKeyState,
-															 perPathMultiKeyState);
+															 multiKeyState);
 	if (isShardKeyExpr && shardKeyRestrictInfo != NULL)
 	{
 		*shardKeyRestrictInfo = rinfo;
@@ -2648,31 +2532,13 @@ IndexClausesSupportIndexOnlyScan(IndexPath *indexPath,
 	}
 
 	ListCell *clauseCell;
-	int32_t perPathMultiKeyQualsCount[INDEX_MAX_KEYS] = { 0 };
 	foreach(clauseCell, indexPath->indexclauses)
 	{
 		IndexClause *clause = (IndexClause *) lfirst(clauseCell);
 
-		if (!IndexClauseIsValidForIndexOnlyScan(clause, indexOptions, multiKeyState,
-												perPathMultiKeyQualsCount))
+		if (!IndexClauseIsValidForIndexOnlyScan(clause, indexOptions, multiKeyState))
 		{
 			return false;
-		}
-	}
-
-	/* For a multi-key index, we can't support index only scans if there's > 1 qual
-	 * on the same path because that would require a runtime recheck.  This is only
-	 * relevant for per-path multi-key tracking, since that's the only path that allows
-	 * index only scans on multi-key paths.
-	 */
-	if (multiKeyState->isMultiKeyIndex && multiKeyState->isPerPathMultiKeyTracked)
-	{
-		for (int32_t i = 0; i < INDEX_MAX_KEYS; i++)
-		{
-			if (perPathMultiKeyQualsCount[i] > 1)
-			{
-				return false;
-			}
 		}
 	}
 
@@ -3127,9 +2993,7 @@ CheckFieldCoverage(Node *node, void *context)
 					return state->hasUncoveredField;
 				}
 				else if (EnableDistinctIndexPushdown &&
-						 (funcExpr->funcid == BsonDistinctUnwindFunctionOid() ||
-						  funcExpr->funcid ==
-						  BsonDistinctUnwindWithCollationFunctionOid()) &&
+						 funcExpr->funcid == BsonDistinctUnwindFunctionOid() &&
 						 IsA(secondArg, Const))
 				{
 					Const *constArg = (Const *) secondArg;
@@ -3312,10 +3176,7 @@ IsCompositeIndexOnlyScanCandidate(const IndexPath *indexPath,
 
 	/* Truncated terms are never full fidelity and block index only scan. When the
 	 * metadata is tracked we already know it; otherwise let the structural check
-	 * read it.
-	 * If this was to change, please clean up ExprIsValidForIndexOnlyScan which assumes
-	 * that truncated indexes are skipped for index only scans.
-	 */
+	 * read it. */
 	if (hasPerPathMetadata && metadata->hasTruncation)
 	{
 		return false;
@@ -3953,8 +3814,7 @@ GetSortDetails(PlannerInfo *root, Index rti, bool *hasGroupby,
 			*hasGroupby = true;
 			isGroupByEntry = true;
 		}
-		else if ((func->funcid == BsonDistinctUnwindFunctionOid() ||
-				  func->funcid == BsonDistinctUnwindWithCollationFunctionOid()) &&
+		else if (func->funcid == BsonDistinctUnwindFunctionOid() &&
 				 EnableDistinctIndexPushdown)
 		{
 			/* Similar to $group case, reject if ORDER BY has already been seen */
@@ -3966,33 +3826,6 @@ GetSortDetails(PlannerInfo *root, Index rti, bool *hasGroupby,
 			hasDistinct = true;
 			*hasDistinctScan = true;
 			*hasGroupby = true;
-
-			if (func->funcid == BsonDistinctUnwindWithCollationFunctionOid())
-			{
-				if (list_length(func->args) != 3)
-				{
-					return NIL;
-				}
-
-				Expr *thirdArg = lthird(func->args);
-				if (IsA(thirdArg, RelabelType))
-				{
-					thirdArg = ((RelabelType *) thirdArg)->arg;
-				}
-
-				if (!IsA(thirdArg, Const))
-				{
-					return NIL;
-				}
-
-				Const *thirdConst = (Const *) thirdArg;
-				if (thirdConst->constisnull || thirdConst->consttype != TEXTOID)
-				{
-					return NIL;
-				}
-
-				collationConst = thirdConst;
-			}
 		}
 		else
 		{
@@ -4140,7 +3973,6 @@ GetSortDetails(PlannerInfo *root, Index rti, bool *hasGroupby,
 		sortDetailsInput->sortDatum = (Expr *) secondConst;
 		sortDetailsInput->funcOid = func->funcid;
 		sortDetailsInput->collationConst = collationConst;
-		sortDetailsInput->isGroupBy = isGroupByEntry;
 		sortDetails = lappend(sortDetails, sortDetailsInput);
 
 		*isOrderById = *isOrderById ||
@@ -4694,13 +4526,6 @@ GetInPrefixPointValues(OpExpr *inExpr, int maxUniqueValues, List **valueConstsOu
 }
 
 
-static inline int32_t
-SortDirectionCombine(int32_t leftDirection, int32_t rightDirection)
-{
-	return leftDirection * rightDirection;
-}
-
-
 /*
  * Builds the per-sort-column order-by index clauses (one $range "orderByScan"
  * clause per servable sort key) that drive the ordered index scan, for the
@@ -4748,45 +4573,6 @@ BuildMergeSortOrderByClauses(PlannerInfo *root, IndexOptInfo *indexInfo,
 	List *orderByClauses = NIL;
 	ListCell *sortCell;
 	int32_t determinedScanDirection = 0;
-
-	/*
-	 * Group keys do not constrain scan direction. When a sort suffix follows
-	 * them, use its direction for the whole index scan; otherwise scan forward.
-	 */
-	foreach(sortCell, sortDetails)
-	{
-		SortIndexInputDetails *sortInput = (SortIndexInputDetails *) lfirst(sortCell);
-		if (sortInput->isGroupBy)
-		{
-			continue;
-		}
-
-		int8_t indexSortDirection = 0;
-		int32_t columnNumber = GetCompositeOpClassColumnNumber(
-			sortInput->sortPath, opClassOptions, &indexSortDirection);
-		if (columnNumber < 0)
-		{
-			break;
-		}
-
-		int32_t querySortDirection =
-			SortPathKeyStrategy(sortInput->sortPathKey) == BTGreaterStrategyNumber ?
-			-1 : 1;
-		if (querySortDirection != indexSortDirection && !indexSupportsReverse)
-		{
-			break;
-		}
-
-		determinedScanDirection =
-			querySortDirection == indexSortDirection ? 1 : -1;
-		break;
-	}
-
-	if (determinedScanDirection == 0)
-	{
-		determinedScanDirection = 1;
-	}
-
 	int32_t expectedColumn = -1;
 	foreach(sortCell, sortDetails)
 	{
@@ -4816,18 +4602,9 @@ BuildMergeSortOrderByClauses(PlannerInfo *root, IndexOptInfo *indexInfo,
 			break;
 		}
 
-		int32_t querySortDirection;
-		if (sortInput->isGroupBy)
-		{
-			querySortDirection = SortDirectionCombine(indexSortDirection,
-													  determinedScanDirection);
-		}
-		else
-		{
-			querySortDirection =
-				SortPathKeyStrategy(sortInput->sortPathKey) == BTGreaterStrategyNumber ?
-				-1 : 1;
-		}
+		int32_t querySortDirection =
+			SortPathKeyStrategy(sortInput->sortPathKey) == BTGreaterStrategyNumber ?
+			-1 : 1;
 
 		/* A key whose direction the index cannot serve ends the prefix. */
 		if (querySortDirection != indexSortDirection && !indexSupportsReverse)
@@ -4836,7 +4613,11 @@ BuildMergeSortOrderByClauses(PlannerInfo *root, IndexOptInfo *indexInfo,
 		}
 
 		int32_t scanDirection = querySortDirection == indexSortDirection ? 1 : -1;
-		if (scanDirection != determinedScanDirection)
+		if (determinedScanDirection == 0)
+		{
+			determinedScanDirection = scanDirection;
+		}
+		else if (scanDirection != determinedScanDirection)
 		{
 			/* A scan-direction flip within the prefix cannot stream; stop here. */
 			break;
@@ -6453,8 +6234,9 @@ ProcessOrderByStatements(PlannerInfo *root,
 		 * element with a distinct sort value, so the grouped order (and the
 		 * group keys) would be unsound. A multi-key path in the equality
 		 * *prefix* ahead of the sort columns is permitted -- the sort columns
-		 * stay scalar-ordered -- and the scan's de-duplication preserves one row
-		 * per document when the prefix emits multiple matching index tuples.
+		 * stay scalar-ordered -- though such a prefix can still emit one index
+		 * tuple per matching array element, so the streamed group may over-count
+		 * until de-duplication is layered on top.
 		 *
 		 * This relaxation requires per-path multi-key metadata (an "mkp" index)
 		 * so we can tell which individual columns are multi-key, and is gated
@@ -6489,42 +6271,7 @@ ProcessOrderByStatements(PlannerInfo *root,
 	List *indexOrderBys = NIL;
 	List *indexPathKeys = NIL;
 	List *indexOrderbyCols = NIL;
-
-	/*
-	 * Group keys only need equal values to be adjacent, so either direction is
-	 * valid. Let the first non-group sort key choose the physical scan direction.
-	 * Without a sort suffix, prefer the index's forward direction.
-	 */
 	int32_t determinedSortOrder = 0;
-	int32_t directionSortDetailsIndex = 0;
-	for (i = minOrderByColumn; i <= maxOrderByColumn; i++)
-	{
-		if (pathSortOrders[i] == 0)
-		{
-			continue;
-		}
-
-		SortIndexInputDetails *sortDetailsInput =
-			(SortIndexInputDetails *) list_nth(sortDetails,
-											   directionSortDetailsIndex++);
-		if (strcmp(sortDetailsInput->sortPath, queryOrderPaths[i]) != 0)
-		{
-			break;
-		}
-
-		if (!sortDetailsInput->isGroupBy)
-		{
-			determinedSortOrder = pathSortOrders[i];
-			break;
-		}
-	}
-
-	if (determinedSortOrder == 0)
-	{
-		determinedSortOrder = 1;
-	}
-
-	i = 0;
 	for (; i < minOrderByColumn; i++)
 	{
 		if (!equalityPrefixes[i])
@@ -6571,44 +6318,22 @@ ProcessOrderByStatements(PlannerInfo *root,
 		if (pathSortOrders[i] != 0)
 		{
 			/* This path has an order by */
+			if (determinedSortOrder == 0)
+			{
+				determinedSortOrder = pathSortOrders[i];
+			}
+			else if (pathSortOrders[i] != determinedSortOrder)
+			{
+				/* Can no longer push any further orderby to this index */
+				break;
+			}
+
 			SortIndexInputDetails *sortDetailsInput =
 				(SortIndexInputDetails *) list_nth(sortDetails, sortDetailsIndex);
 
 			if (strcmp(sortDetailsInput->sortPath, queryOrderPaths[i]) != 0)
 			{
 				/* The order by path does not match the index path */
-				break;
-			}
-
-			int32_t effectiveSortOrder = pathSortOrders[i];
-			Expr *sortDatum = sortDetailsInput->sortDatum;
-			if (sortDetailsInput->isGroupBy)
-			{
-				/*
-				 * Keep every group key on the physical direction selected above.
-				 * pathSortOrders is relative to the index column direction, so use
-				 * it to recover that direction and build the matching group datum.
-				 */
-				effectiveSortOrder = determinedSortOrder;
-				int32_t querySortDirection =
-					SortPathKeyStrategy(sortDetailsInput->sortPathKey) ==
-					BTGreaterStrategyNumber ? -1 : 1;
-				int32_t indexSortDirection =
-					SortDirectionCombine(querySortDirection, pathSortOrders[i]);
-				int32_t groupSortDirection =
-					SortDirectionCombine(indexSortDirection, effectiveSortOrder);
-
-				pgbsonelement groupSortElement;
-				groupSortElement.path = sortDetailsInput->sortPath;
-				groupSortElement.pathLength = strlen(sortDetailsInput->sortPath);
-				groupSortElement.bsonValue.value_type = BSON_TYPE_INT32;
-				groupSortElement.bsonValue.value.v_int32 = groupSortDirection;
-				sortDatum = (Expr *) MakeBsonConst(
-					PgbsonElementToPgbson(&groupSortElement));
-			}
-			else if (effectiveSortOrder != determinedSortOrder)
-			{
-				/* Can no longer push any further orderby to this index */
 				break;
 			}
 
@@ -6648,13 +6373,13 @@ ProcessOrderByStatements(PlannerInfo *root,
 			}
 			else
 			{
-				Oid indexOperator = effectiveSortOrder < 0 ?
+				Oid indexOperator = pathSortOrders[i] < 0 ?
 									BsonOrderByReverseIndexOperatorId() :
 									BsonOrderByIndexOperatorId();
 				orderElement = (OpExpr *) make_opclause(
 					indexOperator, BsonTypeId(), false,
 					(Expr *) sortDetailsInput->sortVar,
-					sortDatum,
+					(Expr *) sortDetailsInput->sortDatum,
 					InvalidOid, InvalidOid);
 				orderElement->opfuncid = get_opcode(indexOperator);
 			}
@@ -7667,6 +7392,7 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 						  indexPath->indexinfo->opclassoptions[0] : NULL;
 	bool prunedCorrelatedIndexQuals = false;
 	if (EnableCompositeReducedCorrelatedBoundsPlanning &&
+		EnableCompositeReducedCorrelatedPrefixTrim &&
 		hasPerPathMetadata &&
 		indexMetadata.hasCorrelatedReducedTerms)
 	{
@@ -7690,14 +7416,13 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 	 * this path already owns a private copy. See EnsureIndexClausesOwned.
 	 */
 	List *sharedIndexClauses = indexPath->indexclauses;
-	int32_t perPathMultiKeyQualsCount[INDEX_MAX_KEYS] = { 0 };
 	foreach(cell, indexPath->indexclauses)
 	{
 		IndexClause *clause = (IndexClause *) lfirst(cell);
 
-		if (indexOnlyScanPossible &&
-			!IndexClauseIsValidForIndexOnlyScan(clause, indexOptions, &multiKeyState,
-												perPathMultiKeyQualsCount))
+		if (indexOnlyScanPossible && !IndexClauseIsValidForIndexOnlyScan(clause,
+																		 indexOptions,
+																		 &multiKeyState))
 		{
 			indexOnlyScanPossible = false;
 		}
@@ -7773,19 +7498,6 @@ TraverseIndexPathForCompositeIndex(struct IndexPath *indexPath, struct PlannerIn
 				equalityPrefixes, nonEqualityPrefixes, anySpecifiedPrefixes))
 		{
 			firstFilterColumnFound = true;
-		}
-	}
-
-	if (indexOnlyScanPossible && multiKeyState.isMultiKeyIndex &&
-		multiKeyState.isPerPathMultiKeyTracked)
-	{
-		for (int i = 0; i < INDEX_MAX_KEYS; i++)
-		{
-			if (perPathMultiKeyQualsCount[i] > 1)
-			{
-				indexOnlyScanPossible = false;
-				break;
-			}
 		}
 	}
 
@@ -10359,10 +10071,9 @@ CreateExistsTrueOpExpr(Expr *documentExpr, const char *sourcePath,
 }
 
 
-static OpExpr *
-CreateFullScanOpExprCore(Expr *documentExpr, const char *sourcePath,
-						 uint32_t sourcePathLength, int32_t orderByDirection,
-						 int32_t numGroupKeyPaths)
+OpExpr *
+CreateFullScanOpExpr(Expr *documentExpr, const char *sourcePath, uint32_t
+					 sourcePathLength, int32_t orderByDirection)
 {
 	/* If the index is valid for the function, convert it to an OpExpr for a
 	 * $range full scan.
@@ -10381,12 +10092,6 @@ CreateFullScanOpExprCore(Expr *documentExpr, const char *sourcePath,
 		PgbsonWriterAppendInt32(&rangeWriter, "orderByScan", 11, orderByDirection);
 	}
 
-	if (numGroupKeyPaths > 0)
-	{
-		PgbsonWriterAppendInt32(&rangeWriter, "numGroupKeyPaths", 16,
-								numGroupKeyPaths);
-	}
-
 	PgbsonWriterEndDocument(&writer, &rangeWriter);
 
 	Const *bsonConst = makeConst(BsonTypeId(), -1, InvalidOid, -1, PointerGetDatum(
@@ -10399,27 +10104,6 @@ CreateFullScanOpExprCore(Expr *documentExpr, const char *sourcePath,
 											  InvalidOid);
 	opExpr->opfuncid = BsonRangeMatchFunctionId();
 	return opExpr;
-}
-
-
-OpExpr *
-CreateFullScanOpExpr(Expr *documentExpr, const char *sourcePath, uint32_t
-					 sourcePathLength, int32_t orderByDirection)
-{
-	int32_t numGroupKeyPaths = 0;
-	return CreateFullScanOpExprCore(documentExpr, sourcePath, sourcePathLength,
-									orderByDirection, numGroupKeyPaths);
-}
-
-
-OpExpr *
-CreateGroupKeyPathCountOpExpr(Expr *documentExpr, const char *sourcePath,
-							  uint32_t sourcePathLength,
-							  int32_t numGroupKeyPaths)
-{
-	int32_t orderByDirection = 0;
-	return CreateFullScanOpExprCore(documentExpr, sourcePath, sourcePathLength,
-									orderByDirection, numGroupKeyPaths);
 }
 
 

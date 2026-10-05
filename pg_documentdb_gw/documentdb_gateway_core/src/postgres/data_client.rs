@@ -10,12 +10,11 @@ use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
 use bson::RawDocument;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use tokio_postgres::Row;
 
 use crate::{
     auth::AuthState,
-    configuration::DynamicConfiguration,
     context::{ConnectionContext, Cursor, RequestContext, ServiceContext},
     error::Result,
     explain::Verbosity,
@@ -61,7 +60,7 @@ pub trait PgDataClient: Send + Sync {
         // from the same configuration the pool would have used, so a connection
         // built without a pool is never left without a client-side bound.
         let command_deadline = self.connection_pool().map_or_else(
-            |_| command_deadline_for(self.dynamic_configuration().as_ref()),
+            |_| command_deadline_for(self.service_context().setup_configuration()),
             ConnectionPool::command_deadline,
         );
 
@@ -78,21 +77,11 @@ pub trait PgDataClient: Send + Sync {
     /// Returns an error if no pool is available for this client.
     fn connection_pool(&self) -> Result<&ConnectionPool>;
 
-    /// Returns the maximum request timeout for data operations.
-    fn max_request_timeout(&self) -> Duration {
-        Duration::from_secs(self.dynamic_configuration().max_request_timeout_sec())
-    }
-
-    /// The configuration this client reads. Every other method here goes through
-    /// it, so a client that must answer differently from the process overrides
-    /// this one method rather than each of them.
-    fn dynamic_configuration(&self) -> Arc<dyn DynamicConfiguration> {
-        self.service_context().dynamic_configuration()
-    }
-
     fn request_options(&self, command_timeout_ms: Option<u64>) -> RequestOptions {
         RequestOptions::new(
-            self.dynamic_configuration().is_replica_cluster(),
+            self.service_context()
+                .dynamic_configuration()
+                .is_replica_cluster(),
             command_timeout_ms,
         )
     }
@@ -384,42 +373,6 @@ pub trait PgDataClient: Send + Sync {
         connection_context: &ConnectionContext,
     ) -> Result<Response>;
 
-    async fn execute_grant_roles_to_role(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
-    async fn execute_grant_privileges_to_role(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
-    async fn execute_grant_roles_to_user(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
-    async fn execute_revoke_roles_from_role(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
-    async fn execute_revoke_privileges_from_role(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
-    async fn execute_revoke_roles_from_user(
-        &self,
-        request_context: &RequestContext<'_>,
-        connection_context: &ConnectionContext,
-    ) -> Result<Response>;
-
     // TODO: This is a temporary solution to get the index build ID from the create indexes response.
     // it's a processing logic, not a data client logic, but for sake of simplicity, we put it here.
     // It should be refactored later to a more appropriate place related to the processing
@@ -532,19 +485,18 @@ pub trait PgDataClient: Send + Sync {
         };
 
         let request = request_context.request();
-        let command_timeout_ms = bounded_by_deadline(
-            request.max_time_ms().map(i64::cast_unsigned),
-            request_context.deadline(),
-        );
+        let command_timeout_ms = request.max_time_ms().map(i64::cast_unsigned);
         let req_opts = self.request_options(command_timeout_ms);
-        let dynamic_configuration = self.dynamic_configuration();
 
         run_request_with_retries(
             source,
             query_options,
             req_opts,
-            self.max_request_timeout(),
-            dynamic_configuration.as_ref(),
+            Duration::from_secs(
+                self.service_context()
+                    .setup_configuration()
+                    .postgres_command_timeout_secs(),
+            ),
             request_context,
             run_func,
         )
@@ -587,7 +539,7 @@ pub trait PgDataClient: Send + Sync {
                 .tracker
                 .set_cursor_id(cursor.cursor_id.into());
 
-            let dynamic_config = self.dynamic_configuration();
+            let dynamic_config = self.service_context().dynamic_configuration();
 
             let cursor_timeout = Duration::from_secs(if connection.is_none() {
                 dynamic_config.stateless_cursor_idle_timeout_sec()
@@ -614,69 +566,5 @@ pub trait PgDataClient: Send + Sync {
         }
 
         Ok(Response::Pg(response))
-    }
-}
-
-/// Bounds a requested timeout by what remains of a deadline.
-///
-/// A requested `None` means unbounded, so the deadline replaces it rather than
-/// being ignored.
-fn bounded_by_deadline(requested_ms: Option<u64>, deadline: Option<Instant>) -> Option<u64> {
-    let Some(deadline) = deadline else {
-        return requested_ms;
-    };
-
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
-
-    Some(requested_ms.map_or(remaining_ms, |requested| requested.min(remaining_ms)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn deadline_in(seconds: u64) -> Instant {
-        Instant::now() + Duration::from_secs(seconds)
-    }
-
-    #[test]
-    fn a_request_without_a_bound_inherits_the_deadline() {
-        // Returning None here would let the reissued attempt run for the pool's
-        // full configured statement timeout.
-        let bounded =
-            bounded_by_deadline(None, Some(deadline_in(10))).expect("the deadline applies");
-
-        assert!((9_000..=10_000).contains(&bounded), "got {bounded}");
-    }
-
-    #[test]
-    fn the_tighter_of_the_two_wins() {
-        let widened =
-            bounded_by_deadline(Some(30_000), Some(deadline_in(10))).expect("the deadline applies");
-        assert!(
-            (9_000..=10_000).contains(&widened),
-            "an inherited deadline must not be widened by the request, got {widened}"
-        );
-
-        assert_eq!(
-            bounded_by_deadline(Some(5_000), Some(deadline_in(10))),
-            Some(5_000),
-            "a request may ask for less than what remains"
-        );
-    }
-
-    #[test]
-    fn without_a_deadline_the_request_is_unchanged() {
-        assert_eq!(bounded_by_deadline(None, None), None);
-        assert_eq!(bounded_by_deadline(Some(30_000), None), Some(30_000));
-    }
-
-    #[test]
-    fn a_spent_deadline_leaves_nothing() {
-        assert_eq!(
-            bounded_by_deadline(Some(30_000), Some(Instant::now())),
-            Some(0)
-        );
     }
 }

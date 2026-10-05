@@ -16,9 +16,6 @@ set documentdb.enableIndexMetadataGlobalTracking to on;
 -- plan shapes are deterministic regardless of the default.
 set documentdb.enablePerPathMultiKeySortPushdown to on;
 
--- Keep this suite focused on index-only eligibility rather than group order pushdown.
-set documentdb.enable_group_by_multi_key_sort_pushdown to off;
-
 set documentdb.enableExtendedExplainPlans to on;
 -- Suppress per-index cost details so explain output is stable across runs.
 set documentdb.enableExplainScanIndexCosts to off;
@@ -84,11 +81,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$eq": null } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
 -- $eq [] on region (never an array) -> Index Only Scan.
--- Keep the projection wrapper enabled to verify that runtime-rechecked array
--- equality is not wrapped with a raw index tuple.
-SET documentdb.enable_rum_index_only_scan_projection_wrapper TO on;
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$eq": [] } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
-RESET documentdb.enable_rum_index_only_scan_projection_wrapper;
 
 -- $exists true on region -> Index Only Scan.
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$exists": true } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
@@ -102,11 +95,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 -- $in carrying a regex on region -> Index Only Scan. Unlike $nin, a $in regex is
 -- NOT lossy: the composite index stores the full term value, so the regex is
 -- matched exactly against the index term (no heap fetch, no runtime recheck).
--- The projection wrapper must still remain absent because the multi-bound
--- regex path cannot consume a raw projected index tuple.
-SET documentdb.enable_rum_index_only_scan_projection_wrapper TO on;
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$in": [ "west", { "$regularExpression": { "pattern": "^s", "options": "" } } ] } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
-RESET documentdb.enable_rum_index_only_scan_projection_wrapper;
 
 -- ----------------------------------------------------------------------------
 -- Multi-key path "tags": the same operators fall back to a regular Index Scan.
@@ -124,12 +113,11 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 -- Leading "region" bound + $exists true on the multi-key "tags" -> Index Scan, NOT index-only.
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$eq": "west" }, "tags": { "$exists": true } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
--- Leading "region" bound + a single sided range on the multi-key "tags" ->
--- Index Only Scan. Each column carries exactly one qual, so the bound on the
--- multi-key column is exact rather than a collapse of several clauses.
+-- Leading "region" bound + a range on the multi-key "tags" -> Index Scan, NOT index-only.
+-- (range/$eq operators are "supported" strategies; the multi-key column gate is what blocks them.)
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$eq": "west" }, "tags": { "$gt": "a" } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
--- Leading "region" bound + $eq on the multi-key "tags" -> Index Only Scan.
+-- Leading "region" bound + $eq on the multi-key "tags" -> Index Scan, NOT index-only.
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$eq": "west" }, "tags": { "$eq": "x" } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
 -- Leading "region" bound + $in with a null entry on the multi-key "tags" -> Index Scan, NOT index-only.
@@ -145,9 +133,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$gte": "north" } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
 -- $in with an empty-array entry on the non-multi-key "region" -> Index Only Scan.
-SET documentdb.enable_rum_index_only_scan_projection_wrapper TO on;
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "coll", "pipeline" : [{ "$match" : { "region": { "$in": [ "west", [] ] } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
-RESET documentdb.enable_rum_index_only_scan_projection_wrapper;
 
 -- ============================================================================
 -- Fully scalar composite index (grade, score): NONE of the columns are ever an
@@ -177,9 +163,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "scalar_coll", "pipeline" : [{ "$match" : { "grade": { "$eq": null } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
 -- $eq [] on the leading scalar column (never an array) -> Index Only Scan.
-SET documentdb.enable_rum_index_only_scan_projection_wrapper TO on;
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "scalar_coll", "pipeline" : [{ "$match" : { "grade": { "$eq": [] } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
-RESET documentdb.enable_rum_index_only_scan_projection_wrapper;
 
 -- $exists true on the trailing scalar column, with the leading column bound so the
 -- composite index is used -> Index Only Scan (covers a non-leading scalar column).
@@ -294,9 +278,7 @@ SELECT collection_id AS leadmk_cid FROM documentdb_api_catalog.collections WHERE
 SELECT format('ALTER TABLE documentdb_data.documents_%s set (autovacuum_enabled = off)', :'leadmk_cid') \gexec
 SELECT format('VACUUM (ANALYZE ON, FREEZE ON) documentdb_data.documents_%s', :'leadmk_cid') \gexec
 
--- $eq on the multi-key leading "items" -> Index Only Scan. A numeric equality on
--- a per-path tracked multi-key column needs no runtime recheck, so the count can
--- be served from the index alone.
+-- $eq on the multi-key leading "items" -> Index Scan (composite index used), NOT index-only.
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('iosmk_db', '{ "aggregate" : "leadmk_coll", "pipeline" : [{ "$match" : { "items": { "$eq": 5 } } }, { "$count": "count" }]}') $$, p_ignore_heap_fetches => true);
 
 -- $ne on the multi-key leading "items" -> Index Scan, NOT index-only.

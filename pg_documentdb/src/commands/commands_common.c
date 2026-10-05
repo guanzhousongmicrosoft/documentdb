@@ -12,30 +12,21 @@
 #include "miscadmin.h"
 
 #include "access/xact.h"
-#include "catalog/pg_class_d.h"
 #include "executor/spi.h"
 #include "lib/stringinfo.h"
-#include "utils/acl.h"
 #include "utils/builtins.h"
-#include "utils/lsyscache.h"
 #include "storage/lmgr.h"
 #include "utils/snapmgr.h"
 
 #include "io/bson_core.h"
-#include "io/bsonvalue_utils.h"
 #include "collation/collation.h"
 #include "commands/commands_common.h"
 #include "commands/parse_error.h"
-#include "opclass/bson_text_gin.h"
-#include "query/query_operator.h"
 #include "utils/error_utils.h"
 #include "utils/documentdb_errors.h"
-#include "utils/hsearch.h"
 #include "aggregation/bson_query.h"
-#include "metadata/index.h"
 #include "metadata/metadata_cache.h"
 #include "planner/documentdb_planner.h"
-#include "utils/hashset_utils.h"
 #include "utils/timeout.h"
 
 
@@ -44,8 +35,6 @@ extern bool EnableBackendStatementTimeout;
 extern int MaxCustomCommandTimeout;
 extern bool RumFailOnLostPath;
 extern bool EnableNullCollectionValidation;
-extern bool EnableRequestIndexNameCache;
-extern bool EnableCollectionOwnerAclCheck;
 
 /*
  *  This is a list of command options that are not currently supported.
@@ -111,10 +100,6 @@ static int NumberOfIgnoredFields = sizeof(IgnoredCommonSpecFields) /
 static int CompareStringsCaseInsensitive(const void *a, const void *b);
 static pgbson * RewriteDocumentAddObjectIdCore(const bson_value_t *docValue,
 											   bson_value_t *objectIdToWrite);
-static HTAB * CreateIndexNameCache(MemoryContext requestContext);
-static const char * GetIndexNameWithCache(const char *pgIndexName,
-										  MemoryContext requestContext,
-										  HTAB **indexNameCache);
 
 /*
  * Rejects an embedded null in a namespace when validation is enabled.
@@ -137,89 +122,24 @@ ValidateNamespaceStringForEmbeddedNull(const char *value, uint32_t length)
 }
 
 
-void
-EnsureCollectionOwner(MongoCollection *collection)
-{
-	if (!EnableCollectionOwnerAclCheck)
-	{
-		return;
-	}
-
-	if (!OidIsValid(collection->relationId))
-	{
-		return;
-	}
-
-#if PG_VERSION_NUM >= 160000
-	bool isOwner = object_ownercheck(RelationRelationId, collection->relationId,
-									 GetUserId());
-#else
-	bool isOwner = pg_class_ownercheck(collection->relationId, GetUserId());
-#endif
-
-	if (!isOwner)
-	{
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
-					   collection->name.collectionName);
-	}
-}
-
-
 /*
- * Returns the index term sort specification for a regular sort field, or
- * NULL for a metadata sort that must be evaluated at runtime.
+ * FindShardKeyValueForDocumentId queries the collection for the shard key value that
+ * corresponds to document ID and matches the query. If there are multiple
+ * document IDs that match, it uses the smallest one.
  */
-pgbson *
-GetIndexTermOrderbySpec(pgbson *sortDoc)
-{
-	pgbsonelement sortElement;
-	if (!TryGetSinglePgbsonElementFromPgbson(sortDoc, &sortElement) ||
-		TryCheckMetaScoreOrderBy(&sortElement.bsonValue))
-	{
-		return NULL;
-	}
-
-	sortElement.bsonValue.value_type = BSON_TYPE_INT32;
-	sortElement.bsonValue.value.v_int32 = 1;
-	return PgbsonElementToPgbson(&sortElement);
-}
-
-
-/*
- * Returns the full scan specification matching a collated sort field.
- */
-pgbson *
-GetFullScanSortSpec(pgbson *sortDoc, const char *collationString)
-{
-	pgbsonelement sortElement;
-	PgbsonToSinglePgbsonElement(sortDoc, &sortElement);
-
-	pgbson_writer writer;
-	PgbsonWriterInit(&writer);
-	PgbsonWriterAppendValue(&writer, sortElement.path, sortElement.pathLength,
-							&sortElement.bsonValue);
-	PgbsonWriterAppendUtf8(&writer, "collation", 9, collationString);
-	return PgbsonWriterGetPgbson(&writer);
-}
-
-
-/*
- * Builds the cross-shard query used to locate the shard key for a document ID.
- */
-void
-BuildShardKeyValueForDocumentIdQuery(MongoCollection *collection,
-									 const bson_value_t *queryDoc,
-									 const bson_value_t *objectId,
-									 bool isIdValueCollationAware,
-									 bool queryHasNonIdFilters,
-									 const bson_value_t *sort,
-									 const bson_value_t *variableSpec,
-									 const char *collationString,
-									 ShardKeyLookupQueryState *state)
+bool
+FindShardKeyValueForDocumentId(MongoCollection *collection, const bson_value_t *queryDoc,
+							   bson_value_t *objectId, bool isIdValueCollationAware,
+							   bool queryHasNonIdFilters, int64_t *shardKeyValue,
+							   const bson_value_t *variableSpec,
+							   const char *collationString)
 {
 	StringInfoData selectQuery;
 	int argCount = 0;
 
+	bool foundDocument = false;
+
+	SPI_connect();
 	initStringInfo(&selectQuery);
 
 	appendStringInfo(&selectQuery,
@@ -268,105 +188,21 @@ BuildShardKeyValueForDocumentIdQuery(MongoCollection *collection,
 		argCount++;
 	}
 
-	/*
-	 * Exact _id values can repeat on different shards, so an explicit sort
-	 * must be applied before choosing the shard.
-	 */
-	List *sortDocuments = sort != NULL ?
-						  BsonValueDocumentDecomposeFields(sort) : NIL;
-	List *indexTermSortDocuments = NIL;
-	List *fullScanSortDocuments = NIL;
-	List *sortArgumentDocuments = NIL;
-	int fullScanArgBaseIndex = argCount;
-	if (sortDocuments != NIL && applyCollation)
+	/* choose document with smallest _id if multiple documents are found */
+	int idOrderByIndex = -1;
+	if (applyCollationToIdValue)
 	{
-		ListCell *sortCell;
-		foreach(sortCell, sortDocuments)
-		{
-			pgbson *sortDocument = lfirst(sortCell);
-			pgbson *indexTermSortDocument = GetIndexTermOrderbySpec(sortDocument);
-			indexTermSortDocuments = lappend(indexTermSortDocuments,
-											 indexTermSortDocument);
+		idOrderByIndex = argCount;
+		appendStringInfo(&selectQuery,
+						 " ORDER BY %s.bson_orderby(document, $%d::%s, $3::text) USING OPERATOR(%s.<<<) LIMIT 1",
+						 ApiInternalSchemaNameV2, idOrderByIndex + 1, FullBsonTypeName,
+						 ApiInternalSchemaNameV2);
 
-			if (indexTermSortDocument == NULL)
-			{
-				continue;
-			}
-
-			appendStringInfo(
-				&selectQuery,
-				" AND %s.bson_dollar_fullscan(document, $%d::%s.bson)",
-				DocumentDBApiInternalSchemaName, argCount + 1, CoreSchemaName);
-			fullScanSortDocuments = lappend(fullScanSortDocuments,
-											GetFullScanSortSpec(sortDocument,
-																collationString));
-			argCount++;
-		}
+		argCount++;
 	}
-
-	int sortArgBaseIndex = argCount;
-	if (sortDocuments != NIL)
+	else
 	{
-		appendStringInfoString(&selectQuery, " ORDER BY");
-
-		ListCell *sortCell;
-		int sortIndex = 0;
-		foreach(sortCell, sortDocuments)
-		{
-			pgbson *sortDocument = lfirst(sortCell);
-			bool isAscending =
-				ValidateOrderbyExpressionAndGetIsAscending(sortDocument);
-			int sortArgNumber = sortArgBaseIndex + sortIndex + 1;
-
-			if (!applyCollation)
-			{
-				appendStringInfo(
-					&selectQuery,
-					"%s %s.bson_orderby(document, $%d::%s) %s",
-					sortIndex > 0 ? "," : "", ApiCatalogSchemaName,
-					sortArgNumber, FullBsonTypeName,
-					isAscending ? "ASC" : "DESC");
-				sortArgumentDocuments = lappend(sortArgumentDocuments, sortDocument);
-			}
-			else
-			{
-				pgbson *indexTermSortDocument =
-					list_nth(indexTermSortDocuments, sortIndex);
-
-				if (indexTermSortDocument == NULL)
-				{
-					appendStringInfo(
-						&selectQuery,
-						"%s %s.bson_orderby(document, $%d::%s, $3::text) USING OPERATOR(%s.%s)",
-						sortIndex > 0 ? "," : "", ApiInternalSchemaNameV2,
-						sortArgNumber, FullBsonTypeName, ApiInternalSchemaNameV2,
-						isAscending ? "<<<" : ">>>");
-					sortArgumentDocuments = lappend(sortArgumentDocuments, sortDocument);
-				}
-				else
-				{
-					appendStringInfo(
-						&selectQuery,
-						"%s %s.bson_orderby_index%s(document, $%d::%s, $3::text) %s",
-						sortIndex > 0 ? "," : "", ApiInternalSchemaNameV2,
-						isAscending ? "" : "_reverse",
-						sortArgNumber, FullBsonTypeName,
-						isAscending ? "ASC" : "DESC");
-					sortArgumentDocuments = lappend(sortArgumentDocuments,
-													indexTermSortDocument);
-				}
-			}
-
-			argCount++;
-			sortIndex++;
-		}
-
-		appendStringInfoString(&selectQuery, " LIMIT 1");
-	}
-	else if (sortDocuments == NIL)
-	{
-		/* fall back to the smallest document ID when no sort is requested */
-		appendStringInfoString(&selectQuery, " ORDER BY object_id LIMIT 1");
+		appendStringInfo(&selectQuery, " ORDER BY object_id LIMIT 1");
 	}
 
 	Oid *argTypes = palloc0(argCount * sizeof(Oid));
@@ -407,74 +243,22 @@ BuildShardKeyValueForDocumentIdQuery(MongoCollection *collection,
 																	  &writer)));
 	}
 
-	for (int fullScanIndex = 0;
-		 fullScanIndex < list_length(fullScanSortDocuments);
-		 fullScanIndex++)
+	/* set the orderby _id filter */
+	if (applyCollationToIdValue)
 	{
-		int argIndex = fullScanArgBaseIndex + fullScanIndex;
-		argTypes[argIndex] = BYTEAOID;
-		argValues[argIndex] = PointerGetDatum(CastPgbsonToBytea(
-												  list_nth(fullScanSortDocuments,
-														   fullScanIndex)));
+		/* the _id filter should be in the form '{ "_id" : { "$numberInt" : "1" } }' */
+		pgbson_writer writer;
+		PgbsonWriterInit(&writer);
+		PgbsonWriterAppendInt32(&writer, "_id", 3, 1);
+
+		argTypes[idOrderByIndex] = bsonTypeId;
+		argValues[idOrderByIndex] = PointerGetDatum(PgbsonWriterGetPgbson(&writer));
 	}
-
-	for (int sortIndex = 0; sortIndex < list_length(sortArgumentDocuments);
-		 sortIndex++)
-	{
-		int argIndex = sortArgBaseIndex + sortIndex;
-		if (applyCollation)
-		{
-			argTypes[argIndex] = bsonTypeId;
-			argValues[argIndex] = PointerGetDatum(
-				list_nth(sortArgumentDocuments, sortIndex));
-		}
-		else
-		{
-			argTypes[argIndex] = BYTEAOID;
-			argValues[argIndex] = PointerGetDatum(CastPgbsonToBytea(
-													  list_nth(sortArgumentDocuments,
-															   sortIndex)));
-		}
-	}
-
-	state->query = selectQuery;
-	state->argCount = argCount;
-	state->argTypes = argTypes;
-	state->argValues = argValues;
-	state->argNulls = argNulls;
-}
-
-
-/*
- * FindShardKeyValueForDocumentId queries the collection for the shard key value that
- * corresponds to document ID and matches the query. If there are multiple
- * matching documents, it applies the requested sort before choosing one, and
- * falls back to the smallest document ID when no sort is requested.
- */
-bool
-FindShardKeyValueForDocumentId(MongoCollection *collection, const bson_value_t *queryDoc,
-							   bson_value_t *objectId, bool isIdValueCollationAware,
-							   bool queryHasNonIdFilters, const bson_value_t *sort,
-							   int64_t *shardKeyValue,
-							   const bson_value_t *variableSpec,
-							   const char *collationString)
-{
-	bool foundDocument = false;
-
-	SPI_connect();
-
-	ShardKeyLookupQueryState state = { 0 };
-	BuildShardKeyValueForDocumentIdQuery(collection, queryDoc, objectId,
-										 isIdValueCollationAware,
-										 queryHasNonIdFilters, sort,
-										 variableSpec, collationString,
-										 &state);
 
 	bool readOnly = false;
 	long maxTupleCount = 0;
 
-	SPI_execute_with_args(state.query.data, state.argCount, state.argTypes,
-						  state.argValues, state.argNulls,
+	SPI_execute_with_args(selectQuery.data, argCount, argTypes, argValues, argNulls,
 						  readOnly, maxTupleCount);
 
 	if (SPI_processed > 0)
@@ -629,28 +413,11 @@ CompareStringsCaseInsensitive(const void *a, const void *b)
 
 
 /*
- * CreateIndexNameCache creates a lazily populated cache in a command's stable
- * memory context. This context survives transaction retries within the request
- * and releases the cache when request processing finishes.
- */
-static HTAB *
-CreateIndexNameCache(MemoryContext requestContext)
-{
-	MemoryContext priorMemoryContext = MemoryContextSwitchTo(requestContext);
-	HTAB *indexNameCache = CreatePgbsonElementHashSet();
-	MemoryContextSwitchTo(priorMemoryContext);
-	return indexNameCache;
-}
-
-
-/*
  * GetWriteErrorFromErrorData checks if the error is an error we should rethrow
  * and if not, returns a WriteError with the details of the error data.
  */
 WriteError *
-GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx,
-						   MemoryContext requestContext,
-						   HTAB **indexNameCache)
+GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx)
 {
 	/*
 	 * If the write error is because we're in a readonly state, which means we are in recovery mode
@@ -697,8 +464,7 @@ GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx,
 
 	WriteError *writeError = palloc0(sizeof(WriteError));
 	writeError->index = writeErrorIdx;
-	if (!TryGetErrorMessageAndCode(errorData, &writeError->code, &writeError->errmsg,
-								   requestContext, indexNameCache))
+	if (!TryGetErrorMessageAndCode(errorData, &writeError->code, &writeError->errmsg))
 	{
 		writeError->code = errorData->sqlerrcode;
 		writeError->errmsg = pstrdup(errorData->message);
@@ -709,9 +475,7 @@ GetWriteErrorFromErrorData(ErrorData *errorData, int writeErrorIdx,
 
 
 bool
-TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
-						  MemoryContext requestContext,
-						  HTAB **indexNameCache)
+TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage)
 {
 	if (errorData->sqlerrcode == ERRCODE_CHECK_VIOLATION)
 	{
@@ -725,6 +489,7 @@ TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
 			 errorData->sqlerrcode == ERRCODE_UNIQUE_VIOLATION)
 	{
 		const char *mongoIndexName = NULL;
+		bool useLibPq = true;
 		if (errorData->constraint_name == NULL)
 		{
 			/* If the collection is on a remote node, this ends up being null. */
@@ -740,18 +505,16 @@ TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
 				StringView indexNameView = StringViewSubstring(&errorView,
 															   constraintError.length);
 				StringView actualNameView = StringViewFindPrefix(&indexNameView, '\"');
-				mongoIndexName = GetIndexNameWithCache(
-					CreateStringFromStringView(&actualNameView), requestContext,
-					indexNameCache);
+				mongoIndexName = GetDocumentDBIndexNameFromPostgresIndex(
+					CreateStringFromStringView(&actualNameView), useLibPq);
 			}
 			else if (StringViewStartsWithStringView(&errorView, &uniqueIndexError))
 			{
 				StringView indexNameView = StringViewSubstring(&errorView,
 															   uniqueIndexError.length);
 				StringView actualNameView = StringViewFindPrefix(&indexNameView, '\"');
-				mongoIndexName = GetIndexNameWithCache(
-					CreateStringFromStringView(&actualNameView), requestContext,
-					indexNameCache);
+				mongoIndexName = GetDocumentDBIndexNameFromPostgresIndex(
+					CreateStringFromStringView(&actualNameView), useLibPq);
 			}
 			else if (StringViewStartsWithStringView(&errorView, &constraintCreateError))
 			{
@@ -759,15 +522,14 @@ TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
 															   constraintCreateError.
 															   length);
 				StringView actualNameView = StringViewFindPrefix(&indexNameView, '\"');
-				mongoIndexName = GetIndexNameWithCache(
-					CreateStringFromStringView(&actualNameView), requestContext,
-					indexNameCache);
+				mongoIndexName = GetDocumentDBIndexNameFromPostgresIndex(
+					CreateStringFromStringView(&actualNameView), useLibPq);
 			}
 		}
 		else
 		{
-			mongoIndexName = GetIndexNameWithCache(errorData->constraint_name,
-												   requestContext, indexNameCache);
+			mongoIndexName = GetDocumentDBIndexNameFromPostgresIndex(
+				errorData->constraint_name, useLibPq);
 		}
 
 		if (mongoIndexName == NULL)
@@ -784,62 +546,6 @@ TryGetErrorMessageAndCode(ErrorData *errorData, int *code, char **errmessage,
 	}
 
 	return false;
-}
-
-
-/*
- * GetIndexNameWithCache resolves a physical index name and caches successful
- * secondary-index lookups for the current request. The request context keeps
- * the cache alive across transaction retries and releases it with the command.
- */
-static const char *
-GetIndexNameWithCache(const char *pgIndexName, MemoryContext requestContext,
-					  HTAB **indexNameCache)
-{
-	bool useLibPq = true;
-	int prefixLength = strlen(DOCUMENT_DATA_TABLE_INDEX_NAME_FORMAT_PREFIX);
-	if (!EnableRequestIndexNameCache || indexNameCache == NULL ||
-		strncmp(pgIndexName, DOCUMENT_DATA_TABLE_INDEX_NAME_FORMAT_PREFIX,
-				prefixLength) != 0)
-	{
-		return GetDocumentDBIndexNameFromPostgresIndex(pgIndexName, useLibPq);
-	}
-
-	if (*indexNameCache == NULL)
-	{
-		*indexNameCache = CreateIndexNameCache(requestContext);
-	}
-
-	uint32 pgIndexNameLength = strlen(pgIndexName);
-	PgbsonElementHashEntry searchEntry = {
-		.element = {
-			.path = pgIndexName,
-			.pathLength = pgIndexNameLength,
-		}
-	};
-	bool found = false;
-	PgbsonElementHashEntry *cacheEntry = hash_search(*indexNameCache, &searchEntry,
-													 HASH_FIND, &found);
-	if (found)
-	{
-		return cacheEntry->element.bsonValue.value.v_utf8.str;
-	}
-
-	const char *indexName = GetDocumentDBIndexNameFromPostgresIndex(pgIndexName,
-																	useLibPq);
-	if (indexName == NULL)
-	{
-		return NULL;
-	}
-
-	ereport(DEBUG1, (errmsg("Inserting index name into cache: %s", indexName)));
-	searchEntry.element.path = MemoryContextStrdup(requestContext, pgIndexName);
-	searchEntry.element.bsonValue.value_type = BSON_TYPE_UTF8;
-	searchEntry.element.bsonValue.value.v_utf8.str =
-		MemoryContextStrdup(requestContext, indexName);
-	searchEntry.element.bsonValue.value.v_utf8.len = strlen(indexName);
-	cacheEntry = hash_search(*indexNameCache, &searchEntry, HASH_ENTER, &found);
-	return cacheEntry->element.bsonValue.value.v_utf8.str;
 }
 
 

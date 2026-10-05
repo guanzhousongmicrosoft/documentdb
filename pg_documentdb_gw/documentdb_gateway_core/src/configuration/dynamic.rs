@@ -6,7 +6,7 @@
  *-------------------------------------------------------------------------
  */
 
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 use bson::RawBson;
 
@@ -18,10 +18,6 @@ use crate::{
 };
 
 pub const POSTGRES_RECOVERY_KEY: &str = "IsPostgresInRecovery";
-pub const MAX_REQUEST_TIMEOUT_DEFAULT_SEC: u64 = 120;
-pub const MAX_REQUEST_TIMEOUT_SEC_KEY: &str = "max_request_timeout_sec";
-pub const TRANSACTION_TIMEOUT_DEFAULT_SEC: u64 = 30;
-pub const TRANSACTION_TIMEOUT_SEC_KEY: &str = "transaction_timeout_sec";
 
 /// The deployed `documentdb` extension version parsed from the cluster topology,
 /// expressed as `major.minor-build` (for example, `1.114-0`).
@@ -75,17 +71,12 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
     fn get_u64(&self, key: &str, default: u64) -> u64;
     fn equals_value(&self, key: &str, value: &str) -> bool;
     fn topology(&self) -> RawBson;
-    // Determines the maximum number of connections used for the backend pools
+    fn enable_developer_explain(&self) -> bool;
     fn max_connections(&self) -> usize;
     fn allow_transaction_snapshot(&self) -> bool;
-    fn enable_request_metrics(&self) -> bool;
 
     // Needed to downcast to concrete type
     fn as_any(&self) -> &dyn std::any::Any;
-
-    fn max_request_timeout_sec(&self) -> u64;
-
-    fn transaction_timeout_sec(&self) -> u64;
 
     /// Returns the `DocumentDB` instance identifier surfaced in explain output as
     /// `instanceName`, or `None` when it is not configured. Reads the
@@ -103,7 +94,7 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
     }
 
     fn enable_write_procedures(&self) -> bool {
-        self.get_bool("enableWriteProcedures", true)
+        self.get_bool("enableWriteProcedures", false)
     }
 
     fn enable_write_procedures_with_batch_commit(&self) -> bool {
@@ -148,13 +139,6 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
         self.get_bool("SendShutdownResponses", false)
     }
 
-    /// Whether a retriable failure should stop being retried here and be
-    /// returned instead. Only enable this where the caller can genuinely
-    /// reissue the request somewhere else.
-    fn defer_retries_to_caller(&self) -> bool {
-        false
-    }
-
     fn socket_connection_idle_timeout_sec(&self) -> u64 {
         self.get_u64(
             SOCKET_CONNECTION_IDLE_TIMEOUT_KEY,
@@ -192,10 +176,6 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
             self.get_i32("systemConnectionBudget", min_system_connections);
 
         system_connection_budget as usize
-    }
-
-    fn connect_timeout(&self) -> Option<Duration> {
-        None
     }
 
     fn gateway_connection_idle_lifetime_sec(&self) -> u64 {
@@ -271,7 +251,6 @@ mod tests {
     use bson::{rawdoc, RawArrayBuf};
 
     use super::*;
-    use crate::testing::TestDynamicConfiguration;
 
     fn topology_with_versions(versions: &[&str]) -> RawBson {
         let mut arr = RawArrayBuf::new();
@@ -281,13 +260,6 @@ mod tests {
         RawBson::Document(rawdoc! {
             "documentdb_versions": arr,
         })
-    }
-
-    #[test]
-    fn write_procedures_enabled_by_default() {
-        let config = TestDynamicConfiguration::default();
-
-        assert!(config.enable_write_procedures());
     }
 
     #[test]

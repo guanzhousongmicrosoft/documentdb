@@ -22,6 +22,9 @@
 #include "utils/documentdb_errors.h"
 #include "metadata/metadata_cache.h"
 
+extern bool EnablePullNestedArrayEqFix;
+
+
 /* --------------------------------------------------------- */
 /* Data-types */
 /* --------------------------------------------------------- */
@@ -270,9 +273,26 @@ EvalExpressionAgainstArrayGetAllMatchingIndices(ExprEvalState *evalState,
 		 * inner Binary). Only recurse into the nested array if the whole-value check
 		 * fails.
 		 */
-		bool matched = EvalBooleanExpressionAgainstValue(evalState,
-														 &(element.bsonValue),
-														 shouldRecurseIfArray);
+		bool matched;
+		if (EnablePullNestedArrayEqFix)
+		{
+			matched = EvalBooleanExpressionAgainstValue(evalState,
+														&(element.bsonValue),
+														shouldRecurseIfArray);
+		}
+		else
+		{
+			if (shouldRecurseIfArray && element.bsonValue.value_type == BSON_TYPE_ARRAY)
+			{
+				matched = DatumGetBool(EvalBooleanExpressionAgainstArray(evalState,
+																		 &(element.
+																		   bsonValue)));
+			}
+			else
+			{
+				matched = DatumGetBool(ExpressionEval(evalState, &element));
+			}
+		}
 		if (matched)
 		{
 			matchingIndices = lappend_int(matchingIndices, index);

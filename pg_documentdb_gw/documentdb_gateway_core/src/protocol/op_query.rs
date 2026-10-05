@@ -12,7 +12,7 @@ use bson::{RawDocument, RawDocumentBuf};
 use bytes::Buf;
 
 use crate::{
-    error::{DocumentDBError, ErrorCode, Result},
+    error::{DocumentDBError, Result},
     protocol::{self, bson_writer, reader},
     requests::{RequestPreview, WireRequest},
 };
@@ -38,9 +38,7 @@ pub fn parse_query(message: &[u8]) -> Result<WireRequest<'_>> {
         return parse_cmd_with_db(command.document, command.database_name);
     }
 
-    // A valid frame targeting a non-$cmd collection is a legacy query-style OP_QUERY,
-    // which this gateway does not implement as a command.
-    Err(DocumentDBError::command_not_supported(
+    Err(DocumentDBError::internal_error(
         "Unable to parse OP_QUERY request".to_owned(),
     ))
 }
@@ -64,9 +62,7 @@ pub(crate) fn parse_query_payload(message: &[u8]) -> Result<RequestPreview<'_>> 
         return parse_cmd_payload_with_db(command.document, command.database_name);
     }
 
-    // A valid frame targeting a non-$cmd collection is a legacy query-style OP_QUERY,
-    // which this gateway does not implement as a command.
-    Err(DocumentDBError::command_not_supported(
+    Err(DocumentDBError::internal_error(
         "Unable to parse OP_QUERY request".to_owned(),
     ))
 }
@@ -75,8 +71,7 @@ fn parse_query_document(message: &[u8]) -> Result<QueryCommand<'_>> {
     let mut buf = message;
 
     if buf.remaining() < 4 {
-        return Err(DocumentDBError::documentdb_error(
-            ErrorCode::InvalidLength,
+        return Err(DocumentDBError::internal_error(
             "OP_QUERY message too short for flags".to_owned(),
         ));
     }
@@ -87,8 +82,7 @@ fn parse_query_document(message: &[u8]) -> Result<QueryCommand<'_>> {
     buf.advance(endpos + 1); // skip past string + null terminator
 
     if buf.remaining() < 8 {
-        return Err(DocumentDBError::documentdb_error(
-            ErrorCode::InvalidLength,
+        return Err(DocumentDBError::internal_error(
             "OP_QUERY message too short for skip/return counts".to_owned(),
         ));
     }
@@ -97,8 +91,7 @@ fn parse_query_document(message: &[u8]) -> Result<QueryCommand<'_>> {
 
     // The remaining buffer starts at the BSON query document (including its length prefix)
     if buf.remaining() < 4 {
-        return Err(DocumentDBError::documentdb_error(
-            ErrorCode::InvalidLength,
+        return Err(DocumentDBError::internal_error(
             "OP_QUERY message too short for query document".to_owned(),
         ));
     }
@@ -107,8 +100,7 @@ fn parse_query_document(message: &[u8]) -> Result<QueryCommand<'_>> {
     let query_size = bson_writer::bson_doc_size(buf)?;
 
     if buf.remaining() < query_size {
-        return Err(DocumentDBError::documentdb_error(
-            ErrorCode::InvalidLength,
+        return Err(DocumentDBError::internal_error(
             "OP_QUERY query document extends beyond message".to_owned(),
         ));
     }
@@ -140,8 +132,7 @@ fn build_command_with_db(query: &RawDocument, db: &str) -> Result<RawDocumentBuf
     let query_bytes = query.as_bytes();
 
     if query_bytes.len() < 5 {
-        return Err(DocumentDBError::documentdb_error(
-            ErrorCode::InvalidLength,
+        return Err(DocumentDBError::internal_error(
             "OP_QUERY command document is too short".to_owned(),
         ));
     }
@@ -206,11 +197,8 @@ mod tests {
         let command = rawdoc! { "find": "myCollection" };
         let msg = build_op_query_message("testdb.regularCollection", command.as_bytes());
 
-        let error = parse_query(&msg).expect_err("non-$cmd OP_QUERY should fail");
-        assert_eq!(
-            error.error_code(),
-            crate::error::ErrorCode::CommandNotSupported
-        );
+        let result = parse_query(&msg);
+        assert!(result.is_err(), "non-$cmd OP_QUERY should fail");
     }
 
     #[test]
@@ -219,15 +207,6 @@ mod tests {
         let msg = build_op_query_message("testdb.$cmd", command.as_bytes());
 
         parse_query(&msg).expect_err("non-string $db should be rejected");
-    }
-
-    #[test]
-    fn op_query_truncated_frame_returns_invalid_length() {
-        // Fewer than 4 bytes: too short to even hold the flags field.
-        let msg = vec![0_u8; 2];
-
-        let error = parse_query(&msg).expect_err("truncated OP_QUERY frame should fail");
-        assert_eq!(error.error_code(), crate::error::ErrorCode::InvalidLength);
     }
 
     #[test]

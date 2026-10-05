@@ -172,12 +172,7 @@ $cmd$);
 ROLLBACK;
 
 -- Correctness: distinct "a" values are exactly {1..10} regardless of the plan.
-SELECT document
-FROM bson_aggregation_distinct('dist_par',
-  '{ "distinct": "dp", "key": "a" }') \gset
-
-SELECT array_agg((value ->> '$numberInt')::int
-                 ORDER BY (value ->> '$numberInt')::int) AS values
-FROM jsonb_array_elements((:'document'::jsonb) -> 'values') value;
+SELECT document FROM bson_aggregation_distinct('dist_par',
+  '{ "distinct": "dp", "key": "a" }');
 
 SELECT documentdb_api.drop_collection('dist_par', 'dp');

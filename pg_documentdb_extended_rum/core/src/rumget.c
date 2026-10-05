@@ -4769,7 +4769,7 @@ MoveScanForward(RumScanOpaque so, Snapshot snapshot, ParallelIndexScanDesc paral
 				continue;
 			}
 		}
-		else if (entry->nlist == 1 && !BufferIsValid(entry->buffer))
+		else if (entry->nlist == 1)
 		{
 			/* Special case to not roundtrip over checking isFinished again */
 			Assert(entry->nlist > 0 && entry->list);
@@ -5518,6 +5518,7 @@ RMGR_PG_FUNCTION_DEF(documentdb_rum_skip_tids_on_current_entry)
 	 */
 	if (skipScan &&
 		scan->parallel_scan == NULL &&
+		so->totalsearchentries == 1 &&
 		so->rumstate.canOuterOrdering[entry->attnum - 1] &&
 		so->rumstate.outerOrderingFn[entry->attnum - 1].fn_nargs == 4)
 	{
@@ -5626,7 +5627,7 @@ TrySkipScanToNextDistinctKey(IndexScanDesc scan, RumScanOpaque so,
 						  lastOrderByKeyIdx >= 0 &&
 						  lastOrderByKeyIdx < (int) so->nkeys) ?
 						 so->keys[lastOrderByKeyIdx]->query : (Datum) 0;
-	Datum skipBound = FunctionCall7Coll(
+	Datum skipBound = FunctionCall6Coll(
 		&so->rumstate.outerOrderingFn[entry->attnum - 1],
 		so->rumstate.supportCollation[entry->attnum - 1],
 		idatum,
@@ -5634,8 +5635,7 @@ TrySkipScanToNextDistinctKey(IndexScanDesc scan, RumScanOpaque so,
 		UInt16GetDatum(RumIndexTransform_IndexGenerateDistinctSkipBound),
 		PointerGetDatum(entry->extra_data),
 		Int32GetDatum(scan->numberOfOrderBys),
-		orderByQuery,
-		Int32GetDatum(so->totalsearchentries));
+		orderByQuery);
 	MemoryContextSwitchTo(oldCtx);
 
 	if (skipBound != (Datum) 0)

@@ -320,7 +320,6 @@ Datum ReindexOrCreateCommandCore(PG_FUNCTION_ARGS, char *internalQuery);
 IndexDef * ParseIndexDefDocumentInternal(const bson_iter_t *indexesDocIter,
 										 const char *indexSpecRepr,
 										 bool ignoreUnknownIndexOptions,
-										 bool buildAsUniqueForPrepareUnique,
-										 bool useTTLIndexInvalidOptionsError);
+										 bool buildAsUniqueForPrepareUnique);
 
 #endif

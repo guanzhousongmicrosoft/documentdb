@@ -107,14 +107,8 @@ process_files() {
         files_processed=$((files_processed + 1))
         log_verbose "Processing: $file_path"
 
-        local diffs_path_file="${file_path%.out}.diff-path"
-        local diffs_file
-        if [[ -f "$diffs_path_file" ]]; then
-            diffs_file="$(<"$diffs_path_file")"
-        else
-            diffs_file="$(dirname "$file_path")/../regression.diffs"
-        fi
-        unset diffs_map
+        # Check if there's a regression.diffs in the parent directory
+        local diffs_file="$(dirname "$file_path")/../regression.diffs"
         declare -A diffs_map
         if [[ -f "$diffs_file" ]]; then
             log_verbose "Found diffs file: $diffs_file"

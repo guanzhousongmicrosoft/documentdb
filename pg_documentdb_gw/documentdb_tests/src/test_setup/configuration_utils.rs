@@ -30,28 +30,10 @@ pub async fn apply_guc(key: &str, value: &str) -> Result<()> {
 pub struct GucGuard {
     key: String,
     old_value: String,
-    restored: bool,
-}
-
-impl GucGuard {
-    /// Restores the previous GUC value before consuming the guard.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if restoring the GUC fails.
-    pub async fn restore(mut self) -> Result<()> {
-        apply_guc(&self.key, &self.old_value).await?;
-        self.restored = true;
-        Ok(())
-    }
 }
 
 impl Drop for GucGuard {
     fn drop(&mut self) {
-        if self.restored {
-            return;
-        }
-
         let key = self.key.clone();
         let old_value = self.old_value.clone();
 
@@ -91,6 +73,5 @@ pub async fn set_guc(key: &str, value: &str) -> Result<GucGuard> {
     Ok(GucGuard {
         key: key.to_owned(),
         old_value,
-        restored: false,
     })
 }

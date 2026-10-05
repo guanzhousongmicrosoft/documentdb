@@ -839,8 +839,6 @@ entrySplitPage(RumBtree btree, Buffer lbuf, Buffer rbuf,
 	RumInitPage(rPage, RumPageGetOpaque(newlPage)->flags, pageSize);
 	RumInitPage(newlPage, RumPageGetOpaque(rPage)->flags, pageSize);
 
-	/* A fill-factor target cannot exceed one page's physical capacity. */
-	Size pageCapacity = PageGetExactFreeSpace(newlPage);
 	if (RumEnableNewBulkDelete)
 	{
 		RumPageGetCycleId(newlPage) = rum_vacuum_get_cycleId(btree->index);
@@ -856,14 +854,7 @@ entrySplitPage(RumBtree btree, Buffer lbuf, Buffer rbuf,
 	if (RumEnablePageFillFactor && btree->rumstate->fillFactor != 50 &&
 		RumPageIsLeaf(lPage) && RumPageRightMost(lPage))
 	{
-		Size effectiveSize = Min(pageCapacity, totalsize);
-		splitPointSize = effectiveSize * btree->rumstate->fillFactor / 100;
-
-		/* Keep enough tuples on the left for the remainder to fit on the right. */
-		if (totalsize > pageCapacity)
-		{
-			splitPointSize = Max(splitPointSize, totalsize - pageCapacity);
-		}
+		splitPointSize = totalsize * btree->rumstate->fillFactor / 100;
 	}
 
 	ptr = tupstore;
@@ -881,16 +872,14 @@ entrySplitPage(RumBtree btree, Buffer lbuf, Buffer rbuf,
 		 * Don't go over the original max on the left page since we know that the sum total
 		 * of the original offset + the new item exceeds the size of 1 page.
 		 */
-		Size itemSize = MAXALIGN(IndexTupleSize(itup)) + sizeof(ItemIdData);
-		Size newSize = lsize + itemSize;
-		if (lsize > splitPointSize || i > maxoffOrig || newSize > pageCapacity)
+		if (lsize > splitPointSize || i > maxoffOrig)
 		{
 			page = rPage;
 		}
 		else
 		{
 			leftrightmost = itup;
-			lsize += itemSize;
+			lsize += MAXALIGN(IndexTupleSize(itup)) + sizeof(ItemIdData);
 		}
 
 		if ((writtenoffset = PageAddItem(page, RumPageItem(itup), IndexTupleSize(itup),

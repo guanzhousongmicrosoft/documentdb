@@ -167,8 +167,6 @@ ExecuteRenameCollection(char *databaseName, char *sourceCollectionName,
 							   databaseName, sourceCollectionName)));
 	}
 
-	EnsureCollectionOwner(collection);
-
 	/*
 	 * Checking whether the new collection name already exists in the database.
 	 * If yes and drop_target is false, throw an error. Drop it otherwise.
@@ -182,7 +180,6 @@ ExecuteRenameCollection(char *databaseName, char *sourceCollectionName,
 	{
 		if (dropTarget)
 		{
-			EnsureCollectionOwner(target_collection);
 			DropMongoCollection(databaseName, targetCollectionName);
 		}
 		else

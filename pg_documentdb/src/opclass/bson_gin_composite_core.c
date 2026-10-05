@@ -35,7 +35,6 @@
  #include "opclass/bson_gin_index_mgmt.h"
  #include "opclass/bson_gin_index_term.h"
  #include "opclass/bson_gin_index_types_core.h"
- #include "opclass/bson_gin_composite.h"
  #include "query/bson_compare.h"
  #include "utils/hashset_utils.h"
  #include "utils/documentdb_errors.h"
@@ -46,9 +45,8 @@
  #include "utils/string_view.h"
  #include "utils/utf8_utils.h"
 
+extern bool EnableCompositeReducedCorrelatedPrefixTrim;
 extern bool EnablePerPathMultiKeySortPushdown;
-extern bool EnableSkipSettingOrderScanDirectionForFullScanExpr;
-extern bool EnableSingleBoundaryForDollarNotIn;
 
 /* --------------------------------------------------------- */
 /* Data-types */
@@ -62,18 +60,6 @@ typedef struct CompositeRegexData
 	bool isNegationOperator;
 } CompositeRegexData;
 
-/* Struct tracking the $nin query state in order to recheck the index term. */
-typedef struct NotInRecheckData
-{
-	List *regexDataList;
-
-	HTAB *valuesHash;
-
-	bool hasNulls;
-
-	bool isCollationAware;
-} NotInRecheckData;
-
 
 /* --------------------------------------------------------- */
 /* Forward declaration */
@@ -83,7 +69,6 @@ static void ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 										  const char *wildcardPath,
 										  int8_t sortOrder,
 										  ScanDirection *scanDirection,
-										  bool *requiresOrderedScan,
 										  VariableIndexBounds *indexBounds,
 										  const char *indexCollation,
 										  IndexMultiKeyStatus pathMultiKeyState);
@@ -134,12 +119,6 @@ static void AddMultiBoundaryForDollarNotIn(int32_t indexAttribute, const
 										   pgbsonelement *queryElement,
 										   VariableIndexBounds *indexBounds,
 										   IndexMultiKeyStatus pathMultiKeyState);
-static void AddSingleBoundaryForDollarNotIn(int32_t indexAttribute, const
-											char *wildcardPath,
-											pgbsonelement *queryElement,
-											VariableIndexBounds *indexBounds,
-											const char *indexCollation,
-											IndexMultiKeyStatus pathMultiKeyState);
 static void AddMultiBoundaryForBitwiseOperator(BsonIndexStrategy strategy,
 											   int32_t indexAttribute, const
 											   char *wildcardPath,
@@ -157,7 +136,6 @@ static void AddMultiBoundaryForDollarRange(int32_t indexAttribute, const
 										   char *wildcardPath,
 										   pgbsonelement *queryElement,
 										   int8_t sortOrder, ScanDirection *scanDirection,
-										   bool *requiresOrderedScan,
 										   VariableIndexBounds *indexBounds,
 										   const char *indexCollation,
 										   IndexMultiKeyStatus pathMultiKeyState);
@@ -851,6 +829,27 @@ TrimSecondaryVariableBounds(VariableIndexBounds *variableBounds,
 	int32_t numPaths = runData->metaInfo->numIndexPaths;
 
 	/*
+	 * If prefix-group-aware trimming is disabled, fall back to the legacy
+	 * behavior: trim all variable bounds whose indexAttribute > 0.
+	 */
+	if (!EnableCompositeReducedCorrelatedPrefixTrim)
+	{
+		ListCell *cell;
+		foreach(cell, variableBounds->variableBoundsList)
+		{
+			CompositeIndexBoundsSet *set = (CompositeIndexBoundsSet *) lfirst(cell);
+			if (set->indexAttribute > 0)
+			{
+				runData->metaInfo->requiresRuntimeRecheck = true;
+				variableBounds->variableBoundsList = foreach_delete_current(
+					variableBounds->variableBoundsList, cell);
+				continue;
+			}
+		}
+		return;
+	}
+
+	/*
 	 * Build an htab mapping each dotted prefix to the lowest index attribute
 	 * among the bounds that are actually present in the query filter.
 	 * Only paths in the variable bounds list participate, so if b.d is
@@ -1209,7 +1208,6 @@ ParseOperatorStrategy(const char **indexPaths, uint32_t *indexPathLengths,
 					  pgbsonelement *queryElement,
 					  BsonIndexStrategy queryStrategy,
 					  ScanDirection *scanDirection,
-					  bool *requiresOrderedScan,
 					  VariableIndexBounds *indexBounds,
 					  const char *indexCollation,
 					  bool hasArrayPaths, uint32_t multiKeyBitMask,
@@ -1268,8 +1266,7 @@ ParseOperatorStrategy(const char **indexPaths, uint32_t *indexPathLengths,
 	}
 
 	ParseOperatorStrategyWithPath(i, queryElement, queryStrategy, wildcardPath,
-								  sortOrders[i], scanDirection,
-								  requiresOrderedScan, indexBounds,
+								  sortOrders[i], scanDirection, indexBounds,
 								  indexCollation, pathMultiKeyState);
 }
 
@@ -1302,180 +1299,12 @@ ParseSortOrderAndSetScanDirection(bson_value_t *queryvalue, int8_t sortOrder,
 }
 
 
-/*
- * Returns whether an index expression can require a recheck that needs the
- * reconstructed document rather than the raw projected index tuple.
- */
-bool
-CompositeIndexExprCanRequireRuntimeRecheck(Expr *expr)
-{
-	if (IsA(expr, BoolExpr))
-	{
-		ListCell *cell;
-		foreach(cell, ((BoolExpr *) expr)->args)
-		{
-			if (CompositeIndexExprCanRequireRuntimeRecheck((Expr *) lfirst(cell)))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	if (!IsA(expr, OpExpr) && !IsA(expr, FuncExpr))
-	{
-		return false;
-	}
-
-	List *args;
-	const MongoIndexOperatorInfo *operatorInfo;
-	if (IsA(expr, OpExpr))
-	{
-		OpExpr *opExpr = (OpExpr *) expr;
-		args = opExpr->args;
-		operatorInfo = GetMongoIndexOperatorByPostgresOperatorId(opExpr->opno);
-	}
-	else
-	{
-		FuncExpr *funcExpr = (FuncExpr *) expr;
-		args = funcExpr->args;
-		operatorInfo = GetMongoIndexOperatorInfoByPostgresFuncId(funcExpr->funcid);
-	}
-
-	if (operatorInfo == NULL || list_length(args) != 2 ||
-		!IsA(lsecond(args), Const))
-	{
-		return false;
-	}
-
-	Const *queryConst = (Const *) lsecond(args);
-	if (queryConst->constisnull)
-	{
-		return true;
-	}
-
-	pgbsonelement queryElement;
-	PgbsonToSinglePgbsonElement(DatumGetPgBson(queryConst->constvalue), &queryElement);
-
-	if (IsA(expr, OpExpr) &&
-		((OpExpr *) expr)->opno == BsonRangeMatchOperatorOid())
-	{
-		DollarRangeParams rangeParams = { 0 };
-		if (!TryGetRangeParamsForRangeArgs(args, &rangeParams))
-		{
-			return false;
-		}
-
-		/* Keep in sync with the $elemMatch branch in AddMultiBoundaryForDollarRange. */
-		if (rangeParams.isElemMatch)
-		{
-			return true;
-		}
-
-		/* Keep in sync with SetArrayEqualityBound and the array range bounds. */
-		if (rangeParams.minValue.value_type == BSON_TYPE_ARRAY ||
-			rangeParams.maxValue.value_type == BSON_TYPE_ARRAY)
-		{
-			return true;
-		}
-
-		/* Keep in sync with the MinKey case in SetGreaterThanBounds. */
-		if (rangeParams.minValue.value_type == BSON_TYPE_MINKEY &&
-			!rangeParams.isMinInclusive)
-		{
-			return true;
-		}
-
-		/* Keep in sync with the MaxKey case in SetLessThanBounds. */
-		if (rangeParams.maxValue.value_type == BSON_TYPE_MAXKEY &&
-			!rangeParams.isMaxInclusive)
-		{
-			return true;
-		}
-
-		return false;
-	}
-
-	/*
-	 * Keep in sync with the unconditional runtime rechecks in
-	 * ParseOperatorStrategyWithPath.
-	 */
-	switch (operatorInfo->indexStrategy)
-	{
-		case BSON_INDEX_STRATEGY_DOLLAR_ELEMMATCH:
-		case BSON_INDEX_STRATEGY_DOLLAR_SIZE:
-		case BSON_INDEX_STRATEGY_DOLLAR_TYPE:
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_IN:
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GT:
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GTE:
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_LT:
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_LTE:
-		{
-			return true;
-		}
-
-		default:
-		{
-			break;
-		}
-	}
-
-	if (operatorInfo->indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_IN)
-	{
-		bson_iter_t iter;
-		BsonValueInitIterator(&queryElement.bsonValue, &iter);
-		while (bson_iter_next(&iter))
-		{
-			const bson_value_t *value = bson_iter_value(&iter);
-
-			/* Keep in sync with the array branch in AddMultiBoundaryForDollarIn. */
-			if (value->value_type == BSON_TYPE_ARRAY)
-			{
-				return true;
-			}
-
-			/* Keep in sync with the regex branch in AddMultiBoundaryForDollarIn. */
-			if (value->value_type == BSON_TYPE_REGEX)
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	/* Keep in sync with SetArrayEqualityBound. */
-	if (queryElement.bsonValue.value_type == BSON_TYPE_ARRAY)
-	{
-		return true;
-	}
-
-	/* Keep in sync with the MinKey case in SetGreaterThanBounds. */
-	if (operatorInfo->indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_GREATER &&
-		queryElement.bsonValue.value_type == BSON_TYPE_MINKEY)
-	{
-		return true;
-	}
-
-	/* Keep in sync with the MaxKey case in SetLessThanBounds. */
-	if (operatorInfo->indexStrategy == BSON_INDEX_STRATEGY_DOLLAR_LESS &&
-		queryElement.bsonValue.value_type == BSON_TYPE_MAXKEY)
-	{
-		return true;
-	}
-
-	return false;
-}
-
-
 static void
 ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 							  BsonIndexStrategy queryStrategy,
 							  const char *wildcardPath,
 							  int8_t sortOrder,
 							  ScanDirection *scanDirection,
-							  bool *requiresOrderedScan,
 							  VariableIndexBounds *indexBounds,
 							  const char *indexCollation,
 							  IndexMultiKeyStatus pathMultiKeyState)
@@ -1580,8 +1409,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 			CompositeIndexBoundsSet *set = CreateAndRegisterSingleIndexBoundsSet(
 				indexBounds, i, wildcardPath);
 			SetBoundsExistsTrue(&set->bounds[0]);
-
-			/* Keep in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			set->bounds[0].requiresRuntimeRecheck = true;
 			break;
 		}
@@ -1608,7 +1435,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 			}
 
 			/* Needs a runtime recheck since we don't know about arrays */
-			/* Keep in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			set->bounds[0].requiresRuntimeRecheck = true;
 			break;
 		}
@@ -1665,15 +1491,13 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 		case BSON_INDEX_STRATEGY_DOLLAR_RANGE:
 		{
 			AddMultiBoundaryForDollarRange(i, wildcardPath, queryElement,
-										   sortOrder, scanDirection,
-										   requiresOrderedScan, indexBounds,
+										   sortOrder, scanDirection, indexBounds,
 										   indexCollation, pathMultiKeyState);
 			break;
 		}
 
 		case BSON_INDEX_STRATEGY_DOLLAR_TYPE:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			if (queryElement->bsonValue.value_type == BSON_TYPE_ARRAY)
 			{
 				AddMultiBoundaryForDollarType(i, wildcardPath, queryElement, indexBounds);
@@ -1697,19 +1521,8 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_IN:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
-			if (EnableSingleBoundaryForDollarNotIn)
-			{
-				AddSingleBoundaryForDollarNotIn(i, wildcardPath, queryElement,
-												indexBounds, indexCollation,
-												pathMultiKeyState);
-			}
-			else
-			{
-				AddMultiBoundaryForDollarNotIn(i, wildcardPath, queryElement, indexBounds,
-											   pathMultiKeyState);
-			}
-
+			AddMultiBoundaryForDollarNotIn(i, wildcardPath, queryElement, indexBounds,
+										   pathMultiKeyState);
 			break;
 		}
 
@@ -1726,7 +1539,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GT:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			bool isEquals = false;
 			AddMultiBoundaryForNotGreater(i, wildcardPath, queryElement, indexBounds,
 										  isEquals);
@@ -1735,7 +1547,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GTE:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			bool isEquals = true;
 			AddMultiBoundaryForNotGreater(i, wildcardPath, queryElement, indexBounds,
 										  isEquals);
@@ -1744,7 +1555,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_LT:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			bool isEquals = false;
 			AddMultiBoundaryForNotLess(i, wildcardPath, queryElement, indexBounds,
 									   isEquals);
@@ -1753,7 +1563,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_LTE:
 		{
-			/* Keep this strategy in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			bool isEquals = true;
 			AddMultiBoundaryForNotLess(i, wildcardPath, queryElement, indexBounds,
 									   isEquals);
@@ -1765,7 +1574,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 		case BSON_INDEX_STRATEGY_DOLLAR_ORDERBY_INDEXTERM:
 		{
 			/* It's a full scan */
-			*requiresOrderedScan = true;
 			ParseSortOrderAndSetScanDirection(&queryElement->bsonValue, sortOrder,
 											  scanDirection);
 			break;
@@ -1788,27 +1596,6 @@ ParseOperatorStrategyWithPath(int i, pgbsonelement *queryElement,
 			break;
 		}
 	}
-}
-
-
-static inline bool
-RecheckNotEqualsNull(BsonIndexTerm *term, bson_value_t *queryValue, const
-					 char *indexCollation, IndexMultiKeyStatus pathMultiKeyState)
-{
-	if (pathMultiKeyState == IndexMultiKeyStatus_HasNoArrays)
-	{
-		/* No arrays: an undefined term is a missing field and a
-		 * literal-null term equals null; exclude both, keep defined
-		 * non-null. Exact -- no heap recheck. */
-		return !IsIndexTermValueUndefined(term) &&
-			   !BsonValueEqualsWithCollation(
-			&term->element.bsonValue, queryValue,
-			indexCollation);
-	}
-
-	/* Arrays may contain undefined values: include if maybe undefined.
-	 * Not exact, these strategies must do heap recheck. */
-	return !IsIndexTermMaybeUndefined(term);
 }
 
 
@@ -1878,76 +1665,25 @@ IsValidRecheckForIndexValue(SerializedCompositeTermPair *termPair,
 			InitializeBsonIndexTermIfNeeded(termPair);
 			if (notEqualQuery->value_type == BSON_TYPE_NULL)
 			{
-				return RecheckNotEqualsNull(&termPair->term, notEqualQuery,
-											indexCollation,
-											recheckArgs->pathMultiKeyState);
+				if (recheckArgs->pathMultiKeyState == IndexMultiKeyStatus_HasNoArrays)
+				{
+					/* No arrays: an undefined term is a missing field and a
+					 * literal-null term equals null; exclude both, keep defined
+					 * non-null. Exact -- no heap recheck. */
+					return !IsIndexTermValueUndefined(&termPair->term) &&
+						   !BsonValueEqualsWithCollation(
+						&termPair->term.element.bsonValue, notEqualQuery,
+						indexCollation);
+				}
+
+				/* Multi-key: a maybe-undefined term yields to a defined sibling; a
+				 * definite-undefined term may be an empty array, so let the heap
+				 * recheck disambiguate. */
+				return !IsIndexTermMaybeUndefined(&termPair->term);
 			}
 
 			return !BsonValueEqualsWithCollation(&termPair->term.element.bsonValue,
 												 notEqualQuery, indexCollation);
-		}
-
-		case BSON_INDEX_STRATEGY_DOLLAR_NOT_IN:
-		{
-			if (IsSerializedIndexTermTruncated(termPair->serializedTerm))
-			{
-				/* don't bother, let the runtime check on this */
-				return true;
-			}
-
-			NotInRecheckData *recheckData = (NotInRecheckData *) recheckArgs->queryDatum;
-			InitializeBsonIndexTermIfNeeded(termPair);
-			bson_value_t *termValue = &termPair->term.element.bsonValue;
-
-			/* NULL needs special handling */
-			if (recheckData->hasNulls)
-			{
-				bson_value_t nullValue = {
-					.value_type = BSON_TYPE_NULL,
-				};
-
-				/* If it is equal, then we early exit, else we check against the htab and regex. */
-				if (!RecheckNotEqualsNull(&termPair->term, &nullValue, indexCollation,
-										  recheckArgs->pathMultiKeyState))
-				{
-					return false;
-				}
-			}
-
-			/* If there was REGEX values in the $nin array we need to evaluate strings against it. */
-			if (list_length(recheckData->regexDataList) > 0 &&
-				termValue->value_type == BSON_TYPE_UTF8)
-			{
-				ListCell *regexDataCell;
-				foreach(regexDataCell, recheckData->regexDataList)
-				{
-					RegexData *regexData = (RegexData *) lfirst(regexDataCell);
-					if (CompareRegexTextMatch(termValue, regexData))
-					{
-						/* If it matches the string, we return false since is a $nin, else we
-						 * continue and check the string against the htab. */
-						return false;
-					}
-				}
-			}
-
-			bool found = false;
-			if (recheckData->isCollationAware)
-			{
-				BsonValueHashEntry entry = {
-					.bsonValue = termPair->term.element.bsonValue,
-					.collationString = indexCollation,
-				};
-				hash_search(recheckData->valuesHash, &entry, HASH_FIND, &found);
-			}
-			else
-			{
-				hash_search(recheckData->valuesHash,
-							&termPair->term.element.bsonValue,
-							HASH_FIND, &found);
-			}
-
-			return !found;
 		}
 
 		case BSON_INDEX_STRATEGY_DOLLAR_BITS_ALL_CLEAR:
@@ -2015,6 +1751,7 @@ IsValidRecheckForIndexValue(SerializedCompositeTermPair *termPair,
 		case BSON_INDEX_STRATEGY_DOLLAR_TYPE:
 		case BSON_INDEX_STRATEGY_DOLLAR_ALL:
 		case BSON_INDEX_STRATEGY_DOLLAR_IN:
+		case BSON_INDEX_STRATEGY_DOLLAR_NOT_IN:
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GT:
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_GTE:
 		case BSON_INDEX_STRATEGY_DOLLAR_NOT_LT:
@@ -2183,7 +1920,6 @@ SetArrayEqualityBound(const bson_value_t *queryValue,
 	SetEqualityBound(&firstElement, &bounds[1], pathMultiKeyState);
 
 	/* Add a runtime recheck */
-	/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 	bounds[1].requiresRuntimeRecheck = true;
 }
 
@@ -2244,8 +1980,6 @@ SetGreaterThanBounds(const bson_value_t *queryValue,
 		 * a term level or split it into two bounds - equality on MinKey with recheck and
 		 * > Minkey without recheck.
 		 */
-
-		/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 		queryBounds->requiresRuntimeRecheck = !isMinBoundInclusive;
 		return;
 	}
@@ -2255,7 +1989,6 @@ SetGreaterThanBounds(const bson_value_t *queryValue,
 	if (compareValue.value_type == BSON_TYPE_ARRAY)
 	{
 		/* Arrays require runtime recheck on the greater than value */
-		/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 		queryBounds->requiresRuntimeRecheck = true;
 
 		/* Arrays need to skip typebracketing - it'll be all values until maxKey */
@@ -2348,7 +2081,6 @@ SetLessThanBounds(const bson_value_t *queryValue,
 	if (compareValue.value_type == BSON_TYPE_ARRAY)
 	{
 		/* Arrays require runtime recheck on the greater than value */
-		/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 		queryBounds->requiresRuntimeRecheck = true;
 
 		/* Arrays need to skip typebracketing - it'll be all values until maxKey */
@@ -2382,8 +2114,6 @@ SetLessThanBounds(const bson_value_t *queryValue,
 	{
 		/* Special case, maxKey is always inclusive */
 		SetBoundsExistsTrue(queryBounds);
-
-		/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 		queryBounds->requiresRuntimeRecheck = true;
 		return;
 	}
@@ -2917,10 +2647,6 @@ AddMultiBoundaryForDollarIn(int32_t indexAttribute, const char *wildcardPath,
 
 		if (element.bsonValue.value_type == BSON_TYPE_REGEX)
 		{
-			/*
-			 * Keep this multi-bound recheck case in sync with
-			 * CompositeIndexExprCanRequireRuntimeRecheck.
-			 */
 			CompositeIndexBoundsSet *regexSet = AddMultiBoundaryForDollarRegex(index,
 																			   wildcardPath,
 																			   &element,
@@ -2933,7 +2659,6 @@ AddMultiBoundaryForDollarIn(int32_t indexAttribute, const char *wildcardPath,
 		else if (element.bsonValue.value_type == BSON_TYPE_ARRAY)
 		{
 			/* Array equality has 2 boundaries */
-			/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 			SetArrayEqualityBound(&element.bsonValue, &set->bounds[index],
 								  pathMultiKeyState);
 			index += 2;
@@ -2946,159 +2671,6 @@ AddMultiBoundaryForDollarIn(int32_t indexAttribute, const char *wildcardPath,
 		}
 	}
 	indexBounds->variableBoundsList = lappend(indexBounds->variableBoundsList, set);
-}
-
-
-/* For $nin we can do a single boundary [MinKey, MaxKey] and add an index recheck function with the following constraints:
- *   1. We will store all values except nulls in an HTAB.
- *   3. We track if the array had nulls.
- *   2. Regex values will be stored in both the HTAB as the raw value and compiled in a list.
- *   3. We can skip runtime recheck we are sure it is NON multi-key index or non multi-key at the path when tracked per path.
- *
- *  When rechecking in the index:
- *   1. If the array had nulls, we handle specially for multi-key with maybe undefined. For non multi-key we evaluate against literal null and undefined metadata.
- *   2. If the null evaluation was false, we fallback to regex check. We evaluate the compiled regex arguments if any ONLY against strings.
- *   3. If the string didn't match a regex, lastly we check the index term in the HTAB, if it is there, it is not a match.
- */
-static void
-AddSingleBoundaryForDollarNotIn(int32_t indexAttribute, const char *wildcardPath,
-								pgbsonelement *queryElement,
-								VariableIndexBounds *indexBounds,
-								const char *indexCollation,
-								IndexMultiKeyStatus pathMultiKeyState)
-{
-	if (queryElement->bsonValue.value_type != BSON_TYPE_ARRAY)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE), errmsg(
-							"$nin should have an array of values")));
-	}
-
-	bson_iter_t arrayIter;
-	bson_iter_init_from_data(&arrayIter, queryElement->bsonValue.value.v_doc.data,
-							 queryElement->bsonValue.value.v_doc.data_len);
-
-	HTAB *regularValuesHash = NULL;
-	bool isCollationApplicable = IsCollationValid(indexCollation);
-	if (isCollationApplicable)
-	{
-		int extraDataSize = 0;
-		regularValuesHash = CreateBsonValueWithCollationHashSet(extraDataSize);
-	}
-	else
-	{
-		regularValuesHash = CreateBsonValueHashSet();
-	}
-
-	List *regexDataValues = NIL;
-	int numberOfValues = 0;
-	bool hasNull = false;
-	const bson_value_t *lastSeenValue = NULL;
-	while (bson_iter_next(&arrayIter))
-	{
-		lastSeenValue = bson_iter_value(&arrayIter);
-
-		/* if it is bson document and valid one for $in/$nin array. It fails with exact same error for both $in/$nin. */
-		if (!IsValidBsonDocumentForDollarInOrNinOp(lastSeenValue))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE), errmsg(
-								"cannot nest $ under $nin")));
-		}
-
-		numberOfValues++;
-
-		if (lastSeenValue->value_type == BSON_TYPE_NULL)
-		{
-			hasNull = true;
-			continue;
-		}
-
-		if (lastSeenValue->value_type == BSON_TYPE_REGEX)
-		{
-			/* Store the compiled regex data for the index check function. */
-			RegexData *regexData = (RegexData *) palloc0(sizeof(RegexData));
-			regexData->regex = lastSeenValue->value.v_regex.regex;
-			regexData->options = lastSeenValue->value.v_regex.options;
-			regexData->pcreData = RegexCompile(regexData->regex,
-											   regexData->options);
-			regexDataValues = lappend(regexDataValues, regexData);
-		}
-
-		if (isCollationApplicable)
-		{
-			BsonValueHashEntry entry =
-			{
-				.bsonValue = *lastSeenValue,
-				.collationString = indexCollation,
-			};
-
-			hash_search(regularValuesHash, &entry, HASH_ENTER, NULL);
-		}
-		else
-		{
-			hash_search(regularValuesHash, lastSeenValue, HASH_ENTER, NULL);
-		}
-	}
-
-	CompositeIndexBoundsSet *set = CreateCompositeIndexBoundsSet(1,
-																 indexAttribute,
-																 wildcardPath);
-
-	CompositeIndexBounds *queryBounds = &set->bounds[0];
-
-	if (numberOfValues == 0)
-	{
-		/* It is essentially the same as exists: true. */
-		hash_destroy(regularValuesHash);
-
-		SetBoundsExistsTrue(queryBounds);
-		indexBounds->variableBoundsList = lappend(indexBounds->variableBoundsList, set);
-		return;
-	}
-
-	/* We have values, we need to walk from [MinKey, MaxKey] and append
-	 * The recheck args for the index to recheck appropiately. */
-	CompositeSingleBound bounds = GetTypeLowerBound(BSON_TYPE_MINKEY);
-	SetLowerBound(&queryBounds->lowerBound, &bounds, indexCollation);
-	bounds = GetTypeUpperBound(BSON_TYPE_MAXKEY);
-	SetUpperBound(&queryBounds->upperBound, &bounds, indexCollation);
-
-	indexBounds->variableBoundsList = lappend(indexBounds->variableBoundsList, set);
-
-	/*
-	 * Multi-key negations need the heap recheck (mixed array elements, or an
-	 * empty-array term that matches $ne null). IndexMultiKeyStatus_HasNoArrays paths are handled
-	 * exactly by the term-level recheck (IsValidRecheckForIndexValue).
-	 */
-	queryBounds->requiresRuntimeRecheck = pathMultiKeyState !=
-										  IndexMultiKeyStatus_HasNoArrays;
-
-	if (numberOfValues == 1 && lastSeenValue->value_type != BSON_TYPE_REGEX)
-	{
-		/* effectively NOT_EQ */
-		hash_destroy(regularValuesHash);
-
-		SetBoundsForNotEqual(lastSeenValue, queryBounds,
-							 pathMultiKeyState);
-	}
-	else
-	{
-		/* Freeze the htab so nothing can write more items to it. */
-		hash_freeze(regularValuesHash);
-
-		/* add the index check function and it's arguments. */
-		NotInRecheckData *recheckData = palloc(sizeof(NotInRecheckData));
-		recheckData->regexDataList = regexDataValues;
-		recheckData->valuesHash = regularValuesHash;
-		recheckData->hasNulls = hasNull;
-		recheckData->isCollationAware = isCollationApplicable;
-
-		IndexRecheckArgs *recheckArgs = palloc(sizeof(IndexRecheckArgs));
-		recheckArgs->queryDatum = (Pointer) recheckData;
-		recheckArgs->pathMultiKeyState = pathMultiKeyState;
-		recheckArgs->queryStrategy = BSON_INDEX_STRATEGY_DOLLAR_NOT_IN;
-		queryBounds->indexRecheckFunctions =
-			lappend(queryBounds->indexRecheckFunctions, recheckArgs);
-	}
 }
 
 
@@ -3488,7 +3060,6 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 							   const char *wildcardPath,
 							   pgbsonelement *queryElement,
 							   int8_t sortOrder, ScanDirection *scanDirection,
-							   bool *requiresOrderedScan,
 							   VariableIndexBounds *indexBounds,
 							   const char *indexCollation,
 							   IndexMultiKeyStatus pathMultiKeyState)
@@ -3500,11 +3071,6 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 	if (params->dedupState.value_type == BSON_TYPE_BINARY)
 	{
 		indexBounds->dedupState = params->dedupState;
-	}
-
-	if (params->numGroupKeyPaths > 0)
-	{
-		indexBounds->numGroupKeyPaths = params->numGroupKeyPaths;
 	}
 
 	if (params->isMergeSortInPrefixMarker)
@@ -3526,11 +3092,7 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 			sortValue.value_type = BSON_TYPE_INT32;
 			sortValue.value.v_int32 = params->orderScanDirection;
 
-			*requiresOrderedScan = true;
-			if (!EnableSkipSettingOrderScanDirectionForFullScanExpr)
-			{
-				ParseSortOrderAndSetScanDirection(&sortValue, sortOrder, scanDirection);
-			}
+			ParseSortOrderAndSetScanDirection(&sortValue, sortOrder, scanDirection);
 		}
 
 		return;
@@ -3562,7 +3124,6 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 
 	if (params->isElemMatch)
 	{
-		/* Keep this case in sync with CompositeIndexExprCanRequireRuntimeRecheck. */
 		pgbsonelement innerElemMatchElement = { 0 };
 		innerElemMatchElement.path = queryElement->path;
 		innerElemMatchElement.pathLength = queryElement->pathLength;
@@ -3632,14 +3193,12 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 
 				/* $elemMatch implies array semantics, so force the multi-key path. */
 				IndexMultiKeyStatus multiKeyHasArrays = IndexMultiKeyStatus_HasArrays;
-				bool requireOrderedScanIgnore = false;
 				if (isTopLevelPath)
 				{
 					/* Top level path conditions are mergable */
 					ParseOperatorStrategyWithPath(indexAttribute, &innerElemMatchElement,
 												  queryStrategy, wildcardPath,
 												  sortOrder, &scanDirIgnore,
-												  &requireOrderedScanIgnore,
 												  &localBounds, indexCollation,
 												  multiKeyHasArrays);
 				}
@@ -3648,9 +3207,7 @@ AddMultiBoundaryForDollarRange(int32_t indexAttribute,
 					/* deduced child path conditions are not mergeable */
 					ParseOperatorStrategyWithPath(indexAttribute, &innerElemMatchElement,
 												  queryStrategy, wildcardPath,
-												  sortOrder, &scanDirIgnore,
-												  &requireOrderedScanIgnore,
-												  indexBounds,
+												  sortOrder, &scanDirIgnore, indexBounds,
 												  indexCollation,
 												  multiKeyHasArrays);
 				}

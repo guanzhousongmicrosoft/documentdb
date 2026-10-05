@@ -50,7 +50,6 @@
 #include "planner/documentdb_planner.h"
 #include "optimizer/plancat.h"
 #include "utils/index_utils.h"
-#include "rbac_hooks.h"
 
 
 /*
@@ -91,9 +90,6 @@ typedef struct BatchInsertionResult
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
-
-	/* Logical index names resolved while processing this request */
-	HTAB *indexNameCache;
 } BatchInsertionResult;
 
 
@@ -163,6 +159,7 @@ bool EnableCreateCollectionOnInsert = true;
 extern bool UseLocalExecutionShardQueries;
 extern bool EnableBypassDocumentValidation;
 extern int BatchUpdateLockTimeoutMs;
+extern bool EnableInsertDuplicateInlineHandling;
 
 /*
  * command_insert handles the insert command invocation through a PostgreSQL function.
@@ -703,14 +700,14 @@ DoMultiInsertWithoutTransactionId(MongoCollection *collection, List *inserts, Oi
 			 * we can't deduce the mongo specific error code.
 			 */
 			elog_unredacted(
-				"Batch insert failed; retrying sub-batch individually. Batch size: %d, start index: %d, DocumentDB error code: %d",
-				list_length(inserts), insertIndex, errorCode);
+				"Optimistic Batch Insert failed. Retrying with single insert. documentDB errorCode %d",
+				errorCode);
 		}
 		else
 		{
 			elog_unredacted(
-				"Batch insert failed; retrying sub-batch individually. Batch size: %d, start index: %d, SQL error code: %d",
-				list_length(inserts), insertIndex, errorCode);
+				"Optimistic Batch Insert failed. Retrying with single insert. SQL Error %d",
+				errorCode);
 		}
 	}
 	PG_END_TRY();
@@ -764,11 +761,7 @@ DoSingleInsert(MongoCollection *collection,
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  insertIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  insertIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -826,11 +819,7 @@ DoSingleInsertWithSubTxn(MongoCollection *collection,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  insertIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  insertIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -923,7 +912,6 @@ DoBatchInsertNoTransactionId(MongoCollection *collection, BatchInsertionSpec *ba
 	bool isOrdered = batchSpec->isOrdered;
 
 	int insertIndex = 0;
-	int singleInsertFailureCount = 0;
 	int insertIncrIndex = -1;
 	bool hasBatchedInsertFailed = false;
 
@@ -981,33 +969,18 @@ DoBatchInsertNoTransactionId(MongoCollection *collection, BatchInsertionSpec *ba
 												  insertIndex, evalState);
 		insertIndex++;
 
-		if (!isSuccess)
+		if (!isSuccess && isOrdered)
 		{
-			singleInsertFailureCount++;
-			if (isOrdered)
-			{
-				/* stop trying insert operations after a failure if using ordered:true */
-				break;
-			}
+			/* stop trying insert operations after a failure if using ordered:true */
+			break;
 		}
 
-		if (hasBatchedInsertFailed && insertIndex >= insertIncrIndex)
+		if (EnableInsertDuplicateInlineHandling &&
+			hasBatchedInsertFailed && insertIndex > insertIncrIndex)
 		{
-			elog_unredacted(
-				"Single-insert retries for the current sub-batch encountered %d failures",
-				singleInsertFailureCount);
-
 			insertIncrIndex = -1;
 			hasBatchedInsertFailed = false;
-			singleInsertFailureCount = 0;
 		}
-	}
-
-	if (hasBatchedInsertFailed)
-	{
-		elog_unredacted(
-			"Single-insert retries for the current sub-batch encountered %d failures",
-			singleInsertFailureCount);
 	}
 }
 
@@ -1146,7 +1119,6 @@ CommandInsertCore(PG_FUNCTION_ARGS, WriteMode writeMode, MemoryContext allocCont
 	ReportInsertFeatureUsage(list_length(batchSpec->documents));
 	BatchInsertionResult batchResult;
 	batchResult.resultMemoryContext = allocContext;
-	batchResult.indexNameCache = NULL;
 	MemoryContextSwitchTo(oldContext);
 	if (list_length(batchSpec->documents) == 0)
 	{
@@ -1678,17 +1650,6 @@ CreateLocalShardInsertPlan(MongoCollection *collection, Oid shardOid,
 #else
 	RangeTblEntry *relationRte = CreateBaseTableRteForInsert(collection, shardOid, NULL);
 #endif
-
-	/*
-	 * This plan is returned without running the planner, so the permission
-	 * record it carries has not been evaluated.
-	 *
-	 * Only this plan needs it. A range table entry built for a Query reaches
-	 * the planner, which settles the record itself, so doing it there too
-	 * would run the decision twice for the same relation.
-	 */
-	ApplyCollectionAccessIdentityToPlan(relationRte, stmt);
-
 	RangeTblEntry *valuesRte = CreateValueRteForInsert(collection, valuesLists);
 	List *targetList = CreateTargetListForInsert(collection);
 

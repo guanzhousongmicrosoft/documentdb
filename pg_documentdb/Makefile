@@ -89,9 +89,6 @@ check-extended-rum-builtin-rmgr:
 check-extended-rum-recovery:
 	$(MAKE) -C src/test/extended_rum_recovery_tests all
 
-check-recovery:
-	$(MAKE) -C src/test/recovery_tests all
-
 check-isolation:
 	$(MAKE) -C src/test/regress check-isolation
 

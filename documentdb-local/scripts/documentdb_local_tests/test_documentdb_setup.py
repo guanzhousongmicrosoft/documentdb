@@ -14,20 +14,6 @@ TUNE_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-tune.sh"
 GATEWAY_SETUP_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-register-gateway.sh"
 GATEWAY_ADMIN_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-gateway-admin.sh"
 TOOLS_LIB = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-tools-lib.sh"
-PRELOAD_LIB = OSS_ROOT / "scripts" / "preload_libraries.sh"
-
-
-def stage_tools_lib(directory, tools_lib_text=None):
-    """Stage documentdb-tools-lib.sh together with what it actually needs.
-
-    The library takes its required shared_preload_libraries set from the
-    extension-owned preload_libraries.sh, which sits beside it in the tools
-    package, and fails closed rather than inventing defaults.
-    """
-    directory = Path(directory)
-    text = tools_lib_text if tools_lib_text is not None else TOOLS_LIB.read_text(encoding="utf-8")
-    (directory / "documentdb-tools-lib.sh").write_text(text, encoding="utf-8")
-    shutil.copy2(PRELOAD_LIB, directory / "preload_libraries.sh")
 GATEWAY_POSTINST = OSS_ROOT / "documentdb-local" / "maintainer-scripts" / "gateway" / "postinst"
 STANDALONE_BUILD_SCRIPT = OSS_ROOT / "packaging" / "standalone" / "build-standalone-deb.sh"
 BUILD_EXTRA_PACKAGES = OSS_ROOT / "packaging" / "build_extra_packages.sh"
@@ -1037,7 +1023,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
 
             def verdict(conf_line, is_root=True):
                 conf = src / "probe.conf"
@@ -1091,7 +1078,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
             root = src / "postgresql.conf"
             confd = src / "10-port.conf"
             confd.write_text("port = 2222\n", encoding="utf-8")
@@ -1151,7 +1139,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
             root = src / "postgresql.conf"
             confd = src / "10-port.conf"
             confd.write_text("port = 2222\n", encoding="utf-8")
@@ -1231,7 +1220,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
             root = src / "postgresql.conf"
             confd = src / "10-port.conf"
             confd.write_text("port = 2222\n", encoding="utf-8")
@@ -1297,7 +1287,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
             root = src / "postgresql.conf"
             confd = src / "10-port.conf"
             confd.write_text("port = 2222\n", encoding="utf-8")
@@ -1362,7 +1353,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
 
             def run(sock_val, port_val, mode):
                 script = (
@@ -1439,7 +1431,8 @@ class DocumentDBTuneTests(unittest.TestCase):
                 if line != 'main "$@"'
             )
             (src / "documentdb-tune.sh").write_text(stripped, encoding="utf-8")
-            stage_tools_lib(src)
+            (src / "documentdb-tools-lib.sh").write_text(
+                TOOLS_LIB.read_text(encoding="utf-8"), encoding="utf-8")
             frag = "/etc/postgresql-common/documentdb/17/main/documentdb.conf"
 
             def verdict(conf_line, config_target=frag):
@@ -1763,41 +1756,6 @@ class DocumentDBTuneTests(unittest.TestCase):
             "RPM tools package should keep the sourced library non-executable",
         )
 
-    def test_the_shared_files_the_library_needs_are_actually_packaged(self):
-        """The deb build and the RPM staging both run the generator, which dies
-        without this file beside the staged library; only the spec's install
-        and %files lines are exercised by no build, so they are pinned here.
-        """
-        rows = [
-            (OSS_ROOT / "packaging/rpm/spec/documentdb-tools.spec", [
-                "install -Dpm 0644 %{_sourcedir}/preload_libraries.sh "
-                "%{buildroot}/usr/share/documentdb/scripts/preload_libraries.sh",
-                "%attr(0644,root,root) /usr/share/documentdb/scripts/preload_libraries.sh",
-            ]),
-            # init_documentdb_data.sh sources the image settings table beside
-            # it; documentdb-common ships that script on hosts.
-            (OSS_ROOT / "packaging/rpm/spec/documentdb-common.spec", [
-                "install -Dpm 0644 %{_sourcedir}/documentdb_local_settings.sh "
-                "%{buildroot}/usr/share/documentdb/scripts/documentdb_local_settings.sh",
-                "%attr(0644,root,root) /usr/share/documentdb/scripts/documentdb_local_settings.sh",
-            ]),
-            (OSS_ROOT / "packaging/build_extra_packages.sh", [
-                'cp "${SCRIPTS_SRC}/documentdb_local_settings.sh" "${RPM_TOPDIR}/SOURCES/"',
-            ]),
-            (OSS_ROOT / "packaging/standalone/build-common-deb.sh", [
-                "/usr/share/documentdb/scripts/documentdb_local_settings.sh",
-            ]),
-        ]
-        for path, needles in rows:
-            body = path.read_text(encoding="utf-8")
-            for needle in needles:
-                with self.subTest(file=path.name, line=needle):
-                    self.assertIn(
-                        needle, body,
-                        f"{path.name} no longer ships the file this line "
-                        f"installs; every packaged host tool would die at "
-                        f"`source` time")
-
     def test_shared_preload_parser_strips_inline_comments(self):
         cases = {
             "shared_preload_libraries = 'pg_stat_statements'   # (change requires restart)\n": "pg_stat_statements",
@@ -2077,7 +2035,7 @@ class GatewayPgMajorGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             (td_path / "documentdb-register-gateway.sh").write_text(rg_nomain, encoding="utf-8")
-            stage_tools_lib(td_path)
+            shutil.copy2(TOOLS_LIB, td_path / "documentdb-tools-lib.sh")
             harness = (
                 "set -uo pipefail\n"
                 f"source {shlex.quote(str(td_path / 'documentdb-register-gateway.sh'))}\n"
@@ -2320,7 +2278,7 @@ class DebianAutoconfOverrideTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             (td_path / "documentdb-tune.sh").write_text(tune_nomain, encoding="utf-8")
-            stage_tools_lib(td_path)
+            shutil.copy2(TOOLS_LIB, td_path / "documentdb-tools-lib.sh")
             pgdata = td_path / "pgdata"
             pgdata.mkdir()
             if autoconf_content is not None:
@@ -2400,7 +2358,7 @@ class DebianAutoconfDataDirTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             (td_path / "documentdb-tune.sh").write_text(tune_nomain, encoding="utf-8")
-            stage_tools_lib(td_path)
+            shutil.copy2(TOOLS_LIB, td_path / "documentdb-tools-lib.sh")
             datadir = td_path / "datadir"
             datadir.mkdir()
             live_conf = td_path / "postgresql.conf"
@@ -2545,14 +2503,6 @@ class PackagingPgMajorBoundaryTests(unittest.TestCase):
             "documentdb-setup.sh PUBLIC_ALIAS_PG_MAJOR and the RPM meta spec's "
             "default_pg_major must agree (bump both together)")
 
-        extras_text = (OSS_ROOT / "packaging" / "build_extra_packages.sh").read_text(encoding="utf-8")
-        extras = re.search(r'^DEFAULT_PG_MAJOR="(\d+)"', extras_text, re.M)
-        self.assertIsNotNone(extras, "build_extra_packages.sh DEFAULT_PG_MAJOR default must be declared")
-        self.assertEqual(
-            wizard.group(1), extras.group(1),
-            "documentdb-setup.sh PUBLIC_ALIAS_PG_MAJOR and build_extra_packages.sh "
-            "DEFAULT_PG_MAJOR must agree (bump both together)")
-
 
 class ExtraPackagesBuildDepsPreflightTests(unittest.TestCase):
     """build_extra_packages.sh assembles the .deb/.rpm 'extras' on the host, so
@@ -2640,21 +2590,6 @@ class ExtraPackagesBuildDepsPreflightTests(unittest.TestCase):
         common = DEB_COMMON.read_text(encoding="utf-8")
         self.assertIn("date -u -r", common,
                       "changelog date must have a BSD `date -r` fallback for host portability")
-
-    def test_package_builders_forward_source_date_epoch(self):
-        # The workflows pin SOURCE_DATE_EPOCH on the runner. Every package-
-        # producing docker run must forward it, or the gateway deb's changelog
-        # date floats per cell and the bundle identity check fails at random
-        # (microsoft/documentdb run 32409058369). Source text only: this does
-        # not exercise the container, the unset case, or the generated metadata.
-        for name in ("build_packages.sh", "gateway/build_gateway_packages.sh"):
-            text = (OSS_ROOT / "packaging" / name).read_text(encoding="utf-8")
-            producers = [ln for ln in text.splitlines()
-                         if "docker run" in ln and ':/output"' in ln]
-            self.assertEqual(len(producers), 2, f"{name}: expected a deb and an rpm producer")
-            for ln in producers:
-                with self.subTest(script=name, line=ln.strip()[:60]):
-                    self.assertIn("--env SOURCE_DATE_EPOCH ", ln)
 
     def test_check_build_deps_only_deb_succeeds_when_dpkg_deb_present(self):
         # Behavioral happy-path for the new deb preflight; skipped where dpkg-deb
@@ -2745,10 +2680,7 @@ class Iteration16HarnessFixesTests(unittest.TestCase):
         if first is None:
             self.skipTest("git not available or not a checkout")
         for rel in ("packaging/standalone/build-common-deb.sh",
-                    "packaging/standalone/build-standalone-deb.sh",
-                    # Both package builds now execute this one directly
-                    # (build-postgresql-tools-deb.sh, build_extra_packages.sh).
-                    "packaging/postgresql-tools/generate-conf-sample.sh"):
+                    "packaging/standalone/build-standalone-deb.sh"):
             self.assertEqual(self._git_mode(rel), "100755",
                              f"oss/{rel} must be tracked executable (100755)")
 
@@ -4061,7 +3993,7 @@ class RegisterGatewayPortResolutionTests(unittest.TestCase):
         self.assertIsNotNone(match, "main() body not found")
         body = match.group("body")
         resolver_idx = body.find('resolve_target_cluster_port')
-        fallback_idx = body.find('PG_PORT="${DOCUMENTDB_DISTRO_PG_PORT}"')
+        fallback_idx = body.find('PG_PORT="5432"')
         self.assertGreater(resolver_idx, 0, "Resolver must be invoked from main()")
         self.assertGreater(fallback_idx, resolver_idx,
                            "Resolver must run BEFORE the 5432 fallback")
@@ -8702,12 +8634,6 @@ class GatewayConnectHintEndpointTests(unittest.TestCase):
         self.assertIsNotNone(match, "connect-hint derivation block not found")
         # Wrap in a function so the block's `local` declarations are valid.
         harness = (
-            # The block's port default is DOCUMENTDB_DEFAULT_GATEWAY_PORT, which
-            # the script gets from documentdb-tools-lib.sh; source the same
-            # library rather than running the block where that value cannot
-            # exist. die() first: the library's header requires it.
-            'die() { echo "$*" >&2; exit 1; }\n'
-            f"source {shlex.quote(str(TOOLS_LIB))}\n"
             "f() {\n"
             + match.group(1)
             + '\n  printf "%s:%s" "${connect_host}" "${connect_port}"\n}\nf\n'
@@ -9325,22 +9251,9 @@ class ToastCompressionTests(unittest.TestCase):
                     "Invalid TOAST compression", r.stdout + r.stderr
                 )
 
-    @staticmethod
-    def _toast_default():
-        """The TOAST default, read from its one authority.
-
-        Spelling `lz4` in this file would make it another hand-maintained copy
-        of a value documentdb-tools-lib.sh owns.
-        """
-        m = re.search(r'(?m)^DOCUMENTDB_DEFAULT_TOAST_COMPRESSION="?([^"\s]+)"?$',
-                      TOOLS_LIB.read_text(encoding="utf-8"))
-        assert m, "DOCUMENTDB_DEFAULT_TOAST_COMPRESSION not found"
-        return m.group(1)
-
     def test_sample_conf_documents_the_default(self):
         sample = self.SAMPLE_CONF.read_text(encoding="utf-8")
-        self.assertIn(
-            "default_toast_compression = '%s'" % self._toast_default(), sample)
+        self.assertIn("default_toast_compression = 'lz4'", sample)
         self.assertIn("--toast-compression", sample)
 
     def test_container_entrypoint_shares_the_same_default(self):
@@ -9351,11 +9264,8 @@ class ToastCompressionTests(unittest.TestCase):
         # gateway and functional test servers. Pin the entrypoint to the same
         # default and build-support probe as the packaged tools so the image
         # and the packages cannot drift.
-        toast = self._toast_default()
         lib = TOOLS_LIB.read_text(encoding="utf-8")
-        # The packaged tools read the default from the library rather than
-        # carrying their own copy of it.
-        self.assertIn('requested="${DOCUMENTDB_DEFAULT_TOAST_COMPRESSION}"', lib)
+        self.assertIn('DOCUMENTDB_DEFAULT_TOAST_COMPRESSION="lz4"', lib)
 
         entrypoint = (
             OSS_ROOT / "documentdb-local" / "scripts" / "emulator_entrypoint.sh"
@@ -9364,19 +9274,7 @@ class ToastCompressionTests(unittest.TestCase):
         # was actually requested), then defaulted to lz4 — the same default
         # the packaged tools resolve to.
         self.assertIn('toast_requested="${DOCUMENTDB_TOAST_COMPRESSION:-}"', entrypoint)
-        # The image applies the default from its settings table, not from ENV:
-        # DOCUMENTDB_TOAST_COMPRESSION is a request variable, so an ENV default
-        # would erase "explicitly asked". The table's row is pinned here to
-        # what the library resolves to.
-        self.assertIn(
-            'toast_compression="${toast_requested:-'
-            '$(documentdb_local_setting_default DOCUMENTDB_TOAST_COMPRESSION)}"',
-            entrypoint)
-        settings = (OSS_ROOT / "documentdb-local" / "scripts"
-                    / "documentdb_local_settings.sh").read_text(encoding="utf-8")
-        row = re.search(r'(?m)^\s*"--toast-compression\|DOCUMENTDB_TOAST_COMPRESSION\|([^|"]*)\|', settings)
-        self.assertIsNotNone(row, "the settings table lost its TOAST row")
-        self.assertEqual(row.group(1), toast)
+        self.assertIn('toast_compression="${toast_requested:-lz4}"', entrypoint)
         self.assertIn("--with-lz4", entrypoint)
 
         # The shared dev/test server config must stay untouched.

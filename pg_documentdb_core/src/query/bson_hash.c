@@ -603,10 +603,6 @@ HashBsonValueCompare(const bson_value_t *value,
 					hash_bytes_func((uint8_t *) &int64Value, sizeof(int64_t), seed));
 			}
 
-			/*
-			 * TODO: Canonicalize equal non-integral numeric representations so
-			 * hash consumers preserve the equality contract.
-			 */
 			bson_decimal128_t decimalValue = GetBsonValueAsDecimal128(value);
 			return hash_combine_func(
 				hash_bytes_func((uint8_t *) &typeCodeInt, sizeof(int), seed),
@@ -619,9 +615,13 @@ HashBsonValueCompare(const bson_value_t *value,
 		{
 			typeCodeInt = (int) BSON_TYPE_UTF8;
 
-			/* Collate the whole string family, matching CompareBsonValue. */
+			/*
+			 * Collate the whole string family, matching CompareBsonValue. The simple
+			 * locale is binary comparison, so it keeps the raw-byte hash.
+			 */
 			uint64 stringHash;
-			if (!IsCollationApplicable(collationString))
+			if (!IsCollationApplicable(collationString) ||
+				IsSimpleCollation(collationString))
 			{
 				stringHash = hash_bytes_func((uint8_t *) value->value.v_utf8.str,
 											 value->value.v_utf8.len, seed);

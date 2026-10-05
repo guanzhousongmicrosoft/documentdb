@@ -26,8 +26,8 @@ use crate::{
     error::{DocumentDBError, ErrorCode, Result},
     postgres::{
         conn_mgmt::{
-            run_request_with_retries, Connection, ConnectionSource, PgPoolSettings, QueryOptions,
-            RequestOptions, StatementError,
+            run_request_with_retries, Connection, ConnectionSource, QueryOptions, RequestOptions,
+            StatementError,
         },
         PgDataClient, PgDocument,
     },
@@ -70,7 +70,6 @@ pub struct AuthState {
     timer_initialized: Arc<AtomicBool>,
     auth_mechanism: AuthMechanism,
     principal: Option<Principal>,
-    data_pool_settings: Option<PgPoolSettings>,
 }
 
 impl Default for AuthState {
@@ -91,7 +90,6 @@ impl AuthState {
             timer_initialized: Arc::new(AtomicBool::new(false)),
             auth_mechanism: AuthMechanism::Unknown,
             principal: None,
-            data_pool_settings: None,
         }
     }
 
@@ -123,15 +121,6 @@ impl AuthState {
             .ok_or(DocumentDBError::internal_error(
                 "Username missing".to_owned(),
             ))
-    }
-
-    pub(crate) fn data_pool_settings(&self) -> Result<PgPoolSettings> {
-        self.data_pool_settings
-            .ok_or_else(|| DocumentDBError::internal_error("Data pool settings missing".to_owned()))
-    }
-
-    pub(crate) const fn set_data_pool_settings(&mut self, settings: PgPoolSettings) {
-        self.data_pool_settings = Some(settings);
     }
 
     /// Returns the user OID
@@ -264,7 +253,6 @@ where
         false, // Setting in_replica_cluster_mode to false means we will alway retry in case of SqlState::READ_ONLY_SQL_TRANSACTION.
         None,  // Do not run any gateway-level command timeout for auth-related queries.
     );
-    let dynamic_configuration = connection_context.dynamic_configuration();
 
     run_request_with_retries(
         ConnectionSource::Pool(pool),
@@ -273,10 +261,9 @@ where
         Duration::from_secs(
             connection_context
                 .service_context
-                .dynamic_configuration()
-                .max_request_timeout_sec(),
+                .setup_configuration()
+                .postgres_command_timeout_secs(),
         ),
-        dynamic_configuration.as_ref(),
         request_context,
         run_func,
     )
@@ -700,7 +687,7 @@ async fn handle_sasl_continue(
         let username = payload
             .username
             .or(connection_context.auth_state.username.as_deref())
-            .ok_or(DocumentDBError::authentication_failed(
+            .ok_or(DocumentDBError::internal_error(
                 "Username missing from SaslContinue".to_owned(),
             ))?;
 

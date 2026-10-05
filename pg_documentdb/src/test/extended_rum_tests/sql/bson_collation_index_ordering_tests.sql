@@ -46,65 +46,6 @@ FROM documentdb_api_internal.documentdb_rum_page_get_entries(
     'documentdb_data.documents_rum_index_8102'::regclass
 ) entry;
 
--- Collation-aware sorted limits: an index whose collation matches the requested
--- one genuinely provides the sort order, so it streams with the remaining limit
--- tracked. A mismatching collation does not satisfy the requested ordering, so it
--- must fall back to a persistent cursor rather than stream rows in the wrong
--- order.
-SET documentdb.enableDynamicCursors TO on;
-SET documentdb.enable_dynamic_cursor_with_skiplimit TO on;
-
-CREATE TEMP TABLE matching_collation_limit AS
-SELECT cursorpage, continuation, persistconnection
-FROM find_cursor_first_page(
-    'ord_coll_ordered_db',
-    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": true }, "limit": 4, "batchSize": 2 }',
-    81001);
-SELECT persistconnection,
-       bson_dollar_project(continuation, '{ "dc.type": 1, "lim": 1 }') AS continuation_flags
-FROM matching_collation_limit;
-SELECT bson_dollar_project(cursorpage, '{ "cursor.nextBatch._id": 1 }')
-FROM cursor_get_more(
-    'ord_coll_ordered_db',
-    '{ "getMore": { "$numberLong": "81001" }, "collection": "ord_numord_true", "batchSize": 2 }',
-    (SELECT continuation FROM matching_collation_limit));
-DROP TABLE matching_collation_limit;
-
--- If collation ordering is disabled between pages, the unchanged index still
--- resolves by OID but no longer provides the required pathkeys.
-CREATE TEMP TABLE changed_collation_limit AS
-SELECT continuation
-FROM find_cursor_first_page(
-    'ord_coll_ordered_db',
-    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": true }, "limit": 4, "batchSize": 2 }',
-    81003);
-SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO off;
-SELECT cursorpage
-FROM cursor_get_more(
-    'ord_coll_ordered_db',
-    '{ "getMore": { "$numberLong": "81003" }, "collection": "ord_numord_true", "batchSize": 2 }',
-    (SELECT continuation FROM changed_collation_limit));
-SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-DROP TABLE changed_collation_limit;
-
-CREATE TEMP TABLE mismatching_collation_limit AS
-SELECT cursorpage, continuation, persistconnection
-FROM find_cursor_first_page(
-    'ord_coll_ordered_db',
-    '{ "find": "ord_numord_true", "sort": { "item": 1 }, "hint": "item_numord_true_idx", "collation": { "locale": "en", "numericOrdering": false }, "limit": 4, "batchSize": 2 }',
-    81002);
-SELECT persistconnection,
-       bson_dollar_project(continuation, '{ "dc.type": 1, "lim": 1 }') AS continuation_flags
-FROM mismatching_collation_limit;
-SELECT bson_dollar_project(cursorpage, '{ "cursor.nextBatch._id": 1 }')
-FROM cursor_get_more(
-    'ord_coll_ordered_db',
-    '{ "getMore": { "$numberLong": "81002" }, "collection": "ord_numord_true", "batchSize": 2 }',
-    (SELECT continuation FROM mismatching_collation_limit));
-DROP TABLE mismatching_collation_limit;
-
-RESET documentdb.enable_dynamic_cursor_with_skiplimit;
-RESET documentdb.enableDynamicCursors;
 
 -- ===== Section 2: Single-key ordered index with numericOrdering=false ======
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
@@ -2222,6 +2163,7 @@ $cmd$);
 -- 29ag: a collated group cannot stream from a simple index. "item02" and
 -- "item2" compare equal with numericOrdering but are separated in binary index
 -- order, so omitting the Sort would split one logical group into two.
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 SELECT documentdb_api.insert_one(
   'ord_coll_ordered_db',
@@ -2276,6 +2218,7 @@ SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
          "collation": { "locale": "en", "numericOrdering": true } }')
 $cmd$);
 
+RESET documentdb.enableNewWithExprAccumulators;
 
 -- ============================================================
 -- Section 30: index-only scan under collation on collation-aware
@@ -2373,11 +2316,13 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 SELECT document FROM bson_aggregation_find('ord_coll_ios_db', '{ "find": "ios_coll", "filter": { "country": "usa", "_id": { "$in": ["cat", "dog"] } }, "projection": { "country": 1, "_id": 1 }, "sort": { "_id": 1 }, "collation": { "locale": "en", "strength": 1 } }');
 
 -- Field-consuming aggregate targets also require the stored row values.
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('ord_coll_ios_db', '{ "aggregate": "ios_coll", "pipeline": [ { "$match": { "country": "usa" } }, { "$group": { "_id": null, "value": { "$first": "$country" } } } ], "hint": "ios_country_id_en_s1", "collation": { "locale": "en", "strength": 1 } }') $$, p_ignore_heap_fetches => true);
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('ord_coll_ios_db', '{ "aggregate": "ios_coll", "pipeline": [ { "$match": { "country": "usa" } }, { "$group": { "_id": null, "value": { "$last": "$country" } } } ], "hint": "ios_country_id_en_s1", "collation": { "locale": "en", "strength": 1 } }') $$, p_ignore_heap_fetches => true);
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_pipeline('ord_coll_ios_db', '{ "aggregate": "ios_coll", "pipeline": [ { "$match": { "country": "usa" } }, { "$group": { "_id": "$country", "count": { "$sum": 1 } } } ], "hint": "ios_country_id_en_s1", "collation": { "locale": "en", "strength": 1 } }') $$, p_ignore_heap_fetches => true);
 
+RESET documentdb.enableNewWithExprAccumulators;
 
 -- The index, rather than the query, determines whether values can be reconstructed.
 SELECT documentdb_api_internal.create_indexes_non_concurrently('ord_coll_ios_db', '{ "createIndexes": "ios_coll", "indexes": [ { "key": { "seq": 1, "country": 1 }, "storageEngine": { "enableOrderedIndex": true }, "collation": { "locale": "en", "strength": 1 }, "name": "ios_seq_country_en_s1" }, { "key": { "seq": 1, "country": 1 }, "storageEngine": { "enableOrderedIndex": true }, "name": "ios_seq_country_simple" } ] }', true);
@@ -2389,100 +2334,6 @@ SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COST
 -- A collated query can still project numeric-filtered values from a simple index.
 SELECT documentdb_test_helpers.run_explain_and_trim($$ EXPLAIN (ANALYZE ON, COSTS OFF, BUFFERS OFF, VERBOSE ON, TIMING OFF, SUMMARY OFF) SELECT document FROM bson_aggregation_find('ord_coll_ios_db', '{ "find": "ios_coll", "filter": { "seq": { "$gte": 1 } }, "projection": { "country": 1, "_id": 0 }, "hint": "ios_seq_country_simple", "collation": { "locale": "en", "strength": 1 } }') $$, p_ignore_heap_fetches => true);
 
--- ===== Section 31: explicit simple uses binary index paths ======
-SELECT documentdb_api.insert_one('ord_coll_ordered_db', 'simple_coll', '{"_id": "apple", "a": "apple", "b": 2}');
-SELECT documentdb_api.insert_one('ord_coll_ordered_db', 'simple_coll', '{"_id": "banana", "a": "banana", "b": 1}');
-SELECT documentdb_api.insert_one('ord_coll_ordered_db', 'simple_coll', '{"_id": "APPLE", "a": "APPLE", "b": 3}');
-SELECT documentdb_api_internal.create_indexes_non_concurrently('ord_coll_ordered_db',
-  '{ "createIndexes": "simple_coll", "indexes": [
-    { "key": {"a": 1, "b": 1}, "name": "simpleidx", "collation": {"locale": "simple"} }
-  ] }', TRUE);
-
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": "apple"}, "collation": {"locale": "simple"} }')
-$cmd$);
-SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": "apple"}, "collation": {"locale": "simple"} }');
-
--- Binary $in prefixes may merge per-value ordered scans for a suffix sort.
-SET documentdb.enable_merge_sort_for_in_prefix TO on;
-SET enable_sort TO off;
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": {"$in": ["apple", "banana"]}}, "sort": {"b": 1}, "collation": {"locale": "simple"} }')
-$cmd$);
-SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": {"$in": ["apple", "banana"]}}, "sort": {"b": 1}, "collation": {"locale": "simple"} }');
-
--- simple is discarded from both the query and the index spec, so this is an
--- ordinary uncollated query and the index gate permits the index.
-SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO off;
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": {"$in": ["apple", "banana"]}}, "sort": {"b": 1}, "collation": {"locale": "simple"} }')
-$cmd$);
-SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-
--- A non-binary $in must retain the runtime sort and case-insensitive matches.
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": {"$in": ["apple", "banana"]}}, "sort": {"b": 1}, "collation": {"locale": "en", "strength": 1} }')
-$cmd$);
-SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"a": {"$in": ["apple", "banana"]}}, "sort": {"b": 1}, "collation": {"locale": "en", "strength": 1} }');
-RESET enable_sort;
-RESET documentdb.enable_merge_sort_for_in_prefix;
-
--- The _id point-lookup optimization applies, since simple leaves no collation.
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"_id": "apple"}, "collation": {"locale": "simple"} }')
-$cmd$);
-SELECT document FROM bson_aggregation_find('ord_coll_ordered_db', '{ "find": "simple_coll", "filter": {"_id": "apple"}, "collation": {"locale": "simple"} }');
-SELECT documentdb_api.drop_collection('ord_coll_ordered_db', 'simple_coll');
-
-RESET enable_bitmapscan;
-
--- ===== Section: update candidate selection order by pushdown ==========
--- Filler rows make the ordered index scan the cheaper plan.
-RESET documentdb.max_non_ordered_term_scan_threshold;
-RESET documentdb.forceUseIndexIfAvailable;
-SET enable_seqscan TO off;
-SET enable_bitmapscan TO off;
-
-SELECT documentdb_api_internal.create_indexes_non_concurrently('ord_coll_upd_db',
-  '{ "createIndexes": "upd_coll", "indexes": [ { "key": { "name": 1 }, "name": "upd_name_en_s1", "collation": { "locale": "en", "strength": 1 } } ] }', TRUE);
-SELECT documentdb_api.insert_one('ord_coll_upd_db', 'upd_coll', '{"_id": 1, "name": "apple"}', NULL);
-SELECT documentdb_api.insert_one('ord_coll_upd_db', 'upd_coll', '{"_id": 2, "name": "Banana"}', NULL);
-SELECT COUNT(*) FROM (SELECT documentdb_api.insert_one('ord_coll_upd_db', 'upd_coll', FORMAT('{"_id": %s, "name": "filler%s"}', i, i)::documentdb_core.bson, NULL) FROM generate_series(3, 200) i) filler;
-SELECT collection_id AS upd_coll_id, format('ANALYZE documentdb_data.documents_%s;', collection_id) AS upd_analyze FROM documentdb_api_catalog.collections WHERE database_name = 'ord_coll_upd_db' AND collection_name = 'upd_coll' \gset
-:upd_analyze
-
--- Ascending: Order By on the index scan, no Sort node.
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update('ord_coll_upd_db',
-  '{ "update": "upd_coll", "updates": [ { "q": { "name": { "$gte": "a" } }, "u": { "$set": { "picked": true } }, "sort": { "name": 1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-
--- Descending: same, through the reverse index term function.
-SELECT documentdb_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update('ord_coll_upd_db',
-  '{ "update": "upd_coll", "updates": [ { "q": { "name": { "$gte": "a" } }, "u": { "$set": { "picked": true } }, "sort": { "name": -1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-
--- Control: the prior form, without the index term ordering and the full scan
--- qual, still sorts at runtime.
-SELECT documentdb_test_helpers.run_explain_and_trim(format($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON) SELECT ctid, object_id, document, tableoid FROM documentdb_data.documents_%1$s WHERE shard_key_value = %1$s AND documentdb_api_internal.bson_query_match(document, '{ "name": { "$gte": "a" } }'::documentdb_core.bson, '{}'::documentdb_core.bson, 'en-u-ks-level1'::text) ORDER BY documentdb_api_internal.bson_orderby(document, '{ "name": 1 }'::documentdb_core.bson, 'en-u-ks-level1'::text) USING OPERATOR(documentdb_api_internal.<<<) LIMIT 1 FOR UPDATE
-$cmd$, :upd_coll_id));
-
--- The update command picks the same document the ordering implies.
-BEGIN;
-SELECT documentdb_api.update('ord_coll_upd_db', '{ "update": "upd_coll", "updates": [ { "q": { "name": { "$gte": "a" } }, "u": { "$set": { "picked": true } }, "sort": { "name": 1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }');
-SELECT document FROM bson_aggregation_find('ord_coll_upd_db', '{ "find": "upd_coll", "filter": { "picked": true } }');
-ROLLBACK;
-
-BEGIN;
-SELECT documentdb_api.update('ord_coll_upd_db', '{ "update": "upd_coll", "updates": [ { "q": { "name": { "$gte": "a" } }, "u": { "$set": { "picked": true } }, "sort": { "name": -1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }');
-SELECT document FROM bson_aggregation_find('ord_coll_upd_db', '{ "find": "upd_coll", "filter": { "picked": true } }');
-ROLLBACK;
-
-SELECT documentdb_api.drop_collection('ord_coll_upd_db', 'upd_coll');
 RESET enable_bitmapscan;
 
 RESET documentdb.max_non_ordered_term_scan_threshold;

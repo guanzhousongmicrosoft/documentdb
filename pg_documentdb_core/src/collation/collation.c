@@ -435,11 +435,10 @@ ParseAndGetCollationString(const bson_value_t *collationValue, const char *colat
 	GenerateICULocaleAndExtractCollationOption(inputLocale, &locale,
 											   &collationOptionString);
 
-	/* "simple" means binary comparison, which is what an absent collation already
-	 * does, so emit an empty tag and ignore all other options. */
-	if (locale != NULL && strcmp(locale, "simple") == 0)
+	/* for simple collation, ignore all other options */
+	if (locale != NULL && IsSimpleCollation(locale))
 	{
-		icuCollation.data[0] = '\0';
+		appendStringInfo(&icuCollation, "%s", locale);
 		return;
 	}
 

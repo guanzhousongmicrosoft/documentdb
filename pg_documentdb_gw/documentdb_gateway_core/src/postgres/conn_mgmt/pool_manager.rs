@@ -10,11 +10,6 @@ use std::{hash::Hash, sync::Arc};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::time::{interval, Duration};
-use tokio_postgres::{
-    config::SslMode,
-    tls::{MakeTlsConnect, TlsConnect},
-    NoTls, Socket,
-};
 
 use crate::{
     configuration::{DynamicConfiguration, SetupConfiguration},
@@ -46,7 +41,7 @@ async fn acquire_pooled_connection(pool: &ConnectionPool) -> Result<Connection> 
 }
 
 #[derive(Debug)]
-pub struct PoolManager<T = NoTls> {
+pub struct PoolManager {
     query_catalog: QueryCatalog,
     setup_configuration: Box<dyn SetupConfiguration>,
 
@@ -57,16 +52,9 @@ pub struct PoolManager<T = NoTls> {
     // We need Arc on the ConnectionPool to allow sharing across threads from different connections
     user_data_pools: DashMap<ClientKey, Arc<ConnectionPool>>,
     shared_data_pools: DashMap<PgPoolSettings, Arc<ConnectionPool>>,
-
-    /// Transport security applied to every pool this manager builds. Defaults to
-    /// [`NoTls`], which is what a backend reached over a local socket wants.
-    tls: T,
-
-    /// Whether the backend is made to negotiate `tls`.
-    ssl_mode: SslMode,
 }
 
-impl PoolManager<NoTls> {
+impl PoolManager {
     pub fn new(
         query_catalog: QueryCatalog,
         setup_configuration: Box<dyn SetupConfiguration>,
@@ -80,39 +68,23 @@ impl PoolManager<NoTls> {
             system_auth_pool,
             user_data_pools: DashMap::new(),
             shared_data_pools: DashMap::new(),
-            tls: NoTls,
-            ssl_mode: SslMode::Prefer,
         }
     }
-}
 
-impl<T> PoolManager<T>
-where
-    T: MakeTlsConnect<Socket> + Clone + Send + Sync + 'static,
-    T::Stream: Send + Sync,
-    T::TlsConnect: Send + Sync,
-    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    /// Builds a manager that requires the backend to negotiate the supplied
-    /// transport security. The system pools are used as given; `tls` applies to
-    /// the data pools this manager builds later.
-    pub fn new_with_tls(
-        query_catalog: QueryCatalog,
-        setup_configuration: Box<dyn SetupConfiguration>,
-        system_requests_pool: ConnectionPool,
-        system_auth_pool: ConnectionPool,
-        tls: T,
-    ) -> Self {
-        Self {
-            query_catalog,
-            setup_configuration,
-            system_requests_pool,
-            system_auth_pool,
-            user_data_pools: DashMap::new(),
-            shared_data_pools: DashMap::new(),
-            tls,
-            ssl_mode: SslMode::Require,
-        }
+    /// # Errors
+    /// Returns error if the operation fails.
+    pub async fn system_requests_connection(&self) -> Result<Connection> {
+        acquire_pooled_connection(&self.system_requests_pool).await
+    }
+
+    /// # Errors
+    /// Returns error if the operation fails.
+    pub async fn authentication_connection(&self) -> Result<Connection> {
+        acquire_pooled_connection(&self.system_auth_pool).await
+    }
+
+    pub const fn system_auth_pool(&self) -> &ConnectionPool {
+        &self.system_auth_pool
     }
 
     /// Allocates the data pool for `username`, reusing the existing one when it
@@ -128,15 +100,6 @@ where
         dynamic_configuration: &dyn DynamicConfiguration,
     ) -> Result<()> {
         let settings = PgPoolSettings::from_configuration(dynamic_configuration);
-        self.allocate_data_pool_with_settings(username, password, settings)
-    }
-
-    pub(crate) fn allocate_data_pool_with_settings(
-        &self,
-        username: &str,
-        password: &str,
-        settings: PgPoolSettings,
-    ) -> Result<()> {
         let key = (username.to_owned(), settings);
 
         // Holding the entry serialises concurrent authentications for the same user.
@@ -163,15 +126,13 @@ where
         password: &str,
         settings: PgPoolSettings,
     ) -> Result<Arc<ConnectionPool>> {
-        Ok(Arc::new(ConnectionPool::new_with_user_and_tls(
+        Ok(Arc::new(ConnectionPool::new_with_user(
             self.setup_configuration.as_ref(),
             &self.query_catalog,
             username,
             Some(password),
             &format!("{}-Data", self.setup_configuration.application_name()),
             settings,
-            &self.tls,
-            self.ssl_mode,
         )?))
     }
 
@@ -183,14 +144,7 @@ where
         dynamic_configuration: &dyn DynamicConfiguration,
     ) -> Result<Arc<ConnectionPool>> {
         let settings = PgPoolSettings::from_configuration(dynamic_configuration);
-        self.get_data_pool_with_settings(username, settings)
-    }
 
-    pub(crate) fn get_data_pool_with_settings(
-        &self,
-        username: &str,
-        settings: PgPoolSettings,
-    ) -> Result<Arc<ConnectionPool>> {
         match self.user_data_pools.get(&(username.to_owned(), settings)) {
             None => Err(DocumentDBError::internal_error(
                 "Connection pool missing for user.".to_owned(),
@@ -218,44 +172,19 @@ where
                 Ok(pool)
             }
             Entry::Vacant(entry) => {
-                let system_shared_pool = Arc::new(ConnectionPool::new_with_user_and_tls(
+                let system_shared_pool = Arc::new(ConnectionPool::new_with_user(
                     self.setup_configuration.as_ref(),
                     &self.query_catalog,
                     self.setup_configuration.postgres_data_user(),
                     self.setup_configuration.postgres_data_user_password(),
                     &format!("{}-Data", self.setup_configuration.application_name()),
                     settings,
-                    &self.tls,
-                    self.ssl_mode,
                 )?);
 
                 entry.insert(Arc::clone(&system_shared_pool));
                 Ok(system_shared_pool)
             }
         }
-    }
-}
-
-/// Accessors and maintenance that never open a connection, so they ask nothing
-/// of the transport beyond being shareable across threads.
-impl<T> PoolManager<T>
-where
-    T: Send + Sync,
-{
-    /// # Errors
-    /// Returns error if the operation fails.
-    pub async fn system_requests_connection(&self) -> Result<Connection> {
-        acquire_pooled_connection(&self.system_requests_pool).await
-    }
-
-    /// # Errors
-    /// Returns error if the operation fails.
-    pub async fn authentication_connection(&self) -> Result<Connection> {
-        acquire_pooled_connection(&self.system_auth_pool).await
-    }
-
-    pub const fn system_auth_pool(&self) -> &ConnectionPool {
-        &self.system_auth_pool
     }
 
     pub fn clean_unused_pools(&self, max_age: Duration) {
@@ -307,10 +236,7 @@ where
     }
 }
 
-pub fn clean_unused_pools<T>(pool_manager: Arc<PoolManager<T>>)
-where
-    T: Send + Sync + 'static,
-{
+pub fn clean_unused_pools(pool_manager: Arc<PoolManager>) {
     tokio::spawn(async move {
         let mut cleanup_interval =
             interval(Duration::from_secs(POSTGRES_POOL_CLEANUP_INTERVAL_SEC));
@@ -434,7 +360,7 @@ pub async fn create_connection_pool_manager(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bson::{rawbson, RawBson};
     use tokio::{task::yield_now, time::sleep};
@@ -450,33 +376,15 @@ mod tests {
     struct MaxConnectionConfig {
         // Needed for interior mutability in tests.
         max_conn: AtomicUsize,
-        max_request_timeout_sec: AtomicU64,
-        transaction_timeout_sec: AtomicU64,
     }
 
     impl MaxConnectionConfig {
-        fn new(max_conn: usize) -> Self {
-            Self {
-                max_conn: max_conn.into(),
-                max_request_timeout_sec: 60.into(),
-                transaction_timeout_sec: 60.into(),
-            }
-        }
-
         fn max_conn(&self) -> usize {
             self.max_conn.load(Ordering::Relaxed)
         }
 
         fn set_max_conn(&self, value: usize) {
             self.max_conn.store(value, Ordering::Relaxed);
-        }
-
-        fn set_max_request_timeout_sec(&self, value: u64) {
-            self.max_request_timeout_sec.store(value, Ordering::Relaxed);
-        }
-
-        fn set_transaction_timeout_sec(&self, value: u64) {
-            self.transaction_timeout_sec.store(value, Ordering::Relaxed);
         }
     }
 
@@ -505,20 +413,16 @@ mod tests {
             rawbson!({})
         }
 
+        fn enable_developer_explain(&self) -> bool {
+            false
+        }
+
         fn max_connections(&self) -> usize {
             self.max_conn()
         }
 
         fn allow_transaction_snapshot(&self) -> bool {
             false
-        }
-
-        fn max_request_timeout_sec(&self) -> u64 {
-            self.max_request_timeout_sec.load(Ordering::Relaxed)
-        }
-
-        fn transaction_timeout_sec(&self) -> u64 {
-            self.transaction_timeout_sec.load(Ordering::Relaxed)
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -544,10 +448,6 @@ mod tests {
         /// this function to return non-zero value
         fn gateway_connection_pruning_interval_sec(&self) -> u64 {
             1
-        }
-
-        fn enable_request_metrics(&self) -> bool {
-            false
         }
     }
 
@@ -607,44 +507,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_manager_without_a_connector_does_not_make_the_backend_negotiate() {
-        // Every data pool is built through the TLS-capable constructor with
-        // whatever transport the manager holds, so a manager without one must
-        // not ask the backend to negotiate.
-        yield_now().await;
-
-        assert_eq!(test_pool_manager().ssl_mode, SslMode::Prefer);
-    }
-
-    #[tokio::test]
-    async fn a_manager_given_a_connector_makes_the_backend_negotiate() {
-        yield_now().await;
-
-        let setup_config = setup_configuration();
-        let system_pool = |name: &str| {
-            ConnectionPool::new_with_user(
-                &setup_config,
-                &create_query_catalog(),
-                setup_config.postgres_system_user(),
-                None,
-                name,
-                PgPoolSettings::system_pool_settings(SYSTEM_REQUESTS_MAX_CONNECTIONS),
-            )
-            .expect("the pool should build")
-        };
-
-        let manager = PoolManager::new_with_tls(
-            create_query_catalog(),
-            Box::new(setup_config.clone()),
-            system_pool("requests"),
-            system_pool("auth"),
-            NoTls,
-        );
-
-        assert_eq!(manager.ssl_mode, SslMode::Require);
-    }
-
-    #[tokio::test]
     async fn validate_pool_reusage() {
         // We still need an async context to create the connection pool (see ConnectionPool::new_with_user),
         // but the test itself doesn't need to be async since we are not awaiting anything after the pool creation,
@@ -659,7 +521,9 @@ mod tests {
             "by default only 2 system pools exist"
         );
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
 
         for _ in 0..10 {
             let shared_pool_result = pool_manager.get_system_shared_pool(&dynamic_configuration);
@@ -691,7 +555,9 @@ mod tests {
         // so we can use yield_now to just get into async context and then proceed with sync code.
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         let shared_pool = pool_manager
@@ -725,7 +591,9 @@ mod tests {
         // so we can use yield_now to just get into async context and then proceed with sync code.
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         // on first iteration it will allocate the user pool and all the rest iterations will be no-op
@@ -774,7 +642,9 @@ mod tests {
         // so we can use yield_now to just get into async context and then proceed with sync code.
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         let err = pool_manager
@@ -792,7 +662,9 @@ mod tests {
         // so we can use yield_now to just get into async context and then proceed with sync code.
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         pool_manager
@@ -813,7 +685,9 @@ mod tests {
     async fn test_allocate_data_pool_reuses_pool_until_credential_changes() {
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
         let pool_for = |password: &str| {
             pool_manager
@@ -842,7 +716,9 @@ mod tests {
     async fn test_get_data_pool_uses_data_application_name() {
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         pool_manager
@@ -861,90 +737,6 @@ mod tests {
         assert!(
             !identifier.contains("UserData"),
             "Data pool identifier should not contain the legacy UserData suffix: '{identifier}'"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_request_timeout_change_creates_pool_with_updated_deadline() {
-        yield_now().await;
-
-        let dynamic_configuration = MaxConnectionConfig::new(100);
-        let pool_manager = test_pool_manager();
-
-        let initial_pool = pool_manager
-            .get_system_shared_pool(&dynamic_configuration)
-            .unwrap();
-        assert_eq!(initial_pool.command_deadline(), Duration::from_secs(61));
-
-        dynamic_configuration.set_max_request_timeout_sec(30);
-
-        let updated_pool = pool_manager
-            .get_system_shared_pool(&dynamic_configuration)
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&initial_pool, &updated_pool),
-            "a request-timeout change must create a pool with updated connection settings"
-        );
-        assert_eq!(updated_pool.command_deadline(), Duration::from_secs(31));
-    }
-
-    #[tokio::test]
-    async fn test_authenticated_user_pool_uses_cached_settings() {
-        yield_now().await;
-
-        let dynamic_configuration = MaxConnectionConfig::new(100);
-        let pool_manager = test_pool_manager();
-        let cached_settings = PgPoolSettings::from_configuration(&dynamic_configuration);
-
-        pool_manager
-            .allocate_data_pool("user", "password", &dynamic_configuration)
-            .unwrap();
-        let initial_pool = pool_manager
-            .get_data_pool_with_settings("user", cached_settings)
-            .unwrap();
-
-        dynamic_configuration.set_max_request_timeout_sec(30);
-
-        let existing_pool = pool_manager
-            .get_data_pool_with_settings("user", cached_settings)
-            .unwrap();
-        assert!(
-            Arc::ptr_eq(&initial_pool, &existing_pool),
-            "an authenticated session must retain the pool settings captured during authentication"
-        );
-
-        pool_manager
-            .allocate_data_pool("user", "password", &dynamic_configuration)
-            .unwrap();
-        let updated_pool = pool_manager
-            .get_data_pool("user", &dynamic_configuration)
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&initial_pool, &updated_pool),
-            "re-authentication must create a pool with refreshed settings"
-        );
-        assert_eq!(updated_pool.command_deadline(), Duration::from_secs(31));
-    }
-
-    #[tokio::test]
-    async fn test_transaction_timeout_change_creates_new_pool() {
-        yield_now().await;
-
-        let dynamic_configuration = MaxConnectionConfig::new(100);
-        let pool_manager = test_pool_manager();
-
-        let initial_pool = pool_manager
-            .get_system_shared_pool(&dynamic_configuration)
-            .unwrap();
-
-        dynamic_configuration.set_transaction_timeout_sec(30);
-
-        let updated_pool = pool_manager
-            .get_system_shared_pool(&dynamic_configuration)
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&initial_pool, &updated_pool),
-            "a transaction-timeout change must create a pool with updated connection settings"
         );
     }
 
@@ -994,7 +786,9 @@ mod tests {
         // so we can use yield_now to just get into async context and then proceed with sync code.
         yield_now().await;
 
-        let dynamic_configuration = MaxConnectionConfig::new(100);
+        let dynamic_configuration = MaxConnectionConfig {
+            max_conn: 100.into(),
+        };
         let pool_manager = test_pool_manager();
 
         pool_manager

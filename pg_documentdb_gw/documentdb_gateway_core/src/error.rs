@@ -18,7 +18,7 @@ use crate::{
     postgres::conn_mgmt::StatementError,
     responses::{
         constant::{generic_internal_error_message, pg_returned_invalid_response_message},
-        map_connection_level_sqlstate, postgres_sqlstate_to_i32, CustomPgDbError,
+        postgres_sqlstate_to_i32, CustomPgDbError,
     },
 };
 
@@ -144,11 +144,6 @@ impl DocumentDBError {
     }
 
     #[must_use]
-    pub fn postgres_io_error_kind(&self) -> Option<io::ErrorKind> {
-        self.as_postgres_error().and_then(backend_io_error_kind)
-    }
-
-    #[must_use]
     pub fn as_pool_error(&self) -> Option<&PoolError> {
         self.0
             .source
@@ -156,7 +151,7 @@ impl DocumentDBError {
             .and_then(|source| source.downcast_ref::<PoolError>())
     }
 
-    pub(crate) fn new_documentdb_error(
+    fn new_documentdb_error(
         error_code: ErrorCode,
         error_message_user: String,
         error_message_internal: Option<String>,
@@ -414,40 +409,6 @@ impl From<io::Error> for DocumentDBError {
     }
 }
 
-pub(crate) const fn is_connection_closed_error_kind(kind: io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::TimedOut
-    )
-}
-
-pub(crate) const fn is_transient_backend_io_error(kind: io::ErrorKind) -> bool {
-    is_connection_closed_error_kind(kind)
-        || matches!(
-            kind,
-            io::ErrorKind::ConnectionRefused | io::ErrorKind::HostUnreachable
-        )
-}
-
-pub(crate) fn backend_io_error_kind(error: &tokio_postgres::Error) -> Option<io::ErrorKind> {
-    use std::error::Error;
-
-    let mut source = error.source();
-    while let Some(error) = source {
-        if let Some(io_error) = error.downcast_ref::<io::Error>() {
-            return Some(io_error.kind());
-        }
-        source = error.source();
-    }
-
-    None
-}
-
 impl From<tokio_postgres::Error> for DocumentDBError {
     fn from(error: tokio_postgres::Error) -> Self {
         Self::new_documentdb_error(
@@ -484,48 +445,6 @@ impl From<bson::raw::Error> for DocumentDBError {
     }
 }
 
-/// Maps a backend `SqlState` from a `PoolError` to the client-facing
-/// `ErrorCode` and builds the corresponding error. `DISK_FULL` and
-/// `INVALID_PASSWORD` are handled here directly because `pg.rs` intercepts
-/// those two earlier via `from_known_external_error_code` and doesn't apply a
-/// fixed message. The remaining recognized states defer to
-/// `map_connection_level_sqlstate` so they can't drift from query-time
-/// mapping; every other state keeps the generic `InternalError` code and the
-/// provided `error_message`.
-fn map_pool_db_error_code(
-    state: &SqlState,
-    error_message: String,
-    source: Box<dyn std::error::Error + Send + Sync>,
-) -> DocumentDBError {
-    let (error_code, internal_message) = match *state {
-        SqlState::DISK_FULL => (
-            ErrorCode::OutOfDiskSpace,
-            "The database disk is full".to_owned(),
-        ),
-        SqlState::TOO_MANY_CONNECTIONS => (
-            ErrorCode::TooManyLogicalSessions,
-            "There are too many open connections.".to_owned(),
-        ),
-        SqlState::CANNOT_CONNECT_NOW => (
-            ErrorCode::ShutdownInProgress,
-            "Request terminated due to shutdown on the server.".to_owned(),
-        ),
-        SqlState::INVALID_PASSWORD => (ErrorCode::InvalidPassword, "Invalid password.".to_owned()),
-        _ => match map_connection_level_sqlstate(state) {
-            Some((code, message)) => (code, message.to_owned()),
-            None => (ErrorCode::InternalError, error_message),
-        },
-    };
-
-    DocumentDBError::new_documentdb_error(
-        error_code,
-        generic_internal_error_message().to_owned(),
-        Some(internal_message),
-        Some(source),
-        ErrorKind::Pool,
-    )
-}
-
 impl From<PoolError> for DocumentDBError {
     fn from(error: PoolError) -> Self {
         // Backend errors carrying a recognized SqlState (e.g. connection
@@ -539,24 +458,9 @@ impl From<PoolError> for DocumentDBError {
                     let error_message = format!("Pool error due to database error: {db_error}");
                     map_pool_db_error_code(&state, error_message, Box::new(pg_error))
                 } else {
-                    let is_connectivity_error = pg_error.is_closed()
-                        || backend_io_error_kind(&pg_error)
-                            .is_some_and(is_transient_backend_io_error);
-                    let (error_code, error_message_user) = if is_connectivity_error {
-                        (
-                            ErrorCode::HostUnreachable,
-                            "Could not establish a connection to the server.".to_owned(),
-                        )
-                    } else {
-                        (
-                            ErrorCode::InternalError,
-                            generic_internal_error_message().to_owned(),
-                        )
-                    };
-
                     Self::new_documentdb_error(
-                        error_code,
-                        error_message_user,
+                        ErrorCode::InternalError,
+                        generic_internal_error_message().to_owned(),
                         Some(format!(
                             "Pool error due to generic postgres error: {pg_error}"
                         )),
@@ -574,6 +478,32 @@ impl From<PoolError> for DocumentDBError {
             ),
         }
     }
+}
+
+/// Maps a backend `SqlState` from a `PoolError` to the client-facing
+/// `ErrorCode` and builds the corresponding error. Recognized states (e.g.
+/// connection exhaustion) use a fixed override message; every other state
+/// keeps the generic `InternalError` code and the provided `error_message`.
+fn map_pool_db_error_code(
+    state: &SqlState,
+    error_message: String,
+    source: Box<dyn std::error::Error + Send + Sync>,
+) -> DocumentDBError {
+    let (error_code, internal_message) = match *state {
+        SqlState::TOO_MANY_CONNECTIONS => (
+            ErrorCode::TooManyLogicalSessions,
+            "Too many clients.".to_owned(),
+        ),
+        _ => (ErrorCode::InternalError, error_message),
+    };
+
+    DocumentDBError::new_documentdb_error(
+        error_code,
+        generic_internal_error_message().to_owned(),
+        Some(internal_message),
+        Some(source),
+        ErrorKind::Pool,
+    )
 }
 
 impl From<CreatePoolError> for DocumentDBError {
@@ -730,54 +660,7 @@ mod tests {
         assert_eq!(error.error_code(), ErrorCode::TooManyLogicalSessions);
         assert_eq!(*error.kind(), ErrorKind::Pool);
         assert_eq!(error.error_message_user(), generic_internal_error_message());
-        assert_eq!(
-            error.error_message_internal(),
-            Some("There are too many open connections.")
-        );
-    }
-
-    #[test]
-    fn map_pool_db_error_code_maps_known_states() {
-        for (state, expected_code, expected_message) in [
-            (
-                &SqlState::DISK_FULL,
-                ErrorCode::OutOfDiskSpace,
-                "The database disk is full",
-            ),
-            (
-                &SqlState::OUT_OF_MEMORY,
-                ErrorCode::ExceededMemoryLimit,
-                "Exceeded available memory on the server.",
-            ),
-            (
-                &SqlState::INSUFFICIENT_RESOURCES,
-                ErrorCode::ExceededMemoryLimit,
-                "Exceeded available resources on the server.",
-            ),
-            (
-                &SqlState::CANNOT_CONNECT_NOW,
-                ErrorCode::ShutdownInProgress,
-                "Request terminated due to shutdown on the server.",
-            ),
-            (
-                &SqlState::INVALID_PASSWORD,
-                ErrorCode::InvalidPassword,
-                "Invalid password.",
-            ),
-            (
-                &SqlState::INSUFFICIENT_PRIVILEGE,
-                ErrorCode::Unauthorized,
-                "User is not authorized to perform this action",
-            ),
-        ] {
-            let source = Box::new(std::io::Error::other("backend detail"));
-            let error = map_pool_db_error_code(state, "backend detail".to_owned(), source);
-
-            assert_eq!(error.error_code(), expected_code);
-            assert_eq!(*error.kind(), ErrorKind::Pool);
-            assert_eq!(error.error_message_user(), generic_internal_error_message());
-            assert_eq!(error.error_message_internal(), Some(expected_message));
-        }
+        assert_eq!(error.error_message_internal(), Some("Too many clients."));
     }
 
     /// Any other `SqlState` keeps the generic `InternalError` code and passes

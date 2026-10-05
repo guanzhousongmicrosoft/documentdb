@@ -3,6 +3,8 @@ SET search_path TO documentdb_core,documentdb_api,documentdb_api_catalog,documen
 SET citus.next_shard_id TO 411000;
 SET documentdb.next_collection_id TO 4110;
 SET documentdb.next_collection_index_id TO 4110;
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 
 SELECT documentdb_api.insert_one('db','aggregation_pipeline','{"_id":"1", "int": 10, "a" : { "b" : [ "x", 1, 2.0, true ] } }', NULL);
@@ -111,12 +113,18 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 -- $group
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
 
+SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- $group with keys having dotted path
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d.e": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
 
+SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d.e": { "$max": "$_id" }, "e": { "$count": {} } } }], "cursor": {} }');
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- $group with first/last
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": { "_id": { "$mod": [ { "$toInt": "$_id" }, 2 ] }, "d": { "$first": "$_id" }, "e": { "$last":  "$_id" } } }], "cursor": {} }');
@@ -179,7 +187,6 @@ ROLLBACK;
 SELECT document FROM bson_aggregation_find('db', '{ "find": "aggregation_pipeline", "filter": { "_id": { "$gt": "1" } }, "projection": { "a.b": 1 }, "sort": { "_id": 1 }, "skip": 1, "limit": -2 }');
 
 -- count
-SELECT documentdb_distributed_test_helpers.refresh_pg_stat_snapshot() AS stats_snapshot \gset
 SELECT document FROM bson_aggregation_count('db', '{ "count": "aggregation_pipeline" }');
 
 SELECT document FROM bson_aggregation_count('db', '{ "count": "aggregation_pipeline", "query": { "_id": { "$gt": "1" } } }');
@@ -460,8 +467,11 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregatio
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": {"_id": null, "count": { "$sum": 1 } } }], "cursor": {} }');
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": {"_id": null, "count": { "$sum": {} } } }], "cursor": {} }');
 
+SET documentdb.enableNewWithExprAccumulators TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": {"_id": null, "count": { "$sum": 1 } } }], "cursor": {} }');
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "aggregation_pipeline", "pipeline": [ { "$group": {"_id": null, "count": { "$sum": {} } } }], "cursor": {} }');
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 
 -- Pipeline directly push to shards if all stages refer to same collection and that is not sharded and is present on the same node as coordinator.

@@ -61,7 +61,6 @@
 #include "utils/version_utils.h"
 #include "aggregation/bson_query.h"
 #include "aggregation/bson_query_common.h"
-#include "customscan/bson_custom_scan.h"
 #include "customscan/bson_custom_query_scan.h"
 #include "metadata/index.h"
 
@@ -83,12 +82,12 @@
 extern bool EnableCursorsOnAggregationQueryRewrite;
 extern bool EnableCollation;
 extern bool EnableDynamicCursors;
-extern bool EnableDynamicCursorWithSkipLimit;
 extern bool SkipFailOnCollation;
 extern bool DefaultInlineWriteOperations;
 extern int MaxAggregationStagesAllowed;
 
 extern bool FailOnNonEmptyGroupCountArg;
+extern bool FailOnGroupIdDuplicate;
 extern bool ForceGroupSubqueryElimination;
 extern bool EnableTailableCursorMaxAwaitTime;
 extern bool RemoveMatchNamespaceFilters;
@@ -99,7 +98,6 @@ extern bool EnableScalarAggregateAccumulatorPathCollection;
 extern bool EnableProjectPushUpBeforeUnwindWithGroup;
 extern bool EnableSortPushToAccumulatorWithPrefix;
 extern bool EnableSampleScanFixOnSharded;
-extern bool EnableSampleScanPushdownForDynamicCursor;
 extern bool EnableDistinctIndexPushdown;
 extern bool EnableDistinctExistsFilterPushdown;
 extern bool EnableSubqueryPushdownForMatch;
@@ -301,7 +299,7 @@ static void SetBatchSize(const char *fieldName, const bson_value_t *value,
 						 QueryData *queryData);
 
 static int CompareStageByStageName(const void *a, const void *b);
-static bool IsSampleScanEligibleJoinTree(Node *node);
+static bool IsDefaultJoinTree(Node *node);
 static List * AddShardKeyAndIdFilters(const bson_value_t *existingValue, Query *query,
 									  AggregationPipelineBuildContext *context,
 									  TargetEntry *entry, List *existingQuals);
@@ -438,22 +436,14 @@ static FindSpec ParseFindQuery(pgbson *findSpec,
 static Query * ApplyFindSpec(const FindSpec *spec, MongoCollection *collection,
 							 QueryData *queryData, CursorParamKind cursorParamKind,
 							 AggregationPipelineBuildContext *context);
-static Query * ApplyFindSpecCore(const FindSpec *spec, Query *query,
+static Query * ApplyFindSpecCore(const FindSpec *spec, Query *query, Query *baseQuery,
 								 QueryData *queryData, CursorParamKind cursorParamKind,
 								 AggregationPipelineBuildContext *context);
-static void SetStreamingSkipLimitForFind(const FindSpec *spec,
-										 MongoCollection *collection,
-										 QueryData *queryData,
-										 CursorParamKind cursorParamKind);
-static void RewriteQueryForSkipLimit(Query *query, QueryData *queryData);
-static int64 ParseSkipValue(const bson_value_t *value);
-static int64 ParseLimitValue(const bson_value_t *value);
 static Const * AddCollationToSortSpec(const pgbsonelement *sortElement,
 									  const char *collationString);
 static Expr * MakeBsonFullScanQual(Expr *documentExpr,
 								   const pgbsonelement *sortSpecElement,
 								   const char *collationString);
-static pgbson * BuildDynamicCursorTrackerState(const QueryData *queryData);
 
 #define COMPATIBLE_CHANGE_STREAM_STAGES_COUNT 8
 const char *CompatibleChangeStreamPipelineStages[COMPATIBLE_CHANGE_STREAM_STAGES_COUNT] =
@@ -1208,9 +1198,6 @@ static const int MaxEvenFunctionArguments = ((int) (FUNC_MAX_ARGS / 2)) * 2;
 
 PG_FUNCTION_INFO_V1(command_bson_aggregation_pipeline);
 PG_FUNCTION_INFO_V1(command_bson_aggregation_getmore);
-PG_FUNCTION_INFO_V1(command_bson_aggregation_update);
-PG_FUNCTION_INFO_V1(command_bson_aggregation_delete);
-PG_FUNCTION_INFO_V1(command_bson_aggregation_find_and_modify);
 PG_FUNCTION_INFO_V1(command_api_collection);
 PG_FUNCTION_INFO_V1(command_aggregation_support);
 PG_FUNCTION_INFO_V1(documentdb_core_bson_to_bson);
@@ -1318,33 +1305,6 @@ command_bson_aggregation_getmore(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR, (errmsg(
 						"bson_aggregation function should have been processed by the planner. This is an internal error")));
-	PG_RETURN_BOOL(false);
-}
-
-
-Datum
-command_bson_aggregation_update(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR, (errmsg(
-						"bson_aggregation_update must be replaced by the planner. This is an internal error")));
-	PG_RETURN_BOOL(false);
-}
-
-
-Datum
-command_bson_aggregation_delete(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR, (errmsg(
-						"bson_aggregation_delete must be replaced by the planner. This is an internal error")));
-	PG_RETURN_BOOL(false);
-}
-
-
-Datum
-command_bson_aggregation_find_and_modify(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR, (errmsg(
-						"bson_aggregation_find_and_modify must be replaced by the planner. This is an internal error")));
 	PG_RETURN_BOOL(false);
 }
 
@@ -1616,38 +1576,6 @@ SetCursorTopology(QueryData *queryData,
 }
 
 
-static pgbson *
-BuildDynamicCursorTrackerState(const QueryData *queryData)
-{
-	pgbson_writer writer;
-	PgbsonWriterInit(&writer);
-
-	if (queryData->cursorStateConst != NULL &&
-		!IsPgbsonEmptyDocument(queryData->cursorStateConst))
-	{
-		bson_iter_t cursorIter;
-		PgbsonInitIterator(queryData->cursorStateConst, &cursorIter);
-		while (bson_iter_next(&cursorIter))
-		{
-			const char *key = bson_iter_key(&cursorIter);
-			if (strcmp(key, "allowOffsetLimitNode") == 0)
-			{
-				continue;
-			}
-
-			PgbsonWriterAppendIter(&writer, &cursorIter);
-		}
-	}
-
-	PgbsonWriterAppendBool(&writer, "allowOffsetLimitNode",
-						   sizeof("allowOffsetLimitNode") - 1,
-						   queryData->streamingLimit > 0 ||
-						   queryData->streamingSkip > 0);
-
-	return PgbsonWriterGetPgbson(&writer);
-}
-
-
 inline static bool
 TryAddDynamicCursorQuery(CursorParamKind cursorParamKind, QueryData *queryData,
 						 Query *query, AggregationPipelineBuildContext *context)
@@ -1690,7 +1618,9 @@ TryAddDynamicCursorQuery(CursorParamKind cursorParamKind, QueryData *queryData,
 				 */
 				List *quals = make_ands_implicit((Expr *) query->jointree->quals);
 
-				pgbson *cursorValue = BuildDynamicCursorTrackerState(queryData);
+				pgbson *cursorValue = queryData->cursorStateConst != NULL ?
+									  queryData->cursorStateConst : PgbsonInitEmpty();
+
 				Const *cursorConst = MakeBsonConst(cursorValue);
 				FuncExpr *cursorStateExpr = makeFuncExpr(
 					ApiCursorTrackerFunctionId(), BOOLOID, list_make2(
@@ -1737,8 +1667,6 @@ ParseAggregationQueryAndLookupCollection(text *database, pgbson *aggregationSpec
 	context->optimizePipelineStages = true;
 	context->joinStatus = JoinStageStatus_Unknown;
 	queryData->cursorKind = QueryCursorType_Unspecified;
-	queryData->streamingLimit = 0;
-	queryData->streamingSkip = 0;
 
 	bson_iter_t aggregationIterator;
 	PgbsonInitIterator(aggregationSpec, &aggregationIterator);
@@ -1831,11 +1759,9 @@ ParseAggregationQueryAndLookupCollection(text *database, pgbson *aggregationSpec
 			ReportFeatureUsage(FEATURE_COLLATION);
 			if (EnableCollation)
 			{
-				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
-						"collation", &aggregationIterator))
-				{
-					ParseAndGetCollationString(value, context->collationString);
-				}
+				EnsureTopLevelFieldType("collation", &aggregationIterator,
+										BSON_TYPE_DOCUMENT);
+				ParseAndGetCollationString(value, context->collationString);
 			}
 			else if (!SkipFailOnCollation)
 			{
@@ -2187,11 +2113,7 @@ ParseFindQuery(pgbson *findSpec, QueryData *queryData,
 					{
 						EnsureTopLevelFieldType("collation", &findIterator,
 												BSON_TYPE_DOCUMENT);
-						if (!IsBsonValueEmptyDocument(value))
-						{
-							ParseAndGetCollationString(value,
-													   context->collationString);
-						}
+						ParseAndGetCollationString(value, context->collationString);
 					}
 					else if (!SkipFailOnCollation)
 					{
@@ -2492,7 +2414,6 @@ ApplyFindSpec(const FindSpec *spec, MongoCollection *collection,
 			  AggregationPipelineBuildContext *context)
 {
 	context->variableSpec = (Expr *) MakeBsonConst(spec->parsedVariables);
-	SetStreamingSkipLimitForFind(spec, collection, queryData, cursorParamKind);
 
 	context->isSingleRowResult = false;
 	if (spec->sort.value_type != BSON_TYPE_EOD)
@@ -2509,103 +2430,14 @@ ApplyFindSpec(const FindSpec *spec, MongoCollection *collection,
 	{
 		context->requiresPersistentCursor = true;
 	}
-	context->mongoCollection = collection;
 
+	context->mongoCollection = collection;
 	Query *query = GenerateBaseTableQuery(spec->databaseDatum, &spec->collectionName,
 										  spec->collectionUuid, &spec->indexHint,
 										  context);
+	Query *baseQuery = query;
 
-	Query *finalQuery = ApplyFindSpecCore(spec, query, queryData,
-										  cursorParamKind, context);
-
-	return finalQuery;
-}
-
-
-/*
- * Selects the find-owned counts that can be streamed before cursor_tracker is
- * added. Views are excluded before GenerateBaseTableQuery replaces them with
- * their underlying collection.
- */
-static void
-SetStreamingSkipLimitForFind(const FindSpec *spec, MongoCollection *collection,
-							 QueryData *queryData,
-							 CursorParamKind cursorParamKind)
-{
-	bool isCursorResume = queryData->cursorStateConst != NULL &&
-						  !queryData->isAggregationQueryCursorRewrite;
-
-	if (!EnableDynamicCursorWithSkipLimit && !isCursorResume)
-	{
-		return;
-	}
-
-	int64 remainingLimit = queryData->streamingLimit;
-
-	queryData->streamingLimit = 0;
-	queryData->streamingSkip = 0;
-
-	int64 skipValue = spec->skip.value_type == BSON_TYPE_EOD ?
-					  0 : ParseSkipValue(&spec->skip);
-	int64 limitValue = spec->limit.value_type == BSON_TYPE_EOD ?
-					   0 : ParseLimitValue(&spec->limit);
-
-	bool canStreamSkipLimit = cursorParamKind == CursorParamKind_Dynamic &&
-							  collection != NULL &&
-							  collection->shardKey == NULL &&
-							  collection->viewDefinition == NULL;
-
-	if (isCursorResume &&
-		(((remainingLimit > 0) != (limitValue > 1)) ||
-		 (!canStreamSkipLimit && (remainingLimit > 0 || skipValue > 0))))
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg(
-							"Cannot resume dynamic cursor with invalid remaining skip/limit state.")));
-	}
-
-	if (canStreamSkipLimit)
-	{
-		queryData->streamingSkip = skipValue;
-		queryData->streamingLimit = isCursorResume ?
-									remainingLimit : (limitValue > 1 ? limitValue : 0);
-	}
-}
-
-
-/*
- * Applies resume-time count mutations after the find stages have built the
- * count-owning query.
- */
-static void
-RewriteQueryForSkipLimit(Query *query, QueryData *queryData)
-{
-	bool isCursorResume = queryData->cursorStateConst != NULL &&
-						  !queryData->isAggregationQueryCursorRewrite;
-	bool clearOffset = isCursorResume && queryData->hasFetchedRows;
-
-	if (isCursorResume && queryData->streamingLimit > 0)
-	{
-		Const *limitConst = query->limitCount != NULL &&
-							IsA(query->limitCount, Const) ?
-							(Const *) query->limitCount : NULL;
-		if (limitConst == NULL || limitConst->constisnull ||
-			limitConst->consttype != INT8OID ||
-			DatumGetInt64(limitConst->constvalue) <= 1 ||
-			queryData->streamingLimit > DatumGetInt64(limitConst->constvalue))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-							errmsg(
-								"Cannot resume dynamic cursor because the remaining limit does not match the original query.")));
-		}
-		limitConst->constvalue = Int64GetDatum(queryData->streamingLimit);
-	}
-
-	if (clearOffset)
-	{
-		query->limitOffset = NULL;
-		queryData->streamingSkip = 0;
-	}
+	return ApplyFindSpecCore(spec, query, baseQuery, queryData, cursorParamKind, context);
 }
 
 
@@ -2614,19 +2446,18 @@ RewriteQueryForSkipLimit(Query *query, QueryData *queryData)
  * project) and attaches cursor functions.
  */
 static Query *
-ApplyFindSpecCore(const FindSpec *spec, Query *query,
+ApplyFindSpecCore(const FindSpec *spec, Query *query, Query *baseQuery,
 				  QueryData *queryData, CursorParamKind cursorParamKind,
 				  AggregationPipelineBuildContext *context)
 {
-	Query *baseQuery = query;
-
 	if (cursorParamKind == CursorParamKind_Dynamic &&
 		!TryAddDynamicCursorQuery(cursorParamKind, queryData, query, context))
 	{
+		/* Fall back to streaming cursor if dynamic cursor cannot be added */
 		cursorParamKind = CursorParamKind_Streaming;
+
+		/* If we couldn't add dynamic cursors then fall back to not allowing this */
 		context->joinStatus = JoinStageStatus_Unknown;
-		queryData->streamingLimit = 0;
-		queryData->streamingSkip = 0;
 	}
 
 	/* First apply match */
@@ -2656,9 +2487,6 @@ ApplyFindSpecCore(const FindSpec *spec, Query *query,
 		context->stageNum++;
 	}
 
-	/* Projection migration wraps this query but leaves it as the count owner. */
-	Query *skipLimitQuery = query;
-
 	/* $near and $nearSphere add sort clause to query, for them we need persistent cursor. */
 	if (query->sortClause)
 	{
@@ -2681,8 +2509,6 @@ ApplyFindSpecCore(const FindSpec *spec, Query *query,
 
 		query = HandleProjectFind(&spec->projection, &spec->filter, query, context);
 	}
-
-	RewriteQueryForSkipLimit(skipLimitQuery, queryData);
 
 	if (rt_fetch(1, query->rtable)->rtekind != RTE_RELATION)
 	{
@@ -2970,11 +2796,9 @@ GenerateCountQuery(text *databaseDatum, pgbson *countSpec, bool setStatementTime
 			ReportFeatureUsage(FEATURE_COLLATION);
 			if (EnableCollation)
 			{
-				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
-						"collation", &countIterator))
-				{
-					ParseAndGetCollationString(value, context.collationString);
-				}
+				EnsureTopLevelFieldType("collation", &countIterator,
+										BSON_TYPE_DOCUMENT);
+				ParseAndGetCollationString(value, context.collationString);
 			}
 			else if (!SkipFailOnCollation)
 			{
@@ -3197,16 +3021,7 @@ GenerateDistinctQuery(text *databaseDatum, pgbson *distinctSpec, bool setStateme
 		else if (StringViewEqualsCString(&keyView, "collation"))
 		{
 			ReportFeatureUsage(FEATURE_COLLATION);
-			if (EnableCollation &&
-				IsClusterVersionAtleast(DocDB_V1, 1, 0))
-			{
-				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
-						"collation", &distinctIter))
-				{
-					ParseAndGetCollationString(value, context.collationString);
-				}
-			}
-			else if (!SkipFailOnCollation)
+			if (!SkipFailOnCollation)
 			{
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg(
@@ -4561,10 +4376,12 @@ HandleReplaceRoot(const bson_value_t *existingValue, Query *query,
  * If there is a limit, then injects a new subquery and sets the skip
  * since Skip is processed before limit in PG.
  */
-static int64
-ParseSkipValue(const bson_value_t *value)
+static Query *
+HandleSkip(const bson_value_t *existingValue, Query *query,
+		   AggregationPipelineBuildContext *context)
 {
-	if (!BsonValueIsNumber(value))
+	ReportFeatureUsage(FEATURE_STAGE_SKIP);
+	if (!BsonValueIsNumber(existingValue))
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107200),
 						errmsg(
@@ -4572,16 +4389,16 @@ ParseSkipValue(const bson_value_t *value)
 	}
 
 	bool checkFixedInteger = true;
-	if (!IsBsonValueUnquantized64BitInteger(value, checkFixedInteger))
+	if (!IsBsonValueUnquantized64BitInteger(existingValue, checkFixedInteger))
 	{
-		double doubleValue = BsonValueAsDouble(value);
+		double doubleValue = BsonValueAsDouble(existingValue);
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107200),
 						errmsg(
 							"Invalid parameter provided to $skip stage: value cannot be expressed as a 64-bit integer $skip: %f",
 							doubleValue)));
 	}
 
-	int64 skipValue = BsonValueAsInt64(value);
+	int64_t skipValue = BsonValueAsInt64(existingValue);
 	if (skipValue < 0)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107200),
@@ -4589,17 +4406,6 @@ ParseSkipValue(const bson_value_t *value)
 							"Invalid argument provided to $skip stage: A non-negative numerical value was expected in $skip, but received %ld.",
 							skipValue)));
 	}
-
-	return skipValue;
-}
-
-
-static Query *
-HandleSkip(const bson_value_t *existingValue, Query *query,
-		   AggregationPipelineBuildContext *context)
-{
-	ReportFeatureUsage(FEATURE_STAGE_SKIP);
-	int64 skipValue = ParseSkipValue(existingValue);
 
 	if (skipValue == 0)
 	{
@@ -4641,26 +4447,28 @@ HandleSkip(const bson_value_t *existingValue, Query *query,
  * Mutates the query for the $limit stage
  * Simply updates the limit in the current query.
  */
-static int64
-ParseLimitValue(const bson_value_t *value)
+static Query *
+HandleLimit(const bson_value_t *existingValue, Query *query,
+			AggregationPipelineBuildContext *context)
 {
-	if (!BsonValueIsNumber(value))
+	ReportFeatureUsage(FEATURE_STAGE_LIMIT);
+	if (!BsonValueIsNumber(existingValue))
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107201),
 						errmsg("the limit must be specified as a number")));
 	}
 
 	bool checkFixedInteger = true;
-	if (!IsBsonValue64BitInteger(value, checkFixedInteger))
+	if (!IsBsonValue64BitInteger(existingValue, checkFixedInteger))
 	{
-		double doubleValue = BsonValueAsDouble(value);
+		double doubleValue = BsonValueAsDouble(existingValue);
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107201),
 						errmsg(
 							"Invalid $limit stage argument: value cannot be represented as a 64-bit integer: $limit: %f",
 							doubleValue)));
 	}
 
-	int64 limitValue = BsonValueAsInt64(value);
+	int64_t limitValue = BsonValueAsInt64(existingValue);
 	if (limitValue < 0)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION5107201),
@@ -4674,17 +4482,6 @@ ParseLimitValue(const bson_value_t *value)
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION15958),
 						errmsg("The specified limit value must always be positive")));
 	}
-
-	return limitValue;
-}
-
-
-static Query *
-HandleLimit(const bson_value_t *existingValue, Query *query,
-			AggregationPipelineBuildContext *context)
-{
-	ReportFeatureUsage(FEATURE_STAGE_LIMIT);
-	int64 limitValue = ParseLimitValue(existingValue);
 
 	if (query->limitCount != NULL)
 	{
@@ -5623,25 +5420,11 @@ HandleDistinct(const StringView *distinctKey, Query *query,
 	Expr *currentProjection = firstEntry->expr;
 	Const *unwindValue = MakeTextConst(distinctKey->string,
 									   distinctKey->length);
-	bool hasCollation = IsCollationApplicable(context->collationString);
-	List *args;
-	Oid distinctUnwindFunctionOid;
-	if (hasCollation)
-	{
-		args = list_make3(currentProjection, unwindValue,
-						  MakeTextConst(context->collationString,
-										strlen(context->collationString)));
-		distinctUnwindFunctionOid = BsonDistinctUnwindWithCollationFunctionOid();
-	}
-	else
-	{
-		args = list_make2(currentProjection, unwindValue);
-		distinctUnwindFunctionOid = BsonDistinctUnwindFunctionOid();
-	}
+	List *args = list_make2(currentProjection, unwindValue);
 
 	/* Create a distinct unwind - to expand arrays and such */
 	resultExpr = makeFuncExpr(
-		distinctUnwindFunctionOid, BsonTypeId(), args, InvalidOid,
+		BsonDistinctUnwindFunctionOid(), BsonTypeId(), args, InvalidOid,
 		InvalidOid, COERCE_EXPLICIT_CALL);
 	resultExpr->funcretset = true;
 	firstEntry->expr = (Expr *) resultExpr;
@@ -5649,13 +5432,8 @@ HandleDistinct(const StringView *distinctKey, Query *query,
 
 	/* Add the distinct */
 	SortGroupClause *distinctSortGroup = makeNode(SortGroupClause);
-	distinctSortGroup->eqop = hasCollation ?
-							  BsonOrderyByEqOperatorId() :
-							  BsonEqualOperatorId();
-	distinctSortGroup->sortop = hasCollation ?
-								BsonOrderyByLtOperatorId() :
-								BsonLessThanOperatorId();
-	distinctSortGroup->hashable = false;
+	distinctSortGroup->eqop = BsonEqualOperatorId();
+	distinctSortGroup->sortop = BsonLessThanOperatorId();
 	distinctSortGroup->tleSortGroupRef = assignSortGroupRef(firstEntry,
 															query->targetList);
 	query->distinctClause = list_make1(distinctSortGroup);
@@ -5710,7 +5488,6 @@ HandleDistinct(const StringView *distinctKey, Query *query,
 
 	query = MigrateQueryToSubQuery(query, context);
 	firstEntry = linitial(query->targetList);
-
 	Aggref *aggref = CreateSingleArgAggregate(BsonDistinctAggregateFunctionOid(),
 											  firstEntry->expr, parseState);
 
@@ -6120,7 +5897,6 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 			Expr *sortInput = entry->expr;
 			pgbsonelement subOrderingElement;
 			bool isSortByMeta = false;
-			bool isSortByMetaTextScore = false;
 			if (element.bsonValue.value_type == BSON_TYPE_DOCUMENT &&
 				TryGetBsonValueToPgbsonElement(&element.bsonValue, &subOrderingElement) &&
 				subOrderingElement.pathLength == 5 &&
@@ -6128,10 +5904,6 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 			{
 				RangeTblEntry *rte = linitial(query->rtable);
 				isSortByMeta = true;
-				isSortByMetaTextScore =
-					subOrderingElement.bsonValue.value_type == BSON_TYPE_UTF8 &&
-					strcmp(subOrderingElement.bsonValue.value.v_utf8.str,
-						   "textScore") == 0;
 				if (rte->rtekind == RTE_RELATION ||
 					rte->rtekind == RTE_FUNCTION)
 				{
@@ -6193,30 +5965,10 @@ HandleSort(const bson_value_t *existingValue, Query *query,
 				sortOrderConst = MakeBsonConst(updatedSortDoc);
 			}
 
-			/*
-			 * When enabled on a new-enough cluster, a $meta:"textScore" sort
-			 * uses an order by that receives the text index options and TSQuery
-			 * as explicit arguments instead of reading process-global query
-			 * state. The index options and TSQuery are only resolved during
-			 * planning, so they are emitted here as null placeholders and filled
-			 * in by the planner once the text index is matched.
-			 */
-			bool useOrderByMeta = isSortByMetaTextScore &&
-								  EnableSkipUseQueryTextData &&
-								  IsClusterVersionAtleast(DocDB_V1, 0, 0);
-
 			List *args = NIL;
 
-			if (useOrderByMeta)
-			{
-				funcOid = BsonOrderByMetaFunctionOid();
-				funcReturnType = BsonTypeId();
-				Const *indexOptionsConst = makeNullConst(BYTEAOID, -1, InvalidOid);
-				Const *queryConst = makeNullConst(TSQUERYOID, -1, InvalidOid);
-				args = list_make3(sortInput, indexOptionsConst, queryConst);
-			}
 			/* apply collation to the sort comparison */
-			else if (IsCollationApplicable(context->collationString))
+			if (IsCollationApplicable(context->collationString))
 			{
 				funcOid = funcOidWithCollation;
 				Const *collationConst = MakeTextConst(context->collationString,
@@ -7367,13 +7119,29 @@ AddSumGroupAccumulator(Query *query, const bson_value_t *accumulatorValue,
 
 	if (!useNewCountAggregate)
 	{
-		return AddSimpleGroupAccumulatorWithExpr(query, accumulatorValue,
-												 repathArgs, accumulatorText,
-												 parseState, identifiers,
-												 documentExpr,
-												 BsonSumWithExprAggregateFunctionOid(),
-												 context,
-												 NULL);
+		if (CanUseWithExprAggregates())
+		{
+			return AddSimpleGroupAccumulatorWithExpr(query, accumulatorValue,
+													 repathArgs, accumulatorText,
+													 parseState, identifiers,
+													 documentExpr,
+													 BsonSumWithExprAggregateFunctionOid(),
+													 context,
+													 NULL);
+		}
+		else
+		{
+			RejectCollationForGroupAccumulator(context, "$sum");
+
+			const char *collationStringIgnore = NULL;
+			return AddSimpleGroupAccumulator(query, accumulatorValue, repathArgs,
+											 accumulatorText, parseState,
+											 identifiers, documentExpr,
+											 BsonSumAggregateFunctionOid(),
+											 context->variableSpec,
+											 collationStringIgnore,
+											 NULL);
+		}
 	}
 
 	Expr *constValue = (Expr *) makeConst(INT4OID, -1, InvalidOid, 4, Int32GetDatum(1),
@@ -7860,6 +7628,17 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 				AggregationPipelineBuildContext *context,
 				const bson_value_t *accumulatorSortSpec)
 {
+	/*
+	 * Collation in $group needs the WithExpr aggregates. Accumulators that
+	 * still cannot honor it are rejected individually below.
+	 */
+	if (IsCollationApplicable(context->collationString) &&
+		!(CanUseWithExprMinMaxAggregates() || CanUseWithExprAggregates()))
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("collation is not supported in $group stage yet.")));
+	}
+
 	ReportFeatureUsage(FEATURE_STAGE_GROUP);
 
 	/* Part 1, let's do the group */
@@ -7896,8 +7675,15 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 		{
 			if (idAlreadyFound)
 			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION15948),
-								errmsg("a group's _id may only be specified once")));
+				ReportFeatureUsage(FEATURE_STAGE_GROUP_DUPLICATE_ID);
+
+				if (FailOnGroupIdDuplicate)
+				{
+					ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_LOCATION15948),
+									errmsg("a group's _id may only be specified once")));
+				}
+
+				break;
 			}
 
 			idValue = *bson_iter_value(&groupIter);
@@ -8210,14 +7996,32 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_AVG);
 
-			repathArgs = AddSimpleGroupAccumulatorWithExpr(
-				query, &accumulatorElement.bsonValue,
-				repathArgs,
-				accumulatorText, parseState,
-				identifiers, origEntry->expr,
-				BsonAvgWithExprAggregateFunctionOid(),
-				context,
-				NULL);
+			if (CanUseWithExprAggregates())
+			{
+				repathArgs = AddSimpleGroupAccumulatorWithExpr(
+					query, &accumulatorElement.bsonValue,
+					repathArgs,
+					accumulatorText, parseState,
+					identifiers, origEntry->expr,
+					BsonAvgWithExprAggregateFunctionOid(),
+					context,
+					NULL);
+			}
+			else
+			{
+				RejectCollationForGroupAccumulator(context, accumulatorElement.path);
+
+				repathArgs = AddSimpleGroupAccumulator(query,
+													   &accumulatorElement.bsonValue,
+													   repathArgs,
+													   accumulatorText, parseState,
+													   identifiers,
+													   origEntry->expr,
+													   BsonAvgAggregateFunctionOid(),
+													   context->variableSpec,
+													   collationStringIgnore,
+													   NULL);
+			}
 		}
 		else if (StringViewEqualsCString(&accumulatorName, "$sum"))
 		{
@@ -8234,33 +8038,69 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_MAX);
 
-			repathArgs = AddSimpleGroupAccumulatorWithExpr(
-				query, &accumulatorElement.bsonValue,
-				repathArgs,
-				accumulatorText, parseState,
-				identifiers, origEntry->expr,
-				CanUseParallelSafeWithExprAccumulators(
-					context->allowShardBaseTable) ?
-				BsonMaxWithExprInternalAggregateFunctionOid() :
-				BsonMaxWithExprAggregateFunctionOid(),
-				context,
-				NULL);
+			if (CanUseWithExprMinMaxAggregates())
+			{
+				repathArgs = AddSimpleGroupAccumulatorWithExpr(
+					query, &accumulatorElement.bsonValue,
+					repathArgs,
+					accumulatorText, parseState,
+					identifiers, origEntry->expr,
+					CanUseParallelSafeWithExprAccumulators(
+						context->allowShardBaseTable) ?
+					BsonMaxWithExprInternalAggregateFunctionOid() :
+					BsonMaxWithExprAggregateFunctionOid(),
+					context,
+					NULL);
+			}
+			else
+			{
+				RejectCollationForGroupAccumulator(context, accumulatorElement.path);
+
+				repathArgs = AddSimpleGroupAccumulator(query,
+													   &accumulatorElement.bsonValue,
+													   repathArgs,
+													   accumulatorText, parseState,
+													   identifiers,
+													   origEntry->expr,
+													   BsonMaxAggregateFunctionOid(),
+													   context->variableSpec,
+													   collationStringIgnore,
+													   NULL);
+			}
 		}
 		else if (StringViewEqualsCString(&accumulatorName, "$min"))
 		{
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_MIN);
 
-			repathArgs = AddSimpleGroupAccumulatorWithExpr(
-				query, &accumulatorElement.bsonValue,
-				repathArgs,
-				accumulatorText, parseState,
-				identifiers, origEntry->expr,
-				CanUseParallelSafeWithExprAccumulators(
-					context->allowShardBaseTable) ?
-				BsonMinWithExprInternalAggregateFunctionOid() :
-				BsonMinWithExprAggregateFunctionOid(),
-				context,
-				NULL);
+			if (CanUseWithExprMinMaxAggregates())
+			{
+				repathArgs = AddSimpleGroupAccumulatorWithExpr(
+					query, &accumulatorElement.bsonValue,
+					repathArgs,
+					accumulatorText, parseState,
+					identifiers, origEntry->expr,
+					CanUseParallelSafeWithExprAccumulators(
+						context->allowShardBaseTable) ?
+					BsonMinWithExprInternalAggregateFunctionOid() :
+					BsonMinWithExprAggregateFunctionOid(),
+					context,
+					NULL);
+			}
+			else
+			{
+				RejectCollationForGroupAccumulator(context, accumulatorElement.path);
+
+				repathArgs = AddSimpleGroupAccumulator(query,
+													   &accumulatorElement.bsonValue,
+													   repathArgs,
+													   accumulatorText, parseState,
+													   identifiers,
+													   origEntry->expr,
+													   BsonMinAggregateFunctionOid(),
+													   context->variableSpec,
+													   collationStringIgnore,
+													   NULL);
+			}
 		}
 		else if (StringViewEqualsCString(&accumulatorName, "$count"))
 		{
@@ -8304,17 +8144,36 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 				accumulatorSortSpec != NULL)
 			{
 				TargetEntry *accumulatorTle = NULL;
-				repathArgs = AddSimpleGroupAccumulatorWithExpr(
-					query, &accumulatorElement.bsonValue,
-					repathArgs,
-					accumulatorText, parseState,
-					identifiers, origEntry->expr,
-					CanUseParallelSafeWithExprAccumulators(
-						context->allowShardBaseTable) ?
-					BsonFirstWithExprInternalAggregateFunctionOid() :
-					BsonFirstWithExprAggregateFunctionOid(),
-					context,
-					&accumulatorTle);
+				if (CanUseWithExprAggregates())
+				{
+					repathArgs = AddSimpleGroupAccumulatorWithExpr(
+						query, &accumulatorElement.bsonValue,
+						repathArgs,
+						accumulatorText, parseState,
+						identifiers, origEntry->expr,
+						CanUseParallelSafeWithExprAccumulators(
+							context->allowShardBaseTable) ?
+						BsonFirstWithExprInternalAggregateFunctionOid() :
+						BsonFirstWithExprAggregateFunctionOid(),
+						context,
+						&accumulatorTle);
+				}
+				else
+				{
+					RejectCollationForGroupAccumulator(context,
+													   accumulatorElement.path);
+
+					repathArgs = AddSimpleGroupAccumulator(query,
+														   &accumulatorElement.bsonValue,
+														   repathArgs,
+														   accumulatorText, parseState,
+														   identifiers,
+														   origEntry->expr,
+														   BsonFirstOnSortedAggregateFunctionOid(),
+														   context->variableSpec,
+														   collationStringIgnore,
+														   &accumulatorTle);
+				}
 
 				if (accumulatorSortSpec != NULL)
 				{
@@ -8343,17 +8202,36 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 			ReportFeatureUsage(FEATURE_AGGREGATE_GROUP_LAST);
 			if (context->sortSpec.value_type == BSON_TYPE_EOD)
 			{
-				repathArgs = AddSimpleGroupAccumulatorWithExpr(
-					query, &accumulatorElement.bsonValue,
-					repathArgs,
-					accumulatorText, parseState,
-					identifiers, origEntry->expr,
-					CanUseParallelSafeWithExprAccumulators(
-						context->allowShardBaseTable) ?
-					BsonLastWithExprInternalAggregateFunctionOid() :
-					BsonLastWithExprAggregateFunctionOid(),
-					context,
-					NULL);
+				if (CanUseWithExprAggregates())
+				{
+					repathArgs = AddSimpleGroupAccumulatorWithExpr(
+						query, &accumulatorElement.bsonValue,
+						repathArgs,
+						accumulatorText, parseState,
+						identifiers, origEntry->expr,
+						CanUseParallelSafeWithExprAccumulators(
+							context->allowShardBaseTable) ?
+						BsonLastWithExprInternalAggregateFunctionOid() :
+						BsonLastWithExprAggregateFunctionOid(),
+						context,
+						NULL);
+				}
+				else
+				{
+					RejectCollationForGroupAccumulator(context,
+													   accumulatorElement.path);
+
+					repathArgs = AddSimpleGroupAccumulator(query,
+														   &accumulatorElement.bsonValue,
+														   repathArgs,
+														   accumulatorText, parseState,
+														   identifiers,
+														   origEntry->expr,
+														   BsonLastOnSortedAggregateFunctionOid(),
+														   context->variableSpec,
+														   collationStringIgnore,
+														   NULL);
+				}
 			}
 			else
 			{
@@ -9132,7 +9010,7 @@ RequiresPersistentCursorLimit(const bson_value_t *pipelineValue, bool *isSingleR
 	if (pipelineValue->value_type != BSON_TYPE_EOD &&
 		BsonValueIsNumber(pipelineValue))
 	{
-		int64_t limit = BsonValueAsInt64(pipelineValue);
+		int32_t limit = BsonValueAsInt32(pipelineValue);
 		if (limit == 1)
 		{
 			/* For special case limit 1 - this can be a singleBatch cursor
@@ -9143,7 +9021,7 @@ RequiresPersistentCursorLimit(const bson_value_t *pipelineValue, bool *isSingleR
 		}
 
 		/* Defer to prior */
-		return limit != 0;
+		return limit != 1 && limit != 0;
 	}
 
 	return pipelineValue->value_type != BSON_TYPE_EOD;
@@ -9160,7 +9038,7 @@ RequiresPersistentCursorSkip(const bson_value_t *pipelineValue, bool *isSingleRo
 	if (pipelineValue->value_type != BSON_TYPE_EOD &&
 		BsonValueIsNumber(pipelineValue))
 	{
-		int64_t skip = BsonValueAsInt64(pipelineValue);
+		int32_t skip = BsonValueAsInt32(pipelineValue);
 		return skip != 0;
 	}
 
@@ -9362,66 +9240,6 @@ ExtractAggregationStages(const bson_value_t *pipelineValue,
 }
 
 
-inline static List *
-GetBaseTableColumnNames(void)
-{
-	return list_make3(makeString("shard_key_value"), makeString("object_id"),
-					  makeString("document"));
-}
-
-
-void
-FillRteForMongoCollection(Query *query, RangeTblEntry *rte,
-						  const char *collectionAlias,
-						  bool *allowShardBaseTable,
-						  MongoCollection *collection)
-{
-	rte->rtekind = RTE_RELATION;
-	rte->relid = collection->relationId;
-
-	List *colNames = GetBaseTableColumnNames();
-	if (collection->mongoDataCreationTimeVarAttrNumber != -1)
-	{
-		colNames = lappend(colNames, makeString("creation_time"));
-	}
-
-	if (*allowShardBaseTable)
-	{
-		Oid shardOid = TryGetCollectionShardTable(collection, AccessShareLock);
-		if (shardOid != InvalidOid)
-		{
-			/* Mark on our copy of the collection that we're using the shard */
-			collection->relationId = shardOid;
-			rte->relid = shardOid;
-		}
-		else if (DefaultInlineWriteOperations)
-		{
-			*allowShardBaseTable = true;
-		}
-		else
-		{
-			/* Signal that shard table pushdown didn't succeed */
-			*allowShardBaseTable = false;
-		}
-	}
-
-	rte->alias = makeAlias(collectionAlias, NIL);
-	rte->eref = makeAlias(collectionAlias, colNames);
-	rte->lateral = false;
-	rte->inFromCl = true;
-	rte->relkind = RELKIND_RELATION;
-	rte->functions = NIL;
-	rte->inh = true;
-#if PG_VERSION_NUM >= 160000
-	RTEPermissionInfo *permInfo = addRTEPermissionInfo(&query->rteperminfos, rte);
-	permInfo->requiredPerms = ACL_SELECT;
-#else
-	rte->requiredPerms = ACL_SELECT;
-#endif
-	rte->rellockmode = AccessShareLock;
-}
-
-
 /*
  * Updates the base table
  */
@@ -9489,6 +9307,10 @@ GenerateBaseTableQuery(text *databaseDatum, const StringView *collectionNameView
 	 */
 	RangeTblEntry *rte = makeNode(RangeTblEntry);
 
+	/* Match spec for ApiSchema.collection() function */
+	List *colNames = list_make3(makeString("shard_key_value"), makeString("object_id"),
+								makeString("document"));
+
 	const char *collectionAlias = "collection";
 	if (context->numNestedLevels > 0 || context->nestedPipelineLevel > 0)
 	{
@@ -9512,16 +9334,7 @@ GenerateBaseTableQuery(text *databaseDatum, const StringView *collectionNameView
 				return returnedQuery;
 			}
 		}
-		else if (StringViewEqualsCString(&databaseView, "admin"))
-		{
-			Query *returnedQuery = GenerateAdminDatabaseQuery(context);
-			if (returnedQuery != NULL)
-			{
-				return returnedQuery;
-			}
-		}
 
-		List *colNames = GetBaseTableColumnNames();
 		rte->rtekind = RTE_FUNCTION;
 		rte->relid = InvalidOid;
 		rte->lateral = false;
@@ -9554,8 +9367,48 @@ GenerateBaseTableQuery(text *databaseDatum, const StringView *collectionNameView
 	}
 	else
 	{
-		FillRteForMongoCollection(query, rte, collectionAlias,
-								  &context->allowShardBaseTable, collection);
+		rte->rtekind = RTE_RELATION;
+		rte->relid = collection->relationId;
+
+		if (collection->mongoDataCreationTimeVarAttrNumber != -1)
+		{
+			colNames = lappend(colNames, makeString("creation_time"));
+		}
+
+		if (context->allowShardBaseTable)
+		{
+			Oid shardOid = TryGetCollectionShardTable(collection, AccessShareLock);
+			if (shardOid != InvalidOid)
+			{
+				/* Mark on our copy of the collection that we're using the shard */
+				collection->relationId = shardOid;
+				rte->relid = shardOid;
+			}
+			else if (DefaultInlineWriteOperations)
+			{
+				context->allowShardBaseTable = true;
+			}
+			else
+			{
+				/* Signal that shard table pushdown didn't succeed */
+				context->allowShardBaseTable = false;
+			}
+		}
+
+		rte->alias = makeAlias(collectionAlias, NIL);
+		rte->eref = makeAlias(collectionAlias, colNames);
+		rte->lateral = false;
+		rte->inFromCl = true;
+		rte->relkind = RELKIND_RELATION;
+		rte->functions = NIL;
+		rte->inh = true;
+#if PG_VERSION_NUM >= 160000
+		RTEPermissionInfo *permInfo = addRTEPermissionInfo(&query->rteperminfos, rte);
+		permInfo->requiredPerms = ACL_SELECT;
+#else
+		rte->requiredPerms = ACL_SELECT;
+#endif
+		rte->rellockmode = AccessShareLock;
 	}
 
 	query->rtable = list_make1(rte);
@@ -9933,9 +9786,10 @@ HandleSample(const bson_value_t *existingValue, Query *query,
 	/* If the sample is against the base RTE - convert to a sample CTE */
 	RangeTblEntry *rte = linitial(query->rtable);
 
+	/* If there is a filter that's not the default filter then we can't push down sample */
 	/* TODO: Pushdown sample to base RTE for $lookup. */
 	if (rte->rtekind == RTE_RELATION &&
-		IsSampleScanEligibleJoinTree(query->jointree->quals))
+		IsDefaultJoinTree(query->jointree->quals))
 	{
 		/* Then just convert this to a Sample RTE */
 		if (rte->tablesample != NULL)
@@ -10093,18 +9947,15 @@ IsBooleanTrueConst(Node *node)
 
 
 /*
- * Checks whether the given node is compatible with a Sample Scan. The default
- * state (i.e. no user-specified filter) is eligible when:
+ * Checks whether the given node represents the default state
+ * (i.e. no user-specified filter). This is true when:
  *  - node is NULL (no filter applied)
  *  - node is BoolConst(TRUE) (empty match on sharded collections)
  *  - node is a single OpExpr of shard_key_value = <bigint>
  *    (the default shard key equality filter)
- *
- * Additional planner-only qualifications can be accepted when they are
- * compatible with a Sample Scan.
  */
 static bool
-IsSampleScanEligibleJoinTree(Node *node)
+IsDefaultJoinTree(Node *node)
 {
 	if (node == NULL)
 	{
@@ -10117,7 +9968,7 @@ IsSampleScanEligibleJoinTree(Node *node)
 	 * different hash-based shard key value). When HandleMatch({})
 	 * processes an empty match, it calls make_ands_explicit(NIL) which
 	 * returns a BoolConst(TRUE) node (the PG representation of an
-	 * always-true condition). Without this check, this function
+	 * always-true condition). Without this check, IsDefaultJoinTree
 	 * would not recognize BoolConst(TRUE) as equivalent to "no filter",
 	 * so HandleSample would conclude there was a user filter and skip
 	 * the TABLESAMPLE optimization.
@@ -10127,48 +9978,19 @@ IsSampleScanEligibleJoinTree(Node *node)
 		return true;
 	}
 
-	List *quals = make_ands_implicit((Expr *) node);
-
-	/* If no qualifications remain and the checks above did not pass, reject the node. */
-	if (quals == NIL)
+	if (!IsA(node, OpExpr))
 	{
 		return false;
 	}
 
-	ListCell *cell;
-	foreach(cell, quals)
-	{
-		Node *qual = (Node *) lfirst(cell);
-
-		if (IsA(qual, OpExpr))
-		{
-			/* Check that it's a bigint equality on the shard_key_value column
-			 * specifically, not just any bigint equality (e.g. collection_id). */
-			OpExpr *opExpr = (OpExpr *) qual;
-			Expr *firstArg = linitial(opExpr->args);
-			if (opExpr->opno == BigintEqualOperatorId() &&
-				IsA(firstArg, Var) &&
-				((Var *) firstArg)->varattno ==
-				DOCUMENT_DATA_TABLE_SHARD_KEY_VALUE_VAR_ATTR_NUMBER)
-			{
-				continue;
-			}
-		}
-
-		/* The cursor tracker is a marker added by dynamic cursors and can be ignored. */
-		if (EnableSampleScanPushdownForDynamicCursor &&
-			IsA(qual, FuncExpr) &&
-			((FuncExpr *) qual)->funcid == ApiCursorTrackerFunctionId())
-		{
-			continue;
-		}
-
-		/* Reject qualifications that are not compatible with a Sample Scan. */
-		return false;
-	}
-
-	/* All qualifications are compatible with a Sample Scan. */
-	return true;
+	/* Check that it's a bigint equality on the shard_key_value column
+	 * specifically, not just any bigint equality (e.g. collection_id). */
+	OpExpr *opExpr = (OpExpr *) node;
+	Expr *firstArg = linitial(opExpr->args);
+	return opExpr->opno == BigintEqualOperatorId() &&
+		   IsA(firstArg, Var) &&
+		   ((Var *) firstArg)->varattno ==
+		   DOCUMENT_DATA_TABLE_SHARD_KEY_VALUE_VAR_ATTR_NUMBER;
 }
 
 

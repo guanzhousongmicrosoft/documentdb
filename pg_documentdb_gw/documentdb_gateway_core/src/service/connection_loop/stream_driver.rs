@@ -15,18 +15,14 @@ use crate::{
     context::ConnectionContext,
     postgres::PgDataClient,
     responses,
-    service::connection_loop::{read_ahead, request_pipeline, routing::RequestRouter},
+    service::connection_loop::{read_ahead, request_pipeline},
 };
 
 const CONNECTION_WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub async fn handle_stream<T, R, S>(
-    stream: S,
-    mut connection_context: ConnectionContext,
-    request_router: &R,
-) where
+pub async fn handle_stream<T, S>(stream: S, mut connection_context: ConnectionContext)
+where
     T: PgDataClient,
-    R: RequestRouter<T>,
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let connection_activity_id = connection_context.connection_id.to_string();
@@ -50,11 +46,10 @@ pub async fn handle_stream<T, R, S>(
                 let request_activity_id =
                     activity_uuid.hyphenated().encode_lower(&mut activity_buf);
 
-                next_header = request_pipeline::handle_message::<T, _, _, R>(
+                next_header = request_pipeline::handle_message::<T, _, _>(
                     &mut connection_context,
                     &header,
                     &mut reader,
-                    request_router,
                     &mut writer,
                     request_activity_id,
                     idle_timeout,
@@ -63,7 +58,7 @@ pub async fn handle_stream<T, R, S>(
             }
 
             Ok(None) => {
-                tracing::debug!(
+                tracing::info!(
                     activity_id = connection_activity_id_as_str,
                     "Connection closed."
                 );
@@ -118,7 +113,6 @@ mod tests {
     use crate::{
         error::ErrorCode,
         postgres::DocumentDBDataClient,
-        service::DefaultRequestRouter,
         testing::{
             assert_error_response, assert_success_response, build_op_msg_request,
             decode_op_msg_responses, logout_document, test_connection_context,
@@ -214,12 +208,7 @@ mod tests {
         let (mut client_stream, server_stream) = tokio::io::duplex(4096);
 
         let server_task = tokio::spawn(async move {
-            handle_stream::<DocumentDBDataClient, _, _>(
-                server_stream,
-                connection_context,
-                &DefaultRequestRouter {},
-            )
-            .await;
+            handle_stream::<DocumentDBDataClient, _>(server_stream, connection_context).await;
         });
 
         let first_request = logout_document();
@@ -265,12 +254,7 @@ mod tests {
         let (mut client_stream, server_stream) = tokio::io::duplex(1024);
 
         let server_task = tokio::spawn(async move {
-            handle_stream::<DocumentDBDataClient, _, _>(
-                server_stream,
-                connection_context,
-                &DefaultRequestRouter {},
-            )
-            .await;
+            handle_stream::<DocumentDBDataClient, _>(server_stream, connection_context).await;
         });
 
         client_stream
@@ -301,12 +285,7 @@ mod tests {
         let (mut client_stream, server_stream) = tokio::io::duplex(1024);
 
         let server_task = tokio::spawn(async move {
-            handle_stream::<DocumentDBDataClient, _, _>(
-                server_stream,
-                connection_context,
-                &DefaultRequestRouter {},
-            )
-            .await;
+            handle_stream::<DocumentDBDataClient, _>(server_stream, connection_context).await;
         });
 
         let mut response_bytes = Vec::new();
@@ -334,12 +313,7 @@ mod tests {
         let stream = ErrorSequenceStream::new(false);
         let stream_handle = stream.clone();
 
-        handle_stream::<DocumentDBDataClient, _, _>(
-            stream,
-            connection_context,
-            &DefaultRequestRouter {},
-        )
-        .await;
+        handle_stream::<DocumentDBDataClient, _>(stream, connection_context).await;
 
         let responses = decode_op_msg_responses(&stream_handle.written_bytes());
         assert_eq!(
@@ -357,12 +331,7 @@ mod tests {
         let stream = ErrorSequenceStream::new(true);
         let stream_handle = stream.clone();
 
-        handle_stream::<DocumentDBDataClient, _, _>(
-            stream,
-            connection_context,
-            &DefaultRequestRouter {},
-        )
-        .await;
+        handle_stream::<DocumentDBDataClient, _>(stream, connection_context).await;
 
         assert!(
             stream_handle.written_bytes().is_empty(),

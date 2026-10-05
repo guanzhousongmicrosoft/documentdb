@@ -24,13 +24,6 @@ CREATE OR REPLACE FUNCTION __API_CATALOG_SCHEMA__.bson_distinct_unwind(__CORE_SC
  SUPPORT __API_CATALOG_SCHEMA__.bson_distinct_unwind_support
 AS 'MODULE_PATHNAME', $function$bson_distinct_unwind$function$;
 
-CREATE OR REPLACE FUNCTION __API_CATALOG_SCHEMA__.bson_distinct_unwind(__CORE_SCHEMA__.bson, text, text)
- RETURNS SETOF __CORE_SCHEMA__.bson
- LANGUAGE c
- IMMUTABLE PARALLEL SAFE STRICT ROWS 100
- SUPPORT __API_CATALOG_SCHEMA__.bson_distinct_unwind_support
-AS 'MODULE_PATHNAME', $function$bson_distinct_unwind$function$;
-
 CREATE OR REPLACE FUNCTION __API_CATALOG_SCHEMA__.bson_build_distinct_response(__CORE_SCHEMA__.bson[])
  RETURNS __CORE_SCHEMA__.bson
  LANGUAGE c

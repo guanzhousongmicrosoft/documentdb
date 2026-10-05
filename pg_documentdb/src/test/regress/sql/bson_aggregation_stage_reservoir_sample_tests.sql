@@ -354,6 +354,7 @@ SELECT collection_id AS reservoir_col FROM documentdb_api_catalog.collections WH
 SELECT FORMAT('VACUUM (FREEZE ON) documentdb_data.documents_%s', :reservoir_col) \gexec
 
 SET documentdb.enableDollarSampleReservoirScan TO on;
+SET documentdb.enableDollarSampleHeapSkipReservoirScan TO on;
 SET enable_seqscan TO off;
 SET documentdb.forceUseIndexIfAvailable TO on;
 
@@ -881,3 +882,4 @@ RESET documentdb.forceUseIndexIfAvailable;
 -- =============================================================================
 
 RESET documentdb.enableDollarSampleReservoirScan;
+

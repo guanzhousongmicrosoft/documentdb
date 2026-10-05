@@ -1,7 +1,5 @@
 /*-------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- * SPDX-License-Identifier: MIT
+ * Copyright (c) Microsoft Corporation.  All rights reserved.
  *
  * src/commands/update.c
  *
@@ -76,13 +74,6 @@
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/typcache.h"
-#include "tcop/tcopprot.h"
-#include "parser/parse_node.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/makefuncs.h"
-#include "utils/lsyscache.h"
-#include "parser/parse_param.h"
-#include "parser/analyze.h"
 
 #include "io/bson_core.h"
 #include "aggregation/bson_project.h"
@@ -96,10 +87,8 @@
 #include "metadata/metadata_cache.h"
 #include "infrastructure/documentdb_plan_cache.h"
 #include "query/query_operator.h"
-#include "opclass/bson_text_gin.h"
 #include "sharding/sharding.h"
 #include "commands/retryable_writes.h"
-#include "commands/write_commands.h"
 #include "io/pgbsonsequence.h"
 #include "utils/error_utils.h"
 #include "utils/feature_counter.h"
@@ -133,9 +122,6 @@ extern bool EnableCommutativeUpdateMany;
 typedef struct
 {
 	UpdateOneParams updateOneParams;
-
-	/* original collation document for worker serialization */
-	const bson_value_t *collation;
 
 	/* whether to update multiple documents */
 	int isMulti;
@@ -212,26 +198,6 @@ typedef struct
 	uint64 matchedDocs;
 } UpdateAllMatchingDocsResult;
 
-/*
- * UpdateQueryParserState stores a generated update query and its bound parameters.
- */
-typedef struct
-{
-	StringInfoData updateQuery;
-	int argCount;
-
-	Oid *argTypes;
-	Datum *argValues;
-	char *argNulls;
-
-	bool useDirectUpdate;
-
-	uint64 preparedQueryKey;
-
-	char *tableName;
-	bool isLocalShardQuery;
-} UpdateQueryParserState;
-
 
 /*
  * BatchUpdateSpec describes a batch of update operations.
@@ -290,9 +256,6 @@ typedef struct
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
-
-	/* Logical index names resolved while processing this request */
-	HTAB *indexNameCache;
 } BatchUpdateResult;
 
 
@@ -327,7 +290,6 @@ static List * BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs,
 											  const bson_value_t *variableSpec);
 static UpdateSpec * BuildUpdateSpec(bson_iter_t *updateIterator,
 									const bson_value_t *variableSpec);
-static void EnsureUpdateCollationParsed(UpdateSpec *updateSpec);
 static void ProcessBatchUpdate(MongoCollection *collection,
 							   BatchUpdateSpec *batchSpec,
 							   text *transactionId,
@@ -388,7 +350,6 @@ static void UpdateOneByObjectId(MongoCollection *collection,
 								UpdateOneParams *updateOneParams,
 								bson_value_t *objectId,
 								bool queryHasNonIdFilters,
-								bool isIdValueCollationAware,
 								text *transactionId,
 								UpdateOneResult *result,
 								ExprEvalState *stateForSchemaValidation);
@@ -398,9 +359,7 @@ static pgbson * UpsertDocument(MongoCollection *collection, const bson_value_t *
 							   ExprEvalState *stateForSchemaValidation,
 							   bool hasOnlyObjectIdFilter,
 							   const bson_value_t *variableSpec);
-static List * ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
-											  MemoryContext requestContext,
-											  HTAB **indexNameCache);
+static List * ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec);
 static pgbson * BuildResponseMessage(BatchUpdateResult *batchResult);
 static void BuildUpdates(BatchUpdateSpec *spec);
 static void DeserializeUpdateWorkerSpec(pgbson *updateInternalSpec,
@@ -456,12 +415,6 @@ static inline void PgbsonWriterAppendInt(pgbson_writer *writer, const char *path
 										 uint32_t pathLength, int64 value);
 static inline void ReportUpdateFeatureUsage(int batchSize);
 static inline void ReportUpdatedManyDocumentFeatureUsage(UpdateResult *result);
-static void BuildUpdateOneByObjectIdPlanQuery(MongoCollection *collection,
-											  UpdateSpec *updateSpec,
-											  const bson_value_t *objectId,
-											  bool queryHasNonIdFilters,
-											  bool isIdFilterCollationAware,
-											  UpdateQueryParserState *state);
 
 PG_FUNCTION_INFO_V1(command_update_bulk);
 PG_FUNCTION_INFO_V1(command_update);
@@ -682,9 +635,7 @@ PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 			batchResult.ok = 1;
 			batchResult.rowsMatched = 0;
 			batchResult.rowsModified = 0;
-			batchResult.writeErrors = ValidateQueryAndUpdateDocuments(
-				batchSpec, batchResult.resultMemoryContext,
-				&batchResult.indexNameCache);
+			batchResult.writeErrors = ValidateQueryAndUpdateDocuments(batchSpec);
 			batchResult.upserted = NIL;
 
 			values[0] = PointerGetDatum(BuildResponseMessage(&batchResult));
@@ -1045,7 +996,6 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 	bool isMulti = false;
 	bool isUpsert = false;
 	bson_value_t *sort = NULL;
-	bson_value_t *collation = NULL;
 
 	while (bson_iter_next(updateIter))
 	{
@@ -1101,21 +1051,9 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 		{
 			ReportFeatureUsage(FEATURE_COLLATION);
 
-			if (EnableCollation && IsClusterVersionAtleast(DocDB_V1, 1, 0))
-			{
-				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
-						"update.updates.collation", updateIter))
-				{
-					collation = palloc(sizeof(bson_value_t));
-					*collation = *bson_iter_value(updateIter);
-				}
-			}
-			else
-			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
-								errmsg("BSON field 'update.updates.collation' is not yet "
-									   "supported")));
-			}
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+							errmsg("BSON field 'update.updates.collation' is not yet "
+								   "supported")));
 		}
 		else if (strcmp(field, "hint") == 0)
 		{
@@ -1167,37 +1105,7 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 	updateSpec->updateOneParams.variableSpec = variableSpec;
 	updateSpec->isMulti = isMulti;
 
-	/*
-	 * Left unparsed: batch push-down re-serializes this document for the worker,
-	 * and deferring the parse to EnsureUpdateCollationParsed() keeps an invalid
-	 * collation a write error indexed to this update rather than a command-level
-	 * failure.
-	 */
-	updateSpec->collation = collation;
-
 	return updateSpec;
-}
-
-
-/*
- * Parses the retained collation document into updateOneParams.collationString,
- * and is a no-op once that is populated. Call only from inside the per-update
- * error boundary, since an invalid collation throws here.
- */
-static void
-EnsureUpdateCollationParsed(UpdateSpec *updateSpec)
-{
-	char collationString[MAX_ICU_COLLATION_LENGTH] = { 0 };
-
-	if (updateSpec->collation == NULL ||
-		IsCollationValid(updateSpec->updateOneParams.collationString))
-	{
-		return;
-	}
-
-	ParseAndGetCollationString(updateSpec->collation, collationString);
-	strlcpy(updateSpec->updateOneParams.collationString, collationString,
-			sizeof(updateSpec->updateOneParams.collationString));
 }
 
 
@@ -1380,11 +1288,7 @@ DoSingleUpdateWithSubTxn(MongoCollection *collection, UpdateSpec *updateSpec,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  updateIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  updateIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -1437,11 +1341,7 @@ DoSingleUpdate(MongoCollection *collection, UpdateSpec *updateSpec, text *transa
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  updateIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  updateIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -1761,39 +1661,6 @@ ProcessBatchUpdate(MongoCollection *collection, BatchUpdateSpec *batchSpec,
 }
 
 
-pg_attribute_noreturn()
-static void
-ThrowUpdateUpsertRequiresSingleShardError(void)
-{
-	ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("An {upsert:true} update on a sharded collection "
-						   "must target a single shard")));
-}
-
-
-pg_attribute_noreturn()
-static void
-ThrowCollationSensitiveShardKeyUpdateError(void)
-{
-	ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
-					errmsg("A {multi:false} update on a sharded collection "
-						   "cannot be routed to a single shard when the "
-						   "shard key value is collation-sensitive (string "
-						   "type).")));
-}
-
-
-pg_attribute_noreturn()
-static void
-ThrowSingleUpdateRequiresShardKeyOrIdError(void)
-{
-	ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("A {multi:false} update on a sharded collection "
-						   "must contain an exact match on _id or target a "
-						   "single shard")));
-}
-
-
 /*
  * ProcessUpdate processes a single update operation defined in
  * updateSpec on the given collection.
@@ -1803,8 +1670,6 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 			  text *transactionId, UpdateResult *result, bool forceInlineWrites,
 			  ExprEvalState *stateForSchemaValidation)
 {
-	EnsureUpdateCollationParsed(updateSpec);
-
 	const bson_value_t *query = updateSpec->updateOneParams.query;
 	const bson_value_t *update = updateSpec->updateOneParams.update;
 	const bson_value_t *arrayFilters = updateSpec->updateOneParams.arrayFilters;
@@ -1825,12 +1690,6 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 		ComputeShardKeyHashForQueryValue(collection->shardKey, collection->collectionId,
 										 query,
 										 &shardKeyHash, &isShardKeyValueCollationAware);
-	const char *collationString = updateSpec->updateOneParams.collationString;
-	bool applyCollation = IsCollationApplicable(collationString);
-	bool applyCollationToShardKeyValue = applyCollation &&
-										 isShardKeyValueCollationAware;
-	bool useShardKeyValueFilter = hasShardKeyValueFilter &&
-								  !applyCollationToShardKeyValue;
 
 	result->rowsMatched = 0;
 	result->rowsModified = 0;
@@ -1874,14 +1733,14 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 		{
 			updateAllResult = CallUpdateWorkerForUpdateMany(
 				collection, &updateSpec->updateOneParams,
-				useShardKeyValueFilter, shardKeyHash,
+				hasShardKeyValueFilter, shardKeyHash,
 				isUpsert, &hasOnlyObjectIdFilter);
 		}
 		else
 		{
 			updateAllResult = UpdateAllMatchingDocuments(
 				collection, &updateSpec->updateOneParams,
-				useShardKeyValueFilter,
+				hasShardKeyValueFilter,
 				shardKeyHash, validatorInfo,
 				&hasOnlyObjectIdFilter);
 		}
@@ -1916,7 +1775,7 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 	UpdateOneResult updateOneResult;
 	memset(&updateOneResult, 0, sizeof(UpdateOneResult));
 
-	if (useShardKeyValueFilter)
+	if (hasShardKeyValueFilter)
 	{
 		/*
 		 * Update at most 1 document that matches the query on a single shard.
@@ -1935,7 +1794,9 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 		 *
 		 * TODO: Use ErrorCodes.ShardKeyNotFound
 		 */
-		ThrowUpdateUpsertRequiresSingleShardError();
+		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("An {upsert:true} update on a sharded collection "
+							   "must target a single shard")));
 	}
 	else
 	{
@@ -1945,11 +1806,11 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 		bson_value_t idFromQueryDocument = { 0 };
 		bool errorOnConflict = false;
 		bool queryHasNonIdFilters = false;
-		bool isIdFilterCollationAware = false;
+		bool isIdFilterCollationAwareIgnore = false;
 		bool hasObjectIdFilter =
 			TraverseQueryDocumentAndGetId(&queryDocIter, &idFromQueryDocument,
 										  errorOnConflict, &queryHasNonIdFilters,
-										  &isIdFilterCollationAware);
+										  &isIdFilterCollationAwareIgnore);
 
 		if (hasObjectIdFilter)
 		{
@@ -1959,17 +1820,15 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 			 */
 			UpdateOneByObjectId(collection, &updateSpec->updateOneParams,
 								&idFromQueryDocument, queryHasNonIdFilters,
-								isIdFilterCollationAware, transactionId,
-								&updateOneResult,
+								transactionId, &updateOneResult,
 								stateForSchemaValidation);
-		}
-		else if (applyCollationToShardKeyValue)
-		{
-			ThrowCollationSensitiveShardKeyUpdateError();
 		}
 		else
 		{
-			ThrowSingleUpdateRequiresShardKeyOrIdError();
+			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							errmsg("A {multi:false} update on a sharded collection "
+								   "must contain an exact match on _id or target a "
+								   "single shard")));
 		}
 	}
 
@@ -1986,32 +1845,38 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 
 
 /*
- * Builds the query and parameters used to update every matching document.
+ * UpdateAllMatchingDocuments updates documents that match the query
+ * and need to be updated based on the update document. Returns the
+ * number of updated rows and matched documents for the query.
  */
-static void
-BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
-									UpdateOneParams *currentUpdate,
-									bool hasShardKeyValueFilter,
-									int64 shardKeyHash,
-									pgbson *schemaValidator,
-									bool *hasOnlyObjectIdFilter,
-									bool forceBsonOutput,
-									UpdateQueryParserState *updateState)
+static UpdateAllMatchingDocsResult
+UpdateAllMatchingDocuments(MongoCollection *collection,
+						   UpdateOneParams *currentUpdate,
+						   bool hasShardKeyValueFilter, int64 shardKeyHash,
+						   pgbson *schemaValidator,
+						   bool *hasOnlyObjectIdFilter)
 {
-	updateState->tableName = collection->tableName;
-	updateState->isLocalShardQuery = false;
+	const char *tableName = collection->tableName;
+	bool isLocalShardQuery = false;
 	bool setShardKeyValueFilter = false;
 	if (collection->shardTableName[0] != '\0')
 	{
 		/* If we can push down to the local shard, then prefer that. */
-		updateState->tableName = collection->shardTableName;
-		updateState->isLocalShardQuery = true;
+		tableName = collection->shardTableName;
+		isLocalShardQuery = true;
 		NumBsonDocumentsUpdated = 0;
 	}
 	else if (!DefaultInlineWriteOperations)
 	{
 		setShardKeyValueFilter = true;
 	}
+
+	StringInfoData updateQuery;
+
+	UpdateAllMatchingDocsResult result;
+	memset(&result, 0, sizeof(UpdateAllMatchingDocsResult));
+
+	SPI_connect();
 
 	/* Here we need to create a document wrapper to preserve the type */
 	pgbson *updateDoc = BsonValueToDocumentPgbson(currentUpdate->update);
@@ -2021,11 +1886,13 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 	/* Do these under the SPI Context so that they get deleted automatically at the end */
 	bool queryHasNonIdFilters = false;
 
-	bool isIdFilterCollationAware = false;
+	/* TODO: if the _id is collation-sensitive, we will avoid filtering by _id */
+	/* in the WHERE clause directly. */
+	bool isIdFilterCollationAwareIgnore = false;
 	pgbson *objectIdFilter = GetObjectIdFilterFromQueryDocumentValue(currentUpdate->query,
 																	 &queryHasNonIdFilters,
 																	 &
-																	 isIdFilterCollationAware);
+																	 isIdFilterCollationAwareIgnore);
 
 	*hasOnlyObjectIdFilter = objectIdFilter != NULL && !queryHasNonIdFilters;
 
@@ -2038,12 +1905,9 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 						   PgbsonInitFromDocumentBsonValue(variableSpec) : NULL;
 	}
 
-	bool applyVariableSpec = variableSpecBson != NULL;
-	bool applyCollation = IsCollationApplicable(currentUpdate->collationString);
-	bool applyObjectIdFilter = objectIdFilter != NULL &&
-							   !(applyCollation && isIdFilterCollationAware);
+	bool applyVariablSpec = variableSpecBson != NULL;
 
-	updateState->argCount = 0;
+	int argCount = 0;
 	int nextSqlArgIndex = 1;
 
 	/* When EnableUpdateManyWorkerPushdown is active for distributed collections,
@@ -2071,14 +1935,14 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 	 * value if no update is needed is with the multi CTE approach mentioned above, which is a lot slower.
 	 *
 	 */
-	initStringInfo(&updateState->updateQuery);
+	initStringInfo(&updateQuery);
 
 	int shardKeyArgIndex = -1;
 	int objectIdArgIndex = -1;
 	int validationLevelArgIndex = -1;
 
-	updateState->preparedQueryKey = 0;
-	updateState->useDirectUpdate = false;
+	uint64 preparedQueryKey = 0;
+	bool useDirectUpdate = false;
 	char *additionalArgs = "";
 	if (IsClusterVersionAtleast(DocDB_V0, 111, 0) &&
 		collection->options.updateDescriptionEnabled)
@@ -2134,60 +1998,57 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 		 * SUM(updated) AS total_updated
 		 * FROM u;
 		 */
-		appendStringInfo(&updateState->updateQuery,
+		appendStringInfo(&updateQuery,
 						 "WITH filtered_documents AS ("
 						 "SELECT object_id, shard_key_value, document,"
 						 " COALESCE(%s.update_bson_document(document, $1::%s, "
 						 "$2::%s, $3::%s, %s::%s, NULL::TEXT%s), document) as newDocument FROM %s.%s ",
 						 ApiInternalSchemaNameV2, FullBsonTypeName,
 						 FullBsonTypeName, FullBsonTypeName,
-						 (applyVariableSpec || applyCollation) ? "$4" : "NULL",
-						 FullBsonTypeName,
+						 applyVariablSpec ? "$4" : "NULL", FullBsonTypeName,
 						 additionalArgs,
-						 ApiDataSchemaName, updateState->tableName
+						 ApiDataSchemaName, tableName
 						 );
 
-		if (applyVariableSpec || applyCollation)
+		if (applyVariablSpec)
 		{
-			appendStringInfo(&updateState->updateQuery,
+			appendStringInfo(&updateQuery,
 							 " WHERE %s.bson_query_match(document, $2::%s, $4::%s, $5::text) ",
 							 DocumentDBApiInternalSchemaName, FullBsonTypeName,
 							 FullBsonTypeName);
 
 			nextSqlArgIndex += 5;
-			updateState->argCount += 5;
+			argCount += 5;
 		}
 		else
 		{
-			appendStringInfo(&updateState->updateQuery,
+			appendStringInfo(&updateQuery,
 							 " WHERE document OPERATOR(%s.@@) $2::%s ",
 							 ApiCatalogSchemaName, FullBsonTypeName);
 
 			nextSqlArgIndex += 3;
-			updateState->argCount += 3;
+			argCount += 3;
 		}
 
 		if (hasShardKeyValueFilter)
 		{
-			appendStringInfo(&updateState->updateQuery, "AND shard_key_value = $%d ",
-							 nextSqlArgIndex);
+			appendStringInfo(&updateQuery, "AND shard_key_value = $%d ", nextSqlArgIndex);
 
 			shardKeyArgIndex = nextSqlArgIndex - 1;
 			nextSqlArgIndex++;
-			updateState->argCount++;
+			argCount++;
 		}
 
-		if (applyObjectIdFilter)
+		if (objectIdFilter != NULL)
 		{
-			appendStringInfo(&updateState->updateQuery,
-							 "AND object_id OPERATOR(%s.=) $%d::%s",
+			appendStringInfo(&updateQuery, "AND object_id OPERATOR(%s.=) $%d::%s",
 							 CoreSchemaName,
 							 nextSqlArgIndex,
 							 FullBsonTypeName);
 
 			objectIdArgIndex = nextSqlArgIndex - 1;
 			nextSqlArgIndex++;
-			updateState->argCount++;
+			argCount++;
 		}
 
 		/* Use bson overload when version >= 0.114.0, otherwise bytea version */
@@ -2196,14 +2057,14 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 
 		if (collection->schemaValidator.validationLevel == ValidationLevel_Moderate)
 		{
-			appendStringInfo(&updateState->updateQuery,
+			appendStringInfo(&updateQuery,
 							 "), v as (select object_id, shard_key_value, newDocument, %s.schema_validation_against_update($%d::%s, filtered_documents.newDocument, filtered_documents.document, true) from filtered_documents), ",
 							 ApiInternalSchemaName,
 							 nextSqlArgIndex, schemaValidatorTypeCast);
 		}
 		else
 		{
-			appendStringInfo(&updateState->updateQuery,
+			appendStringInfo(&updateQuery,
 							 "), v as (select object_id, shard_key_value, newDocument, %s.schema_validation_against_update($%d::%s, filtered_documents.newDocument, filtered_documents.document, false) from filtered_documents), ",
 							 ApiInternalSchemaName,
 							 nextSqlArgIndex, schemaValidatorTypeCast);
@@ -2211,19 +2072,18 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 
 		validationLevelArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
-		updateState->argCount++;
+		argCount++;
 
-		appendStringInfo(&updateState->updateQuery,
+		appendStringInfo(&updateQuery,
 						 " u as (update %s.%s set document = newDocument from v where %s.%s.object_id OPERATOR(%s.=) v.object_id and %s.%s.shard_key_value = v.shard_key_value",
-						 ApiDataSchemaName, updateState->tableName,
-						 ApiDataSchemaName, updateState->tableName,
-						 CoreSchemaName, ApiDataSchemaName, updateState->tableName);
+						 ApiDataSchemaName, tableName,
+						 ApiDataSchemaName, tableName,
+						 CoreSchemaName, ApiDataSchemaName, tableName);
 
-		appendStringInfo(&updateState->updateQuery,
+		appendStringInfo(&updateQuery,
 						 " RETURNING %s.bson_update_returned_value(%s.%s.shard_key_value) as updated)"
 						 " SELECT (SELECT COUNT(*) FROM filtered_documents) as total_count, SUM(updated) FROM u",
-						 ApiInternalSchemaName, ApiDataSchemaName,
-						 updateState->tableName);
+						 ApiInternalSchemaName, ApiDataSchemaName, tableName);
 	}
 	else
 	{
@@ -2232,90 +2092,85 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 		 * wrapper and issue UPDATE ... RETURNING directly. Otherwise use
 		 * the CTE: WITH u AS (UPDATE ... RETURNING ...) SELECT COUNT(*), SUM(updated) FROM u
 		 */
-		updateState->useDirectUpdate = updateState->isLocalShardQuery &&
-									   EnableUpdateManyWorkerPushdown &&
-									   !forceBsonOutput;
+		useDirectUpdate = isLocalShardQuery && EnableUpdateManyWorkerPushdown;
 
-		if (!updateState->useDirectUpdate)
+		if (!useDirectUpdate)
 		{
-			appendStringInfo(&updateState->updateQuery, "WITH u AS (");
+			appendStringInfo(&updateQuery, "WITH u AS (");
 		}
 
-		appendStringInfo(&updateState->updateQuery,
+		appendStringInfo(&updateQuery,
 						 "UPDATE %s.%s"
 						 " SET document = COALESCE(%s.update_bson_document(document, $1::%s,"
 						 " $2::%s, $3::%s, %s::%s, NULL::TEXT%s), document) ",
-						 ApiDataSchemaName, updateState->tableName,
-						 ApiInternalSchemaNameV2,
+						 ApiDataSchemaName, tableName, ApiInternalSchemaNameV2,
 						 FullBsonTypeName, FullBsonTypeName, FullBsonTypeName,
-						 (applyVariableSpec || applyCollation) ? "$4" : "NULL",
-						 FullBsonTypeName,
+						 applyVariablSpec ? "$4" : "NULL", FullBsonTypeName,
 						 additionalArgs);
 
 
-		if (applyVariableSpec || applyCollation)
+		if (applyVariablSpec)
 		{
-			updateState->preparedQueryKey = QUERY_UPDATE_MANY_WITH_QUERY_FILTER_FUNCTION;
-			appendStringInfo(&updateState->updateQuery,
+			preparedQueryKey = QUERY_UPDATE_MANY_WITH_QUERY_FILTER_FUNCTION;
+			appendStringInfo(&updateQuery,
 							 " WHERE %s.bson_query_match(document, $2::%s, $4::%s, $5::text) ",
 							 DocumentDBApiInternalSchemaName,
 							 FullBsonTypeName, FullBsonTypeName);
 
 			nextSqlArgIndex += 5;
-			updateState->argCount += 5;
+			argCount += 5;
 		}
 		else
 		{
-			updateState->preparedQueryKey = QUERY_UPDATE_MANY_WITH_QUERY_FILTER_OPERATOR;
-			appendStringInfo(&updateState->updateQuery,
+			preparedQueryKey = QUERY_UPDATE_MANY_WITH_QUERY_FILTER_OPERATOR;
+			appendStringInfo(&updateQuery,
 							 " WHERE document OPERATOR(%s.@@) $2::%s ",
 							 ApiCatalogSchemaName, FullBsonTypeName);
 
 			nextSqlArgIndex += 3;
-			updateState->argCount += 3;
+			argCount += 3;
 		}
 
-		if (applyObjectIdFilter && hasShardKeyValueFilter)
+		if (objectIdFilter != NULL && hasShardKeyValueFilter)
 		{
 			/* We align this query key to be 2 more than the base plan: Note that the combo will be 3 more
 			 * which needs to be defined in the header file.
 			 */
-			updateState->preparedQueryKey += QUERY_UPDATE_MANY_OBJECTID_QUERY_OFFSET;
+			preparedQueryKey += QUERY_UPDATE_MANY_OBJECTID_QUERY_OFFSET;
 
-			appendStringInfo(&updateState->updateQuery, "AND shard_key_value = $%d ",
+			appendStringInfo(&updateQuery, "AND shard_key_value = $%d ",
 							 nextSqlArgIndex);
 
 			shardKeyArgIndex = nextSqlArgIndex - 1;
 			nextSqlArgIndex++;
-			updateState->argCount++;
+			argCount++;
 
-			appendStringInfo(&updateState->updateQuery,
-							 "AND object_id OPERATOR(%s.=) $%d::%s",
+			appendStringInfo(&updateQuery, "AND object_id OPERATOR(%s.=) $%d::%s",
 							 CoreSchemaName,
 							 nextSqlArgIndex,
 							 FullBsonTypeName);
 
 			objectIdArgIndex = nextSqlArgIndex - 1;
 			nextSqlArgIndex++;
-			updateState->argCount++;
+			argCount++;
 		}
 		else if (hasShardKeyValueFilter &&
 				 (collection->shardKey != NULL ||
 				  setShardKeyValueFilter))
 		{
 			/* We align this query key to be 1 more than the base plan */
-			updateState->preparedQueryKey += QUERY_UPDATE_MANY_SHARD_KEY_QUERY_OFFSET;
-			appendStringInfo(&updateState->updateQuery, "AND shard_key_value = $%d ",
+			preparedQueryKey += QUERY_UPDATE_MANY_SHARD_KEY_QUERY_OFFSET;
+			appendStringInfo(&updateQuery, "AND shard_key_value = $%d ",
 							 nextSqlArgIndex);
 
 			shardKeyArgIndex = nextSqlArgIndex - 1;
 			nextSqlArgIndex++;
-			updateState->argCount++;
+			argCount++;
 		}
 
-		if (updateState->useDirectUpdate)
+		if (useDirectUpdate)
 		{
-			updateState->preparedQueryKey += QUERY_UPDATE_MANY_PUSHDOWN_QUERY_OFFSET;
+			preparedQueryKey += QUERY_UPDATE_MANY_PUSHDOWN_QUERY_OFFSET;
 
 			/*
 			 * No RETURNING clause needed: matchedDocs = SPI_processed,
@@ -2323,73 +2178,62 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 			 * update_bson_document for each actual modification).
 			 */
 		}
-		else if (forceBsonOutput)
-		{
-			appendStringInfo(&updateState->updateQuery,
-							 " RETURNING %s.bson_update_returned_value(shard_key_value) as updated)"
-							 " SELECT %s.bson_build_document('n'::text, COUNT(*)::int8, 'nModified'::text, SUM(updated)::int8, 'ok'::text, 1::float8) AS document FROM u",
-							 ApiInternalSchemaName, CoreSchemaName);
-		}
 		else
 		{
-			appendStringInfo(&updateState->updateQuery,
+			appendStringInfo(&updateQuery,
 							 " RETURNING %s.bson_update_returned_value(shard_key_value) as updated)"
 							 " SELECT COUNT(*), SUM(updated) FROM u",
 							 ApiInternalSchemaName);
 		}
 	}
 
-	updateState->argTypes = palloc0(updateState->argCount * sizeof(Oid));
-	updateState->argValues = palloc0(updateState->argCount * sizeof(Datum));
+	Oid *argTypes = palloc0(argCount * sizeof(Oid));
+	Datum *argValues = palloc0(argCount * sizeof(Datum));
 
-	updateState->argNulls = palloc0(updateState->argCount * sizeof(char));
-	memset(updateState->argNulls, ' ', updateState->argCount);
+	char *argNulls = palloc0(argCount * sizeof(char));
+	memset(argNulls, ' ', argCount);
 
 	Oid bsonTypeId = BsonTypeId();
-	updateState->argTypes[0] = BYTEAOID;
-	updateState->argValues[0] = PointerGetDatum(CastPgbsonToBytea(updateDoc));
+	argTypes[0] = BYTEAOID;
+	argValues[0] = PointerGetDatum(CastPgbsonToBytea(updateDoc));
 
 	pgbson *queryDoc = PgbsonInitFromDocumentBsonValue(currentUpdate->query);
-	updateState->argTypes[1] = bsonTypeId;
-	updateState->argValues[1] = PointerGetDatum(queryDoc);
+	argTypes[1] = bsonTypeId;
+	argValues[1] = PointerGetDatum(queryDoc);
 
-	updateState->argTypes[2] = BYTEAOID;
+	argTypes[2] = BYTEAOID;
 	if (arrayFilters == NULL)
 	{
-		updateState->argValues[2] = 0;
-		updateState->argNulls[2] = 'n';
+		argValues[2] = 0;
+		argNulls[2] = 'n';
 	}
 	else
 	{
-		updateState->argValues[2] = PointerGetDatum(CastPgbsonToBytea(arrayFilters));
+		argValues[2] = PointerGetDatum(CastPgbsonToBytea(arrayFilters));
 	}
 
-	if (applyVariableSpec || applyCollation)
+	if (applyVariablSpec)
 	{
-		updateState->argTypes[3] = BsonTypeId();
-		updateState->argValues[3] = applyVariableSpec ?
-									PointerGetDatum(variableSpecBson) :
-									PointerGetDatum(PgbsonInitEmpty());
+		argTypes[3] = BsonTypeId();
+		argValues[3] = PointerGetDatum(variableSpecBson);
 
-		updateState->argTypes[4] = TEXTOID;
-		updateState->argValues[4] = CStringGetTextDatum(applyCollation ?
-														currentUpdate->collationString :
-														"");
+		argTypes[4] = TEXTOID;
+		argValues[4] = CStringGetTextDatum("");
 	}
 
 	/* set shard key value filter, if any */
 	if (shardKeyArgIndex != -1)
 	{
-		updateState->argTypes[shardKeyArgIndex] = INT8OID;
-		updateState->argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
+		argTypes[shardKeyArgIndex] = INT8OID;
+		argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
 	}
 
 	/* set the objectId filter, if any */
 	if (objectIdArgIndex != -1)
 	{
-		updateState->argTypes[objectIdArgIndex] = BYTEAOID;
-		updateState->argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(
-																	   objectIdFilter));
+		argTypes[objectIdArgIndex] = BYTEAOID;
+		argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(
+														  objectIdFilter));
 	}
 
 	/* set the schema validation rule, if any */
@@ -2398,72 +2242,36 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 		if (IsClusterVersionAtleast(DocDB_V0, 114, 0))
 		{
 			/* New version: pass bson validator */
-			updateState->argTypes[validationLevelArgIndex] = BsonTypeId();
-			updateState->argValues[validationLevelArgIndex] = PointerGetDatum(
-				schemaValidator);
+			argTypes[validationLevelArgIndex] = BsonTypeId();
+			argValues[validationLevelArgIndex] = PointerGetDatum(schemaValidator);
 		}
 		else
 		{
 			/* Old version: pass bytea converted from pgbson */
-			updateState->argTypes[validationLevelArgIndex] = BYTEAOID;
-			updateState->argValues[validationLevelArgIndex] = PointerGetDatum(
-				CastPgbsonToBytea(
-					schemaValidator));
+			argTypes[validationLevelArgIndex] = BYTEAOID;
+			argValues[validationLevelArgIndex] = PointerGetDatum(CastPgbsonToBytea(
+																	 schemaValidator));
 		}
 	}
-}
-
-
-/*
- * UpdateAllMatchingDocuments updates documents that match the query
- * and need to be updated based on the update document. Returns the
- * number of updated rows and matched documents for the query.
- */
-static UpdateAllMatchingDocsResult
-UpdateAllMatchingDocuments(MongoCollection *collection,
-						   UpdateOneParams *currentUpdate,
-						   bool hasShardKeyValueFilter, int64 shardKeyHash,
-						   pgbson *schemaValidator,
-						   bool *hasOnlyObjectIdFilter)
-{
-	UpdateAllMatchingDocsResult result;
-	memset(&result, 0, sizeof(UpdateAllMatchingDocsResult));
-
-	SPI_connect();
-
-	UpdateQueryParserState state = { 0 };
-	bool forceBsonOutput = false;
-	BuildUpdateAllMatchingDocumentQuery(collection,
-										currentUpdate,
-										hasShardKeyValueFilter,
-										shardKeyHash,
-										schemaValidator,
-										hasOnlyObjectIdFilter,
-										forceBsonOutput,
-										&state);
 
 	bool readOnly = false;
 	long maxTupleCount = 0;
 
 	/* Reset before SPI execution so update_bson_document increments from zero */
-	if (state.useDirectUpdate)
+	if (useDirectUpdate)
 	{
 		NumBsonDocumentsUpdated = 0;
 	}
 
-	if (state.preparedQueryKey != 0)
+	if (preparedQueryKey != 0)
 	{
-		SPIPlanPtr plan = state.isLocalShardQuery ?
+		SPIPlanPtr plan = isLocalShardQuery ?
 						  GetSPIQueryPlanWithLocalShard(collection->collectionId,
-														state.tableName,
-														state.preparedQueryKey,
-														state.updateQuery.data,
-														state.argTypes,
-														state.argCount)
-						  : GetSPIQueryPlan(collection->collectionId,
-											state.preparedQueryKey,
-											state.updateQuery.data, state.argTypes,
-											state.argCount);
+														tableName, preparedQueryKey,
+														updateQuery.data, argTypes,
+														argCount)
+						  : GetSPIQueryPlan(collection->collectionId, preparedQueryKey,
+											updateQuery.data, argTypes, argCount);
 
 		if (collection->shardKey != NULL && EnableCommutativeUpdateMany)
 		{
@@ -2473,26 +2281,22 @@ UpdateAllMatchingDocuments(MongoCollection *collection,
 			 * execution to avoid leaking into subsequent operations (e.g., deletes)
 			 * in the same transaction.
 			 */
-			RunMultiValueQueryWithCommutativeWrites(state.updateQuery.data, plan,
-													state.argCount,
-													state.argTypes, state.argValues,
-													state.argNulls,
+			RunMultiValueQueryWithCommutativeWrites(updateQuery.data, plan, argCount,
+													argTypes, argValues, argNulls,
 													readOnly, maxTupleCount);
 		}
 		else
 		{
-			SPI_execute_plan(plan, state.argValues, state.argNulls, readOnly,
-							 maxTupleCount);
+			SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
 		}
 	}
 	else
 	{
-		SPI_execute_with_args(state.updateQuery.data, state.argCount, state.argTypes,
-							  state.argValues, state.argNulls,
+		SPI_execute_with_args(updateQuery.data, argCount, argTypes, argValues, argNulls,
 							  readOnly, maxTupleCount);
 	}
 
-	if (state.useDirectUpdate)
+	if (useDirectUpdate)
 	{
 		/*
 		 * Direct UPDATE path (no RETURNING): SPI_processed gives matched
@@ -2990,10 +2794,8 @@ SerializeUnshardedUpdateParams(const bson_value_t *updateSpec, bool isOrdered,
 
 
 static void
-WriteUpdateOneParamsAsUpdateSpec(UpdateSpec *updateSpec, pgbson_writer *writer)
+WriteUpdateOneParamsAsUpdateSpec(UpdateOneParams *params, pgbson_writer *writer)
 {
-	UpdateOneParams *params = &updateSpec->updateOneParams;
-
 	if (params->query != NULL)
 	{
 		PgbsonWriterAppendValue(writer, "q", 1, params->query);
@@ -3012,11 +2814,6 @@ WriteUpdateOneParamsAsUpdateSpec(UpdateSpec *updateSpec, pgbson_writer *writer)
 	{
 		PgbsonWriterAppendValue(writer, "arrayFilters", 12,
 								params->arrayFilters);
-	}
-
-	if (updateSpec->collation != NULL)
-	{
-		PgbsonWriterAppendValue(writer, "collation", 9, updateSpec->collation);
 	}
 }
 
@@ -3058,7 +2855,7 @@ SerializeUpdateBatchParams(int *updateIndex, List *updates,
 			variableSpec = updateSpec->updateOneParams.variableSpec;
 		}
 
-		WriteUpdateOneParamsAsUpdateSpec(updateSpec, &specWriter);
+		WriteUpdateOneParamsAsUpdateSpec(&updateSpec->updateOneParams, &specWriter);
 		PgbsonWriterAppendBool(&specWriter, "multi", 5, updateSpec->isMulti);
 		PgbsonArrayWriterEndDocument(&specsWriter, &specWriter);
 		(*updateIndex)++;
@@ -3143,12 +2940,6 @@ SerializeUpdateOneParams(UpdateOneParams *params, pgbson *shardKeyBson)
 		params->variableSpec->value_type == BSON_TYPE_DOCUMENT)
 	{
 		PgbsonWriterAppendValue(&writer, "variableSpec", -1, params->variableSpec);
-	}
-
-	if (IsCollationValid(params->collationString))
-	{
-		PgbsonWriterAppendUtf8(&writer, "collation", 9,
-							   params->collationString);
 	}
 
 	PgbsonWriterEndDocument(&commandWriter, &writer);
@@ -3322,15 +3113,6 @@ DeserializeUpdateWorkerSpec(pgbson *updateInternalSpec,
 		{
 			updateOneParams->variableSpec = CreateBsonValueCopy(bson_iter_value(
 																	&internalIter));
-		}
-		else if (strcmp(key, "collation") == 0)
-		{
-			const char *collationString = bson_iter_utf8(&internalIter, NULL);
-			if (IsCollationValid(collationString))
-			{
-				strlcpy(updateOneParams->collationString, collationString,
-						sizeof(updateOneParams->collationString));
-			}
 		}
 	}
 }
@@ -3756,10 +3538,9 @@ ExecuteLocalUpdateOne(MongoCollection *collection, UpdateOneParams *updateOnePar
 								PgbsonInitFromDocumentBsonValue(
 			updateOneParams->query) : NULL;
 
-		/*
-		 * Result projection is only requested by findAndModify, which rejects
-		 * collation before constructing UpdateOneParams.
-		 */
+		/* UpdateOneParams does not support collation yet (update.updates.collation
+		 * raises ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED).
+		 * When collation is added, thread it through here. */
 		const char *collationString = NULL;
 
 		const BsonProjectionQueryState *projectionState =
@@ -3780,45 +3561,47 @@ ExecuteLocalUpdateOne(MongoCollection *collection, UpdateOneParams *updateOnePar
  * writes the updated value of the document to updateCandidate (if no update happened it sets it to NULL),
  * and returns whether a document was found.
  */
-static void
-BuildSelectUpdateCandidateQuery(MongoCollection *collection, int64 shardKeyHash,
-								UpdateOneParams *updateOneParams,
-								bool getOriginalDocument, bool *hasOnlyObjectIdFilter,
-								UpdateQueryParserState *state)
+static bool
+SelectUpdateCandidate(MongoCollection *collection, int64 shardKeyHash,
+					  UpdateOneParams *updateOneParams, UpdateCandidate *updateCandidate,
+					  bool getOriginalDocument, bool *hasOnlyObjectIdFilter)
 {
-	state->preparedQueryKey = QUERY_UPDATE_SELECT_UPDATE_CANDIDATE;
+	uint64 planId = QUERY_UPDATE_SELECT_UPDATE_CANDIDATE;
+	SPI_connect();
 
 	List *sortFieldDocuments = updateOneParams->sort != NULL ?
 							   BsonValueDocumentDecomposeFields(updateOneParams->sort) :
 							   NIL;
-	state->argCount = list_length(sortFieldDocuments);
+	int argCount = list_length(sortFieldDocuments);
 
 	bool queryHasNonIdFilters = false;
-	bool isIdFilterCollationAware = false;
+	bool isIdFilterCollationAwareIgnore = false;
 	pgbson *objectIdFilter =
 		GetObjectIdFilterFromQueryDocumentValue(updateOneParams->query,
 												&queryHasNonIdFilters,
-												&isIdFilterCollationAware);
+												&isIdFilterCollationAwareIgnore);
 	*hasOnlyObjectIdFilter = objectIdFilter != NULL && !queryHasNonIdFilters;
 
 	int nextSqlArgIndex = 1;
-	appendStringInfo(&state->updateQuery,
-					 "SELECT ctid, object_id, document, tableoid FROM");
+	bool foundDocument = false;
+
+	StringInfoData updateQuery;
+	initStringInfo(&updateQuery);
+
+	appendStringInfo(&updateQuery, "SELECT ctid, object_id, document, tableoid FROM");
 
 	if (collection->shardTableName[0] != '\0')
 	{
-		state->tableName = collection->shardTableName;
-		appendStringInfo(&state->updateQuery, " %s.%s", ApiDataSchemaName,
+		appendStringInfo(&updateQuery, " %s.%s", ApiDataSchemaName,
 						 collection->shardTableName);
 	}
 	else
 	{
-		appendStringInfo(&state->updateQuery, " %s.documents_" UINT64_FORMAT,
-						 ApiDataSchemaName,
+		appendStringInfo(&updateQuery, " %s.documents_" UINT64_FORMAT, ApiDataSchemaName,
 						 collection->collectionId);
 	}
 
-	appendStringInfo(&state->updateQuery, " WHERE ");
+	appendStringInfo(&updateQuery, " WHERE ");
 
 	const bson_value_t *variableSpec = updateOneParams->variableSpec;
 	pgbson *variableSpecBson = NULL;
@@ -3830,197 +3613,126 @@ BuildSelectUpdateCandidateQuery(MongoCollection *collection, int64 shardKeyHash,
 	}
 
 	bool applyVariableSpec = variableSpecBson != NULL;
-	bool applyCollation = IsCollationApplicable(updateOneParams->collationString);
 	bool hasFilter = false;
-	int collationArgIndex = -1;
-	if (applyCollation || applyVariableSpec)
+	if (queryHasNonIdFilters)
 	{
-		state->preparedQueryKey =
-			QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION;
-		appendStringInfo(&state->updateQuery,
-						 " %s.bson_query_match(document, $1::%s.bson, $2::%s.bson, $3::text)",
-						 DocumentDBApiInternalSchemaName, CoreSchemaName,
-						 CoreSchemaName);
+		if (applyVariableSpec)
+		{
+			planId = QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION;
+			appendStringInfo(&updateQuery,
+							 " %s.bson_query_match(document, $1::%s.bson, $2::%s.bson, $3::text)",
+							 DocumentDBApiInternalSchemaName, CoreSchemaName,
+							 CoreSchemaName);
 
-		hasFilter = true;
-		state->argCount += 3;
-		nextSqlArgIndex += 3;
-		collationArgIndex = 3;
-	}
-	else if (queryHasNonIdFilters)
-	{
-		state->preparedQueryKey = QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID;
-		appendStringInfo(&state->updateQuery, " document OPERATOR(%s.@@) $1::%s",
-						 ApiCatalogSchemaName, FullBsonTypeName);
+			hasFilter = true;
+			argCount += 3;
+			nextSqlArgIndex += 3;
+		}
+		else
+		{
+			planId = QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID;
+			appendStringInfo(&updateQuery, " document OPERATOR(%s.@@) $1::%s",
+							 ApiCatalogSchemaName, FullBsonTypeName);
 
-		hasFilter = true;
-		nextSqlArgIndex++;
-		state->argCount++;
+			hasFilter = true;
+			nextSqlArgIndex++;
+			argCount++;
+		}
 	}
 	else
 	{
 		/* for only the query spec */
 		nextSqlArgIndex++;
-		state->argCount++;
+		argCount++;
 	}
 
 	int objectIdArgIndex = -1;
 	int shardKeyArgIndex = -1;
 	bool setShardKeyValueFilter = collection->shardTableName[0] == '\0' &&
 								  !DefaultInlineWriteOperations;
-	bool applyObjectIdFilter = objectIdFilter != NULL &&
-							   !(applyCollation && isIdFilterCollationAware);
-	if (applyObjectIdFilter)
+	if (objectIdFilter != NULL)
 	{
-		state->preparedQueryKey = (applyVariableSpec || applyCollation) ?
-								  QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_BOTH_FILTER_LET_AND_COLLATION
-								  :
-								  queryHasNonIdFilters ?
-								  QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_BOTH_FILTER :
-								  QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_ONLY_OBJECT_ID;
+		planId = applyVariableSpec ?
+				 QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_BOTH_FILTER_LET_AND_COLLATION :
+				 queryHasNonIdFilters ?
+				 QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_BOTH_FILTER :
+				 QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_ONLY_OBJECT_ID;
 
 		/* We need to add the shard_key_value filter here */
 		int shardKeySqlArg = nextSqlArgIndex;
 		shardKeyArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
-		state->argCount++;
+		argCount++;
 		int objectidSqlArg = nextSqlArgIndex;
 		objectIdArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
-		state->argCount++;
+		argCount++;
 
-		appendStringInfo(&state->updateQuery,
+		appendStringInfo(&updateQuery,
 						 "%s shard_key_value = $%d"
 						 " AND object_id OPERATOR(%s.=) $%d::%s",
 						 hasFilter ? " AND " : "", shardKeySqlArg,
 						 CoreSchemaName,
 						 objectidSqlArg, FullBsonTypeName);
-		hasFilter = true;
 	}
 	else if (!queryHasNonIdFilters ||
 			 collection->shardKey != NULL || setShardKeyValueFilter)
 	{
-		if (state->preparedQueryKey ==
-			QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION)
-		{
-			state->preparedQueryKey =
-				QUERY_UPDATE_SELECT_UPDATE_CANDIDATE_NON_OBJECT_ID_LET_AND_COLLATION_WITH_SHARD_KEY;
-		}
-
 		/* query match handles adding shard_key_value filter in general so we add shard_key_value here only
 		 * if needed
 		 */
-		appendStringInfo(&state->updateQuery, "%s shard_key_value = $%d",
+		appendStringInfo(&updateQuery, "%s shard_key_value = $%d",
 						 hasFilter ? " AND " : "", nextSqlArgIndex);
 		shardKeyArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
-		state->argCount++;
-		hasFilter = true;
+		argCount++;
 	}
 
-	/*
-	 * The index only orders the sort when the query also carries the matching
-	 * full scan qual, so emit one per sort field the way the sort stage does.
-	 * The planner drops the qual when no index can serve it, leaving the sort
-	 * to run at runtime. An object id equality filter matches at most one row,
-	 * so ordering cannot help there.
-	 */
-	List *indexTermSortDocs = NIL;
-	int fullScanArgBaseIndex = nextSqlArgIndex;
-	int fullScanQualCount = 0;
-	if (applyCollation)
-	{
-		ListCell *sortDocCell;
-		foreach(sortDocCell, sortFieldDocuments)
-		{
-			pgbson *indexTermSortDoc = GetIndexTermOrderbySpec(lfirst(sortDocCell));
-			indexTermSortDocs = lappend(indexTermSortDocs, indexTermSortDoc);
-
-			if (indexTermSortDoc == NULL || applyObjectIdFilter)
-			{
-				continue;
-			}
-
-			appendStringInfo(&state->updateQuery,
-							 "%s %s.bson_dollar_fullscan(document, $%d::%s.bson)",
-							 hasFilter ? " AND" : "", DocumentDBApiInternalSchemaName,
-							 nextSqlArgIndex, CoreSchemaName);
-			hasFilter = true;
-			nextSqlArgIndex++;
-			state->argCount++;
-			fullScanQualCount++;
-		}
-	}
-
-	state->argTypes = palloc(sizeof(Oid) * state->argCount);
-	state->argValues = palloc(sizeof(Datum) * state->argCount);
-	state->argNulls = palloc(sizeof(char) * state->argCount);
+	Oid *argTypes = palloc(sizeof(Oid) * argCount);
+	Datum *argValues = palloc(sizeof(Datum) * argCount);
+	char *argNulls = palloc(sizeof(char) * argCount);
 
 	Oid bsonTypeId = BsonTypeId();
 	pgbson *query = PgbsonInitFromDocumentBsonValue(updateOneParams->query);
 
 	/* set query value*/
-	state->argTypes[0] = bsonTypeId;
-	state->argValues[0] = PointerGetDatum(query);
-	state->argNulls[0] = ' ';
+	argTypes[0] = bsonTypeId;
+	argValues[0] = PointerGetDatum(query);
+	argNulls[0] = ' ';
 
 	/* set variableSpec and collationString, if applicable */
-	if (applyCollation || applyVariableSpec)
+	if (applyVariableSpec)
 	{
-		state->argTypes[1] = bsonTypeId;
-		state->argValues[1] = applyVariableSpec ? PointerGetDatum(variableSpecBson) :
-							  PointerGetDatum(PgbsonInitEmpty());
-		state->argNulls[1] = ' ';
+		argTypes[1] = bsonTypeId;
+		argValues[1] = PointerGetDatum(variableSpecBson);
+		argNulls[1] = ' ';
 
-		state->argTypes[2] = TEXTOID;
-		state->argValues[2] = CStringGetTextDatum(applyCollation ?
-												  updateOneParams->collationString : "");
-		state->argNulls[2] = ' ';
+		argTypes[2] = TEXTOID;
+		argValues[2] = CStringGetTextDatum("");
+		argNulls[2] = 'n';
 	}
 
 	/* set id filter value */
 	if (objectIdArgIndex != -1)
 	{
-		state->argTypes[objectIdArgIndex] = BYTEAOID;
-		state->argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(
-																 objectIdFilter));
-		state->argNulls[objectIdArgIndex] = ' ';
+		argTypes[objectIdArgIndex] = BYTEAOID;
+		argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(objectIdFilter));
+		argNulls[objectIdArgIndex] = ' ';
 	}
 
 	if (shardKeyArgIndex != -1)
 	{
 		/* set shard key value */
-		state->argTypes[shardKeyArgIndex] = INT8OID;
-		state->argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
-		state->argNulls[shardKeyArgIndex] = ' ';
-	}
-
-	/* set full scan values */
-	if (fullScanQualCount > 0)
-	{
-		int fullScanArgNumber = fullScanArgBaseIndex;
-		for (int i = 0; i < list_length(indexTermSortDocs); i++)
-		{
-			if (list_nth(indexTermSortDocs, i) == NULL)
-			{
-				continue;
-			}
-
-			pgbson *fullScanSpec = GetFullScanSortSpec(list_nth(sortFieldDocuments, i),
-													   updateOneParams->collationString);
-			state->argTypes[fullScanArgNumber - 1] = BYTEAOID;
-			state->argValues[fullScanArgNumber - 1] =
-				PointerGetDatum(CastPgbsonToBytea(fullScanSpec));
-			state->argNulls[fullScanArgNumber - 1] = ' ';
-			fullScanArgNumber++;
-		}
+		argTypes[shardKeyArgIndex] = INT8OID;
+		argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
+		argNulls[shardKeyArgIndex] = ' ';
 	}
 
 	/* set sort value */
 	if (list_length(sortFieldDocuments) > 0)
 	{
-		state->preparedQueryKey = 0;
-		appendStringInfoString(&state->updateQuery, " ORDER BY");
+		planId = 0;
+		appendStringInfoString(&updateQuery, " ORDER BY");
 
 		int sortItemSqlArgBaseIndex = nextSqlArgIndex;
 		for (int i = 0; i < list_length(sortFieldDocuments); i++)
@@ -4028,79 +3740,28 @@ BuildSelectUpdateCandidateQuery(MongoCollection *collection, int64 shardKeyHash,
 			int sqlArgNumber = i + sortItemSqlArgBaseIndex;
 			pgbson *sortDoc = list_nth(sortFieldDocuments, i);
 			bool isAscending = ValidateOrderbyExpressionAndGetIsAscending(sortDoc);
-			if (applyCollation)
-			{
-				Assert(collationArgIndex > 0);
+			appendStringInfo(&updateQuery,
+							 "%s %s.bson_orderby(document, $%d::%s) %s",
+							 i > 0 ? "," : "", ApiCatalogSchemaName, sqlArgNumber,
+							 FullBsonTypeName,
+							 isAscending ? "ASC" : "DESC");
 
-				pgbson *indexTermSortDoc = list_nth(indexTermSortDocs, i);
-				if (indexTermSortDoc != NULL)
-				{
-					sortDoc = indexTermSortDoc;
-					appendStringInfo(&state->updateQuery,
-									 "%s %s.bson_orderby_index%s(document, $%d::%s.bson, $%d) %s",
-									 i > 0 ? "," : "", ApiInternalSchemaNameV2,
-									 isAscending ? "" : "_reverse",
-									 sqlArgNumber, CoreSchemaNameV2,
-									 collationArgIndex,
-									 isAscending ? "ASC" : "DESC");
-				}
-				else
-				{
-					/* $meta has no index term, so it sorts at runtime. */
-					appendStringInfo(&state->updateQuery,
-									 "%s %s.bson_orderby(document, $%d::%s.bson, $%d) USING OPERATOR(%s.%s)",
-									 i > 0 ? "," : "", ApiInternalSchemaNameV2,
-									 sqlArgNumber, CoreSchemaNameV2,
-									 collationArgIndex, ApiInternalSchemaNameV2,
-									 isAscending ? "<<<" : ">>>");
-				}
-			}
-			else
-			{
-				appendStringInfo(&state->updateQuery,
-								 "%s %s.bson_orderby(document, $%d::%s) %s",
-								 i > 0 ? "," : "", ApiCatalogSchemaName, sqlArgNumber,
-								 FullBsonTypeName,
-								 isAscending ? "ASC" : "DESC");
-			}
-
-			state->argTypes[sqlArgNumber - 1] = BYTEAOID;
-			state->argValues[sqlArgNumber - 1] =
+			argTypes[sqlArgNumber - 1] = BYTEAOID;
+			argValues[sqlArgNumber - 1] =
 				PointerGetDatum(CastPgbsonToBytea(sortDoc));
-			state->argNulls[sqlArgNumber - 1] = ' ';
+			argNulls[sqlArgNumber - 1] = ' ';
 		}
 	}
 
-	appendStringInfo(&state->updateQuery,
+	appendStringInfo(&updateQuery,
 					 " LIMIT 1 FOR UPDATE");
-}
-
-
-/*
- * SelectUpdateCandidate finds at most 1 document to update, locks the row,
- * writes the updated value of the document to updateCandidate (if no update happened it sets it to NULL),
- * and returns whether a document was found.
- */
-static bool
-SelectUpdateCandidate(MongoCollection *collection, int64 shardKeyHash,
-					  UpdateOneParams *updateOneParams, UpdateCandidate *updateCandidate,
-					  bool getOriginalDocument, bool *hasOnlyObjectIdFilter)
-{
-	SPI_connect();
-
-	UpdateQueryParserState state = { 0 };
-
-	initStringInfo(&state.updateQuery);
-	BuildSelectUpdateCandidateQuery(collection, shardKeyHash, updateOneParams,
-									getOriginalDocument, hasOnlyObjectIdFilter, &state);
 
 	bool readOnly = false;
 	long maxTupleCount = 1;
 
-	if (state.preparedQueryKey == 0)
+	if (planId == 0)
 	{
-		SPI_execute_with_args(state.updateQuery.data, state.argCount, state.argTypes,
-							  state.argValues, state.argNulls,
+		SPI_execute_with_args(updateQuery.data, argCount, argTypes, argValues, argNulls,
 							  readOnly, maxTupleCount);
 		Assert(SPI_processed <= 1);
 	}
@@ -4108,16 +3769,15 @@ SelectUpdateCandidate(MongoCollection *collection, int64 shardKeyHash,
 	{
 		SPIPlanPtr plan = GetSPIQueryPlanWithLocalShard(collection->collectionId,
 														collection->shardTableName,
-														state.preparedQueryKey,
-														state.updateQuery.data,
-														state.argTypes,
-														state.argCount);
+														planId, updateQuery.data,
+														argTypes,
+														argCount);
 
-		SPI_execute_plan(plan, state.argValues, state.argNulls, readOnly, maxTupleCount);
+		SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
 		Assert(SPI_processed <= 1);
 	}
 
-	bool foundDocument = SPI_processed > 0;
+	foundDocument = SPI_processed > 0;
 	if (foundDocument && updateCandidate != NULL)
 	{
 		ExtractUpdateCandidateFromSPI(updateOneParams, updateCandidate,
@@ -4352,7 +4012,7 @@ DeleteDocumentByTID(uint64 collectionId, int64 shardKeyHash, ItemPointer tid)
 static void
 UpdateOneByObjectId(MongoCollection *collection, UpdateOneParams *updateOneParams,
 					bson_value_t *objectId, bool queryHasNonIdFilters,
-					bool isIdValueCollationAware, text *transactionId,
+					text *transactionId,
 					UpdateOneResult *result, ExprEvalState *stateForSchemaValidation)
 {
 	/* initialize result */
@@ -4384,11 +4044,12 @@ UpdateOneByObjectId(MongoCollection *collection, UpdateOneParams *updateOneParam
 	for (int tryNumber = 0; tryNumber < maxTries; tryNumber++)
 	{
 		int64 shardKeyValue = 0;
+		bool isIdValueCollationAware = false;
+		const char *collationStringIgnore = NULL;
 		if (!FindShardKeyValueForDocumentId(collection, updateOneParams->query, objectId,
 											isIdValueCollationAware, queryHasNonIdFilters,
-											updateOneParams->sort,
 											&shardKeyValue, updateOneParams->variableSpec,
-											updateOneParams->collationString))
+											collationStringIgnore))
 		{
 			/* no document matches both the query and the object ID */
 			return;
@@ -4479,9 +4140,7 @@ UpsertDocument(MongoCollection *collection, const bson_value_t *update,
  * as if we're in the run-time to implicitly perform necessary validations.
  */
 static List *
-ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
-								MemoryContext requestContext,
-								HTAB **indexNameCache)
+ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec)
 {
 	/* declared volatile because of the longjmp in PG_CATCH */
 	List *volatile writeErrorList = NIL;
@@ -4502,7 +4161,6 @@ ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
 		MemoryContext oldContext = CurrentMemoryContext;
 		PG_TRY();
 		{
-			EnsureUpdateCollationParsed(updateSpec);
 			ValidateQueryDocumentValue(updateSpec->updateOneParams.query);
 			ValidateUpdateDocument(updateSpec->updateOneParams.update,
 								   updateSpec->updateOneParams.query,
@@ -4516,9 +4174,7 @@ ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
 			ErrorData *errorData = CopyErrorDataAndFlush();
 
 			writeErrorList = lappend(writeErrorList, GetWriteErrorFromErrorData(errorData,
-																				writeErrorIdx,
-																				requestContext,
-																				indexNameCache));
+																				writeErrorIdx));
 			isSuccess = false;
 		}
 		PG_END_TRY();
@@ -4651,7 +4307,7 @@ ReportUpdateFeatureUsage(int batchSize)
 /*
  * SerializeUpdateManyParams serializes updateMany parameters into a BSON
  * document for transport to worker nodes via update_worker.
- * Format: {"updateMany": {query: ..., update: ..., arrayFilters: ..., collation: ...}}
+ * Format: {"updateMany": {query: ..., update: ..., arrayFilters: ...}}
  */
 static pgbson *
 SerializeUpdateManyParams(UpdateOneParams *params)
@@ -4683,12 +4339,6 @@ SerializeUpdateManyParams(UpdateOneParams *params)
 	{
 		PgbsonWriterAppendValue(&innerWriter, "variableSpec", 12,
 								params->variableSpec);
-	}
-
-	if (IsCollationValid(params->collationString))
-	{
-		PgbsonWriterAppendUtf8(&innerWriter, "collation", 9,
-							   params->collationString);
 	}
 
 	PgbsonWriterEndDocument(&writer, &innerWriter);
@@ -4735,20 +4385,6 @@ DeserializeUpdateManyWorkerSpec(const bson_value_t *value, WorkerUpdateParam *pa
 			 */
 			params->variableSpec = CreateBsonValueCopy(bson_iter_value(&iter));
 			updateManyParams->variableSpec = params->variableSpec;
-		}
-		else if (strcmp(key, "collation") == 0)
-		{
-			uint32_t collationStringLength = 0;
-			const char *collationString = bson_iter_utf8(&iter,
-														 &collationStringLength);
-			if (IsCollationValid(collationString))
-			{
-				const uint32_t maxCopyLength =
-					(uint32_t) sizeof(updateManyParams->collationString) - 1;
-				uint32_t copyLength = Min(collationStringLength, maxCopyLength);
-				memcpy(updateManyParams->collationString, collationString, copyLength);
-				updateManyParams->collationString[copyLength] = '\0';
-			}
 		}
 	}
 }
@@ -4905,241 +4541,4 @@ ReportUpdatedManyDocumentFeatureUsage(UpdateResult *result)
 	{
 		ReportFeatureUsage(FEATURE_COMMAND_UPDATEMANY_EXTENDED_NOOP);
 	}
-}
-
-
-static Node *
-ReplaceQueryTreeArgsForUpdate(Node *node, void *context)
-{
-	if (node == NULL)
-	{
-		return node;
-	}
-
-	if (IsA(node, Query))
-	{
-		return (Node *) query_tree_mutator((Query *) node,
-										   ReplaceQueryTreeArgsForUpdate,
-										   context,
-										   QTW_DONT_COPY_QUERY);
-	}
-
-	if (IsA(node, Param))
-	{
-		Param *param = (Param *) node;
-		UpdateQueryParserState *state = (UpdateQueryParserState *) context;
-		if (param->paramkind == PARAM_EXTERN)
-		{
-			int paramIndex = param->paramid - 1;
-			Oid constType = state->argTypes[paramIndex];
-			bool typByVal;
-			int16 typLen;
-			get_typlenbyval(param->paramtype, &typLen, &typByVal);
-			return (Node *) makeConst(constType, -1, InvalidOid, typLen,
-									  state->argValues[paramIndex],
-									  state->argNulls[paramIndex] == 'n', typByVal);
-		}
-	}
-
-	return expression_tree_mutator(node,
-								   ReplaceQueryTreeArgsForUpdate,
-								   context);
-}
-
-
-static void
-BuildUpdateOneByObjectIdPlanQuery(MongoCollection *collection,
-								  UpdateSpec *updateSpec,
-								  const bson_value_t *objectId,
-								  bool queryHasNonIdFilters,
-								  bool isIdFilterCollationAware,
-								  UpdateQueryParserState *state)
-{
-	ShardKeyLookupQueryState lookupState = { 0 };
-	BuildShardKeyValueForDocumentIdQuery(
-		collection, updateSpec->updateOneParams.query,
-		objectId, isIdFilterCollationAware,
-		queryHasNonIdFilters, updateSpec->updateOneParams.sort,
-		updateSpec->updateOneParams.variableSpec,
-		updateSpec->updateOneParams.collationString, &lookupState);
-
-	initStringInfo(&state->updateQuery);
-	appendStringInfo(
-		&state->updateQuery,
-		"SELECT %s.bson_build_document('n'::text, COUNT(*)::int8, 'nModified'::text, 0::int8, 'ok'::text, 1::float8) AS document "
-		"FROM (%s) AS shard_lookup",
-		CoreSchemaName, lookupState.query.data);
-	state->argCount = lookupState.argCount;
-	state->argTypes = lookupState.argTypes;
-	state->argValues = lookupState.argValues;
-	state->argNulls = lookupState.argNulls;
-}
-
-
-/*
- * Generates the update query tree consumed by the planner hook without executing it.
- */
-Query *
-GenerateUpdateQuery(text *database, pgbson *updateSpec, bool setStatementTimeout)
-{
-	ThrowIfServerOrTransactionReadOnly();
-	bson_iter_t updateCommandIter;
-	PgbsonInitIterator(updateSpec, &updateCommandIter);
-
-	pgbsonsequence *updateDocs = NULL;
-	Datum databaseDatum = database == NULL ? (Datum) 0 : PointerGetDatum(database);
-	BatchUpdateSpec *batchSpec = BuildBatchUpdateSpec(&updateCommandIter, updateDocs,
-													  &databaseDatum);
-	BuildUpdates(batchSpec);
-
-	if (list_length(batchSpec->updates) != 1)
-	{
-		ereport(ERROR, (errmsg(
-							"update request must contain exactly one update document")));
-	}
-
-	UpdateSpec *updateSingleSpec = linitial(batchSpec->updates);
-	EnsureUpdateCollationParsed(updateSingleSpec);
-
-	if (updateSingleSpec->isMulti &&
-		updateSingleSpec->updateOneParams.sort != NULL)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
-						errmsg("sort option can not be set when multi=true")));
-	}
-
-	if (updateSingleSpec->isMulti &&
-		DetermineUpdateType(updateSingleSpec->updateOneParams.update) ==
-		UpdateType_ReplaceDocument)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_FAILEDTOPARSE),
-						errmsg(
-							"multi=true and replace-style updates cannot be used together.")));
-	}
-
-	ValidateQueryDocumentValue(updateSingleSpec->updateOneParams.query);
-	ValidateUpdateDocument(updateSingleSpec->updateOneParams.update,
-						   updateSingleSpec->updateOneParams.query,
-						   updateSingleSpec->updateOneParams.arrayFilters,
-						   updateSingleSpec->updateOneParams.variableSpec);
-
-	Datum collectionNameDatum = CStringGetTextDatum(batchSpec->collectionName);
-	MongoCollection *collection =
-		GetMongoCollectionByNameDatum(databaseDatum, collectionNameDatum,
-									  RowExclusiveLock);
-
-	if (collection == NULL)
-	{
-		ereport(ERROR, (errmsg(
-							"Cannot find collection \"%s\" in database for update request",
-							batchSpec->collectionName)));
-	}
-
-	Oid shardOid = TryGetCollectionShardTable(collection, NoLock);
-	if (shardOid == InvalidOid)
-	{
-		/* Shard not valid on this node anymore (due to shard moves etc) */
-		collection->shardTableName[0] = '\0';
-	}
-
-	int64 shardKeyHash = 0;
-	bool isShardKeyValueCollationAware = false;
-	bool hasOnlyObjectIdFilter = false;
-	bool forceBsonOutput = true;
-	bool hasShardKeyValueFilter =
-		ComputeShardKeyHashForQueryValue(collection->shardKey, collection->collectionId,
-										 updateSingleSpec->updateOneParams.query,
-										 &shardKeyHash, &isShardKeyValueCollationAware);
-	const char *collationString = updateSingleSpec->updateOneParams.collationString;
-	bool applyCollation = IsCollationApplicable(collationString);
-	bool applyCollationToShardKeyValue = applyCollation &&
-										 isShardKeyValueCollationAware;
-	bool useShardKeyValueFilter = hasShardKeyValueFilter &&
-								  !applyCollationToShardKeyValue;
-	UpdateQueryParserState state = { 0 };
-	if (updateSingleSpec->isMulti)
-	{
-		pgbson *validatorInfo =
-			CheckSchemaValidationEnabled(collection,
-										 batchSpec->bypassDocumentValidation) ?
-			collection->schemaValidator.validator : NULL;
-		BuildUpdateAllMatchingDocumentQuery(collection,
-											&updateSingleSpec->updateOneParams,
-											useShardKeyValueFilter,
-											shardKeyHash,
-											validatorInfo,
-											&hasOnlyObjectIdFilter,
-											forceBsonOutput,
-											&state);
-	}
-	else if (useShardKeyValueFilter)
-	{
-		bool getOriginalDocument = false;
-		initStringInfo(&state.updateQuery);
-
-		appendStringInfo(&state.updateQuery, "WITH base AS (");
-
-		/* This does the SELECT ctid, object_id, document, tableoid FROM .. LIMIT 1 */
-		BuildSelectUpdateCandidateQuery(collection, shardKeyHash,
-										&updateSingleSpec->updateOneParams,
-										getOriginalDocument, &hasOnlyObjectIdFilter,
-										&state);
-
-		appendStringInfo(&state.updateQuery, ") ");
-
-		/* TODO: Apply the actual update with UPDATE document with TID here */
-		appendStringInfo(&state.updateQuery,
-						 "SELECT %s.bson_build_document('n'::text, COUNT(*)::int8, 'nModified'::text, 0::int8, 'ok'::text, 1::float8) AS document FROM base",
-						 CoreSchemaName);
-	}
-	else
-	{
-		if (updateSingleSpec->updateOneParams.isUpsert)
-		{
-			ThrowUpdateUpsertRequiresSingleShardError();
-		}
-
-		bool queryHasNonIdFilters = false;
-		bool isIdFilterCollationAware = false;
-		bson_iter_t queryDocIter;
-		BsonValueInitIterator(updateSingleSpec->updateOneParams.query, &queryDocIter);
-		bson_value_t idFromQueryDocument = { 0 };
-		bool errorOnConflict = false;
-		bool hasObjectIdFilter =
-			TraverseQueryDocumentAndGetId(&queryDocIter, &idFromQueryDocument,
-										  errorOnConflict, &queryHasNonIdFilters,
-										  &isIdFilterCollationAware);
-
-		if (hasObjectIdFilter)
-		{
-			BuildUpdateOneByObjectIdPlanQuery(
-				collection, updateSingleSpec, &idFromQueryDocument,
-				queryHasNonIdFilters, isIdFilterCollationAware, &state);
-		}
-		else if (applyCollationToShardKeyValue)
-		{
-			ThrowCollationSensitiveShardKeyUpdateError();
-		}
-		else
-		{
-			ThrowSingleUpdateRequiresShardKeyOrIdError();
-		}
-	}
-
-	/* Now state.updateQuery has the query string of the raw update. */
-	List *rawParseTree = pg_parse_query(state.updateQuery.data);
-	ParseState *pstate = make_parsestate(NULL);
-	pstate->p_sourcetext = state.updateQuery.data;
-	setup_parse_fixed_parameters(pstate, state.argTypes, state.argCount);
-
-	Query *querytree = transformTopLevelStmt(pstate, linitial(rawParseTree));
-
-	/* This query now has Params for the args. However, we need to build the actual
-	 * Consts.
-	 */
-	querytree = (Query *) query_tree_mutator(querytree, ReplaceQueryTreeArgsForUpdate,
-											 &state, QTW_DONT_COPY_QUERY);
-
-	free_parsestate(pstate);
-	return querytree;
 }

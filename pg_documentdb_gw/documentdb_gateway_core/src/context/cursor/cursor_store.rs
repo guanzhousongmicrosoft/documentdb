@@ -14,8 +14,7 @@ use tokio::{task::JoinHandle, time::Duration};
 use crate::{
     configuration::DynamicConfiguration,
     context::{
-        CursorId, CursorKey, CursorRef, CursorStoreEntry, LogicalSessionId, SessionResourceMetrics,
-        TransactionNumber,
+        CursorId, CursorKey, CursorRef, CursorStoreEntry, LogicalSessionId, TransactionNumber,
     },
     security::principal::Principal,
 };
@@ -24,46 +23,27 @@ use crate::{
 #[derive(Debug)]
 pub struct CursorStore {
     cursors: Arc<DashMap<CursorKey, CursorStoreEntry>>,
-    metrics: SessionResourceMetrics,
     _reaper: Option<JoinHandle<()>>,
 }
 
 impl Default for CursorStore {
-    // This must not be used in the current production pass.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl CursorStore {
-    // This must not be used in the current production pass.
     #[must_use]
     pub fn new() -> Self {
         Self {
             cursors: Arc::new(DashMap::new()),
-            metrics: SessionResourceMetrics::new(false),
             _reaper: None,
         }
     }
 
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.cursors.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.cursors.is_empty()
-    }
-
-    pub fn with_reaper(
-        config: Arc<dyn DynamicConfiguration>,
-        metrics: SessionResourceMetrics,
-        use_reaper: bool,
-    ) -> Self {
+    pub fn with_reaper(config: Arc<dyn DynamicConfiguration>, use_reaper: bool) -> Self {
         let cursors: Arc<DashMap<CursorKey, CursorStoreEntry>> = Arc::new(DashMap::new());
         let cursors_clone = Arc::clone(&cursors);
-        let reaper_metrics = metrics.clone();
         let reaper = use_reaper.then(|| {
             tokio::spawn(async move {
                 let mut cursor_timeout_resolution =
@@ -71,16 +51,7 @@ impl CursorStore {
                 let mut interval = tokio::time::interval(cursor_timeout_resolution);
                 loop {
                     interval.tick().await;
-                    let mut expired_cursors = 0;
-                    cursors_clone.retain(|_, v| {
-                        let is_expired = v.timestamp.elapsed() >= v.cursor_timeout;
-                        if is_expired {
-                            expired_cursors += 1;
-                        }
-                        !is_expired
-                    });
-
-                    reaper_metrics.cursors_expired(expired_cursors);
+                    cursors_clone.retain(|_, v| v.timestamp.elapsed() < v.cursor_timeout);
 
                     let new_timeout_interval =
                         Duration::from_secs(config.cursor_resolution_interval());
@@ -94,7 +65,6 @@ impl CursorStore {
 
         Self {
             cursors,
-            metrics,
             _reaper: reaper,
         }
     }
@@ -121,29 +91,12 @@ impl CursorStore {
     }
 
     pub fn invalidate_cursors_by_collection(&self, db: &str, collection: &str) {
-        let mut invalidated_cursors = 0;
-        self.cursors.retain(|_, v| {
-            let should_remove = v.collection == collection && v.db == db;
-            if should_remove {
-                invalidated_cursors += 1;
-            }
-            !should_remove
-        });
-
-        self.metrics.cursors_invalidated(invalidated_cursors);
+        self.cursors
+            .retain(|_, v| !(v.collection == collection && v.db == db));
     }
 
     pub fn invalidate_cursors_by_database(&self, db: &str) {
-        let mut invalidated_cursors = 0;
-        self.cursors.retain(|_, v| {
-            let should_remove = v.db == db;
-            if should_remove {
-                invalidated_cursors += 1;
-            }
-            !should_remove
-        });
-
-        self.metrics.cursors_invalidated(invalidated_cursors);
+        self.cursors.retain(|_, v| v.db != db);
     }
 
     #[must_use]
@@ -156,10 +109,6 @@ impl CursorStore {
             }
             !should_remove
         });
-
-        self.metrics
-            .cursors_invalidated(invalidated_cursor_ids.len());
-
         invalidated_cursor_ids
     }
 
@@ -176,10 +125,6 @@ impl CursorStore {
             }
             !should_remove
         });
-
-        self.metrics
-            .cursors_invalidated(invalidated_cursor_ids.len());
-
         invalidated_cursor_ids
     }
 
@@ -196,8 +141,6 @@ impl CursorStore {
                 missing_cursors.push(*cursor);
             }
         }
-        self.metrics.cursors_killed(removed_cursors.len());
-
         (removed_cursors, missing_cursors)
     }
 }
@@ -213,7 +156,6 @@ mod tests {
     fn make_store() -> CursorStore {
         CursorStore {
             cursors: Arc::new(DashMap::new()),
-            metrics: SessionResourceMetrics::new(false),
             _reaper: None,
         }
     }

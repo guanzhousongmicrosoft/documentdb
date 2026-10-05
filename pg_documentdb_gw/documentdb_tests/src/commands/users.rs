@@ -216,9 +216,9 @@ pub async fn validate_drop_user_of_reserved_names(
         commands::execute_command_and_validate_error(
             db,
             doc! { "dropUser": *username },
-            2,
-            &format!("User '{username}' is reserved and cannot be dropped."),
-            "BadValue",
+            11,
+            "The specified user does not exist.",
+            "UserNotFound",
         )
         .await;
     }
@@ -237,9 +237,9 @@ pub async fn validate_update_user_of_reserved_names(
                 "updateUser": *username,
                 "pwd": "New$1Pass"
             },
-            2,
-            &format!("User '{username}' is reserved and cannot be modified."),
-            "BadValue",
+            11,
+            "The specified user does not exist.",
+            "UserNotFound",
         )
         .await;
     }

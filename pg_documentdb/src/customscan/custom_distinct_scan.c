@@ -33,12 +33,10 @@
 #include "query/query_operator.h"
 #include "catalog/pg_am.h"
 #include "commands/cursor_common.h"
-#include "utils/feature_counter.h"
 #include "utils/documentdb_errors.h"
 #include "customscan/bson_custom_query_scan.h"
 #include "index_am/index_am_utils.h"
 #include "index_am/documentdb_rum.h"
-#include "opclass/bson_gin_index_mgmt.h"
 #include "utils/query_utils.h"
 #include "commands/commands_common.h"
 #include "api_hooks_def.h"
@@ -55,12 +53,6 @@ typedef enum IndexSkipScanOnEntryStatus
 	IndexSkipScanOnEntryStatus_NoSkipScan = 1,
 	IndexSkipScanOnEntryStatus_SkipScan = 2
 } IndexSkipScanOnEntryStatus;
-
-
-typedef struct GroupFirstAggrefContext
-{
-	List *orderBy;
-} GroupFirstAggrefContext;
 
 
 /*
@@ -106,19 +98,13 @@ static void DistinctQueryScanExplainCustomScan(CustomScanState *node, List *ance
 
 static TupleTableSlot * DistinctQueryScanNext(CustomScanState *node);
 static bool DistinctQueryScanNextRecheck(ScanState *state, TupleTableSlot *slot);
-static List * AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
-										bool hasOrderedGroupFirst);
-static OpExpr * CreateGroupKeyPathCountClause(IndexPath *indexPath,
-											  int32_t numGroupByPathKeys);
-static void InjectGroupKeyPathCountClause(Plan *nestedPlan, OpExpr *metadataExpr);
+static List * AddDistinctCustomPathCore(PlannerInfo *root, List *pathList);
 static bool ContainsDisqualifyingAggref(Node *node, void *context);
 static bool IsSafeFirstAggregateFunctionOid(Oid aggregateFunctionOid);
-static bool HasOnlySafeGroupFirstAggrefs(PlannerInfo *root,
-										 bool *hasOrderBy);
+static bool HasOnlySafeGroupFirstAggrefs(PlannerInfo *root);
 
 extern bool EnableDistinctCustomScan;
 extern bool EnableDistinctScanForGroupFirst;
-extern bool EnableDistinctScanForOrderedGroupFirst;
 extern bool EnableGroupByDistinctScan;
 extern bool EnableDistinctSkipScanOnKey;
 
@@ -180,27 +166,15 @@ AddDistinctCustomScanWrapper(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *
 						 list_length(root->group_pathkeys) == list_length(
 		root->query_pathkeys) &&
 						 !contain_aggs_of_level((Node *) root->parse->targetList, 0);
-	bool hasOrderedGroupFirst = false;
 	bool groupFirstScenario = EnableDistinctScanForGroupFirst &&
 							  root->group_pathkeys != NIL &&
 							  root->parse->havingQual == NULL &&
-							  HasOnlySafeGroupFirstAggrefs(root,
-														   &hasOrderedGroupFirst);
-	if (groupFirstScenario && hasOrderedGroupFirst &&
-		!EnableDistinctScanForOrderedGroupFirst)
-	{
-		ReportFeatureUsage(
-			FEATURE_AGGREGATE_GROUP_ORDERED_FIRST_DISTINCT_SCAN_CANDIDATE);
-		groupFirstScenario = false;
-	}
+							  HasOnlySafeGroupFirstAggrefs(root);
 
 	if (distinctScenario || groupScenario || groupFirstScenario)
 	{
-		rel->pathlist = AddDistinctCustomPathCore(root, rel->pathlist,
-												  hasOrderedGroupFirst);
-		rel->partial_pathlist = AddDistinctCustomPathCore(root,
-														  rel->partial_pathlist,
-														  hasOrderedGroupFirst);
+		rel->pathlist = AddDistinctCustomPathCore(root, rel->pathlist);
+		rel->partial_pathlist = AddDistinctCustomPathCore(root, rel->partial_pathlist);
 	}
 }
 
@@ -215,8 +189,7 @@ AddDistinctCustomScanWrapper(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *
  * and adds a custom path wrapper that contains the queryState.
  */
 static List *
-AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
-						  bool hasOrderedGroupFirst)
+AddDistinctCustomPathCore(PlannerInfo *root, List *pathList)
 {
 	List *customPlanPaths = NIL;
 	ListCell *cell;
@@ -227,10 +200,6 @@ AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
 		if (inputPath->pathtype != T_IndexScan &&
 			inputPath->pathtype != T_IndexOnlyScan)
 		{
-			/*
-			 * TODO: Support MergeAppend and custom wrapper paths after distinct
-			 * execution can safely identify and advance the active index child.
-			 */
 			customPlanPaths = lappend(customPlanPaths, inputPath);
 			continue;
 		}
@@ -242,45 +211,11 @@ AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
 		 * intend to deduplicate on. For DISTINCT that's distinct_pathkeys; for
 		 * GROUP BY (with no aggregates) that's group_pathkeys.
 		 */
-		int targetPathKeyLength;
-		if (hasOrderedGroupFirst)
-		{
-#if PG_VERSION_NUM >= 160000
-			targetPathKeyLength = root->num_groupby_pathkeys;
-#else
-			targetPathKeyLength = list_length(root->group_pathkeys);
-#endif
-		}
-		else
-		{
-			targetPathKeyLength = root->distinct_pathkeys != NIL ?
+		int targetPathKeyLength = root->distinct_pathkeys != NIL ?
 								  list_length(root->distinct_pathkeys) :
 								  list_length(root->group_pathkeys);
-		}
 
-		if (hasOrderedGroupFirst)
-		{
-			/*
-			 * Ordered $first is safe only when this path supplies the complete
-			 * group-plus-accumulator ordering. PG15 does not expose the
-			 * accumulator ordering through the index path.
-			 */
-#if PG_VERSION_NUM < 160000
-			customPlanPaths = lappend(customPlanPaths, inputPath);
-			continue;
-#else
-			if (root->query_pathkeys == NIL ||
-				list_length(indexPath->indexorderbys) != list_length(
-					root->query_pathkeys) ||
-				!pathkeys_contained_in(root->query_pathkeys,
-									   indexPath->path.pathkeys))
-			{
-				customPlanPaths = lappend(customPlanPaths, inputPath);
-				continue;
-			}
-#endif
-		}
-		else if (list_length(indexPath->indexorderbys) != targetPathKeyLength)
+		if (list_length(indexPath->indexorderbys) != targetPathKeyLength)
 		{
 			customPlanPaths = lappend(customPlanPaths, inputPath);
 			continue;
@@ -298,15 +233,6 @@ AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
 		/* wrap the path in a custom path */
 		CustomPath *customPath = makeNode(CustomPath);
 		customPath->methods = &DistinctQueryScanPathMethods;
-		if (hasOrderedGroupFirst && EnableDistinctSkipScanOnKey)
-		{
-			OpExpr *metadataExpr = CreateGroupKeyPathCountClause(
-				indexPath, targetPathKeyLength);
-			if (metadataExpr != NULL)
-			{
-				customPath->custom_private = list_make1(metadataExpr);
-			}
-		}
 
 		Path *path = &customPath->path;
 		path->pathtype = T_CustomScan;
@@ -345,129 +271,15 @@ AddDistinctCustomPathCore(PlannerInfo *root, List *pathList,
 }
 
 
-static void
-InjectGroupKeyPathCountClause(Plan *nestedPlan, OpExpr *metadataExpr)
-{
-	CHECK_FOR_INTERRUPTS();
-	check_stack_depth();
-
-	OpExpr *indexExpr = NULL;
-	if (IsA(nestedPlan, IndexScan) || IsA(nestedPlan, IndexOnlyScan))
-	{
-		indexExpr = copyObject(metadataExpr);
-		Var *indexVar = (Var *) linitial(indexExpr->args);
-		indexVar->varno = INDEX_VAR;
-		indexVar->varnosyn = INDEX_VAR;
-		indexVar->varattno = 1;
-		indexVar->varattnosyn = 1;
-	}
-
-	if (IsA(nestedPlan, IndexScan))
-	{
-		IndexScan *indexScan = (IndexScan *) nestedPlan;
-		indexScan->indexqual = lcons(indexExpr, indexScan->indexqual);
-		indexScan->indexqualorig = lcons(copyObject(metadataExpr),
-										 indexScan->indexqualorig);
-	}
-	else if (IsA(nestedPlan, IndexOnlyScan))
-	{
-		IndexOnlyScan *indexOnlyScan = (IndexOnlyScan *) nestedPlan;
-		indexOnlyScan->indexqual = lcons(indexExpr, indexOnlyScan->indexqual);
-		indexOnlyScan->recheckqual = lcons(copyObject(metadataExpr),
-										   indexOnlyScan->recheckqual);
-	}
-	else if (IsA(nestedPlan, CustomScan))
-	{
-		CustomScan *customScan = (CustomScan *) nestedPlan;
-		if (customScan->custom_plans == NIL)
-		{
-			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-							errmsg("distinct custom scan requires an index scan")));
-		}
-
-		ListCell *childCell;
-		foreach(childCell, customScan->custom_plans)
-		{
-			Plan *childPlan = lfirst(childCell);
-			InjectGroupKeyPathCountClause(childPlan, metadataExpr);
-		}
-	}
-	else
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg("distinct custom scan requires an index scan")));
-	}
-}
-
-
-static OpExpr *
-CreateGroupKeyPathCountClause(IndexPath *indexPath, int32_t numGroupByPathKeys)
-{
-	/*
-	 * The logical group-key count is not necessarily the number of physical
-	 * index paths to preserve. Equality-constrained paths may precede or sit
-	 * between group keys, so resolve the last group key to its index position.
-	 */
-	if (numGroupByPathKeys <= 0 ||
-		list_length(indexPath->indexorderbys) < numGroupByPathKeys)
-	{
-		return NULL;
-	}
-
-	OpExpr *lastGroupOrderBy = list_nth(indexPath->indexorderbys,
-										numGroupByPathKeys - 1);
-	if (!IsA(lastGroupOrderBy, OpExpr) ||
-		list_length(lastGroupOrderBy->args) != 2 ||
-		!IsA(lsecond(lastGroupOrderBy->args), Const))
-	{
-		return NULL;
-	}
-
-	Const *orderByConst = (Const *) lsecond(lastGroupOrderBy->args);
-	if (orderByConst->constisnull)
-	{
-		return NULL;
-	}
-
-	pgbsonelement orderByElement;
-	if (!TryGetSinglePgbsonElementFromPgbson(
-			DatumGetPgBson(orderByConst->constvalue), &orderByElement))
-	{
-		return NULL;
-	}
-
-	int8_t sortDirectionIgnored = 0;
-	int32_t lastGroupIndexPath = GetCompositeOpClassColumnNumber(
-		orderByElement.path, indexPath->indexinfo->opclassoptions[0],
-		&sortDirectionIgnored);
-	if (lastGroupIndexPath < 0)
-	{
-		return NULL;
-	}
-
-	const char *firstPath = GetCompositeFirstIndexPath(
-		indexPath->indexinfo->opclassoptions[0]);
-	int varlevelsup = 0;
-	Var *documentVar = makeVar(indexPath->path.parent->relid,
-							   DOCUMENT_DATA_TABLE_DOCUMENT_VAR_ATTR_NUMBER,
-							   BsonTypeId(), DOCUMENT_DATA_TABLE_DOCUMENT_VAR_TYPMOD,
-							   DOCUMENT_DATA_TABLE_DOCUMENT_VAR_COLLATION, varlevelsup);
-	return CreateGroupKeyPathCountOpExpr(
-		(Expr *) documentVar, firstPath, strlen(firstPath),
-		lastGroupIndexPath + 1);
-}
-
-
 /*
  * expression_tree_walker callback that returns true (aborting the walk) as
  * soon as it encounters an Aggref that is NOT safe to combine with
  * distinct-scan key skipping. An Aggref is considered safe when:
  *
- *   - aggfnoid is a supported $first variant, AND
- *   - it has no aggdistinct / aggfilter.
- *
- * An explicit aggorder is recorded for path-level validation. It is safe only
- * when the selected index path supplies the complete ordering.
+ *   - aggfnoid is a $first variant that picks the first input row for the
+ *     group without consulting an explicit sort spec, AND
+ *   - it has no explicit aggorder / aggdistinct / aggfilter (which would
+ *     change semantics).
  */
 static bool
 ContainsDisqualifyingAggref(Node *node, void *context)
@@ -481,8 +293,6 @@ ContainsDisqualifyingAggref(Node *node, void *context)
 	{
 		Aggref *aggref = (Aggref *) node;
 		Oid aggregateFunctionOid = aggref->aggfnoid;
-		GroupFirstAggrefContext *aggrefContext =
-			(GroupFirstAggrefContext *) context;
 
 		/*
 		 * Allow an extension-provided hook to resolve the Aggref to its
@@ -495,28 +305,21 @@ ContainsDisqualifyingAggref(Node *node, void *context)
 		{
 			get_effective_aggregate_function_oid_hook(aggref, &aggregateFunctionOid);
 		}
+
 		if (!IsSafeFirstAggregateFunctionOid(aggregateFunctionOid))
 		{
 			/* any other accumulator (including sort-aware bsonfirst) disqualifies */
 			return true;
 		}
 
-		if (aggref->aggdistinct != NIL || aggref->aggfilter != NULL)
+		if (aggref->aggorder != NIL || aggref->aggdistinct != NIL ||
+			aggref->aggfilter != NULL)
 		{
-			/* DISTINCT or FILTER inside the accumulator changes semantics. */
+			/*
+			 * Explicit ORDER BY / DISTINCT / FILTER inside the accumulator
+			 * changes semantics.
+			 */
 			return true;
-		}
-
-		if (aggref->aggorder != NIL)
-		{
-			if (aggrefContext->orderBy == NIL)
-			{
-				aggrefContext->orderBy = aggref->aggorder;
-			}
-			else if (!equal(aggrefContext->orderBy, aggref->aggorder))
-			{
-				return true;
-			}
 		}
 
 		/* Aggref is OK; do not recurse into its sub-expressions */
@@ -530,16 +333,15 @@ ContainsDisqualifyingAggref(Node *node, void *context)
 static bool
 IsSafeFirstAggregateFunctionOid(Oid aggregateFunctionOid)
 {
-	return aggregateFunctionOid == BsonFirstWithExprAggregateFunctionOid() ||
-		   aggregateFunctionOid == BsonFirstWithExprInternalAggregateFunctionOid();
+	return aggregateFunctionOid == BsonFirstOnSortedAggregateFunctionOid() ||
+		   aggregateFunctionOid == BsonFirstWithExprAggregateFunctionOid();
 }
 
 
 static bool
-HasOnlySafeGroupFirstAggrefs(PlannerInfo *root, bool *hasOrderBy)
+HasOnlySafeGroupFirstAggrefs(PlannerInfo *root)
 {
 	ListCell *aggInfoCell;
-	GroupFirstAggrefContext aggrefContext = { 0 };
 
 	/*
 	 * We rely exclusively on root->agginfos to enumerate the query's
@@ -572,7 +374,7 @@ HasOnlySafeGroupFirstAggrefs(PlannerInfo *root, bool *hasOrderBy)
 		foreach(aggrefCell, aggInfo->aggrefs)
 		{
 			Aggref *aggref = (Aggref *) lfirst(aggrefCell);
-			if (ContainsDisqualifyingAggref((Node *) aggref, &aggrefContext))
+			if (ContainsDisqualifyingAggref((Node *) aggref, NULL))
 			{
 				return false;
 			}
@@ -581,8 +383,7 @@ HasOnlySafeGroupFirstAggrefs(PlannerInfo *root, bool *hasOrderBy)
 		}
 #else
 		Aggref *aggref = aggInfo->representative_aggref;
-		if (aggref == NULL ||
-			ContainsDisqualifyingAggref((Node *) aggref, &aggrefContext))
+		if (aggref == NULL || ContainsDisqualifyingAggref((Node *) aggref, NULL))
 		{
 			return false;
 		}
@@ -591,7 +392,6 @@ HasOnlySafeGroupFirstAggrefs(PlannerInfo *root, bool *hasOrderBy)
 #endif
 	}
 
-	*hasOrderBy = aggrefContext.orderBy != NIL;
 	return foundSafeAggref;
 }
 
@@ -615,8 +415,8 @@ DistinctQueryScanPlanCustomPath(PlannerInfo *root,
 	/* Initialize and copy necessary data */
 	cscan->methods = &DistinctQueryScanMethods;
 
-	/* Planner-only metadata is consumed when the nested index plan is built. */
-	cscan->custom_private = NIL;
+	/* The first item is the continuation - we propagate it forward */
+	cscan->custom_private = best_path->custom_private;
 	cscan->custom_plans = custom_plans;
 
 	/* Only one plan is allowed here */
@@ -624,11 +424,6 @@ DistinctQueryScanPlanCustomPath(PlannerInfo *root,
 
 	/* The main plan comes in first */
 	Plan *nestedPlan = linitial(custom_plans);
-	if (best_path->custom_private != NIL)
-	{
-		InjectGroupKeyPathCountClause(
-			nestedPlan, (OpExpr *) linitial(best_path->custom_private));
-	}
 
 	/* Push the projection down to the inner plan */
 	if (tlist != NIL)

@@ -593,6 +593,7 @@ select 1 from documentdb_api.insert_one('db', 'removeme', '{"a":10,"_id":10}');
 -- validate _id-only delete_one generates optimized SQL (no @@ operator)
 begin;
 set local citus.log_remote_commands to on;
+set local documentdb.enableDeleteOnePlanCacheOptimization to true;
 -- _id-only filter: should NOT have @@ operator, should have object_id = $2
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6},"limit":1}]}');
 -- _id with other filters: should STILL have @@ operator AND object_id
@@ -605,6 +606,7 @@ rollback;
 -- validate legacy _id-only delete_one generates SQL with @@ operator
 begin;
 set local citus.log_remote_commands to on;
+set local documentdb.enableDeleteOnePlanCacheOptimization to false;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6},"limit":1}]}');
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6, "a":5},"limit":1}]}');
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{},"limit":1}]}');
@@ -630,6 +632,7 @@ select documentdb_api.shard_collection('db', 'removeme', '{"_id":"hashed"}', fal
 -- validate _id-only delete_one generates optimized SQL (no @@ operator)
 begin;
 set local citus.log_remote_commands to on;
+set local documentdb.enableDeleteOnePlanCacheOptimization to true;
 -- _id-only filter: should NOT have @@ operator, should have object_id = $2
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6},"limit":1}]}');
 -- _id with other filters: should STILL have @@ operator AND object_id
@@ -640,6 +643,7 @@ rollback;
 -- validate legacy _id-only delete_one generates SQL with @@ operator
 begin;
 set local citus.log_remote_commands to on;
+set local documentdb.enableDeleteOnePlanCacheOptimization to false;
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6},"limit":1}]}');
 select documentdb_api.delete('db', '{"delete":"removeme", "deletes":[{"q":{"_id":6, "a":6},"limit":1}]}');
 reset citus.log_remote_commands;

@@ -1,7 +1,7 @@
 SET search_path TO documentdb_core,documentdb_api,documentdb_api_catalog,documentdb_api_internal;
-SET citus.next_shard_id TO 95800000;
-SET documentdb.next_collection_id TO 95800;
-SET documentdb.next_collection_index_id TO 95800;
+SET citus.next_shard_id TO 95650000;
+SET documentdb.next_collection_id TO 95650;
+SET documentdb.next_collection_index_id TO 95650;
 
 SET documentdb_api.forceUseIndexIfAvailable TO on;
 SET documentdb.defaultUseCompositeOpClass TO on;
@@ -123,7 +123,7 @@ $cmd$);
 END;
 
 -- ======================================================================
--- SECTION 4: Predicate plans on sharded coll_delete_d with collation
+-- SECTION 4: Delete predicate plans on sharded coll_delete_d with collation
 -- ======================================================================
 
 SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_delete_d', '{"_id": "dog", "a":"dog"}');
@@ -141,7 +141,7 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_idx_dist_
                    "collation": {"locale": "en", "strength": 1} }] }', TRUE);
 END;
 
--- Collation-aware shard-key predicate
+-- deleteMany predicate (collation-aware on the shard key field)
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -153,7 +153,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- Predicate without an _id or shard-key filter
+-- deleteOne predicate when no _id and no shard-key filter
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -165,7 +165,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- Collation-aware shard-key value predicate
+-- deleteOne predicate with collation-aware shard key value filter
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -177,7 +177,7 @@ EXPLAIN (COSTS OFF) SELECT document FROM documentdb_api.collection('coll_q_idx_d
 $cmd$);
 END;
 
--- Predicate with both _id and shard-key filters
+-- deleteOne predicate with both _id and shard key filter
 BEGIN;
 SET LOCAL documentdb_core.enableCollation TO on;
 SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -190,7 +190,7 @@ $cmd$);
 END;
 
 -- ======================================================================
--- SECTION 5: Predicate plans on sharded single_field_d with collation
+-- SECTION 5: Delete predicate plans on sharded single_field_d with collation
 -- ======================================================================
 
 BEGIN;
@@ -345,278 +345,5 @@ SET LOCAL documentdb.enableExtendedExplainPlans TO on;
 SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
 EXPLAIN (COSTS OFF) SELECT document FROM bson_aggregation_pipeline('coll_q_idx_dist_explain_db',
     '{ "aggregate": "coll_graph_src_d", "pipeline": [ { "$graphLookup": { "from": "coll_graph_dst_d", "startWith": "$pet", "connectFromField": "name", "connectToField": "_id", "as": "destinations", "depthField": "depth" } } ],  "collation": { "locale": "en", "strength" : 1} }')
-$cmd$);
-END;
-
--- ======================================================================
--- SECTION: distinct with a collation-aware index across shards
--- ======================================================================
-SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 1, "a": "cafe" }');
-SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 2, "a": "CAFE" }');
-SELECT documentdb_api.insert_one('coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": 3, "a": "tea" }');
-SELECT documentdb_api.shard_collection(
-  'coll_q_idx_dist_explain_db', 'coll_distinct_d', '{ "_id": "hashed" }', false);
-
-BEGIN;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SELECT documentdb_api_internal.create_indexes_non_concurrently(
-  'coll_q_idx_dist_explain_db',
-  '{ "createIndexes": "coll_distinct_d", "indexes": [ { "key": { "a": 1 }, "name": "idx_a_en_s1", "collation": { "locale": "en", "strength": 1 } } ] }',
-  TRUE);
-END;
-
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_distinct(
-  'coll_q_idx_dist_explain_db',
-  '{ "distinct": "coll_distinct_d", "key": "a", "collation": { "locale": "en", "strength": 1 } }')
-$cmd$);
-END;
-
--- An incompatible collation cannot borrow ordering from the strength-1 index.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL documentdb.enable_distinct_exists_filter_pushdown TO on;
-SET LOCAL enable_seqscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_distinct(
-  'coll_q_idx_dist_explain_db',
-  '{ "distinct": "coll_distinct_d", "key": "a", "collation": { "locale": "en", "strength": 2 } }')
-$cmd$);
-END;
-
--- ======================================================================
--- SECTION: sorted update routing uses the matching compound index
--- ======================================================================
-SELECT documentdb_api.insert_one(
-  'coll_q_idx_dist_explain_db', 'coll_update_route_d',
-  '{ "_id": "cat", "name": "cat", "bucket": 1, "rank": 10 }');
-SELECT documentdb_api.insert_one(
-  'coll_q_idx_dist_explain_db', 'coll_update_route_d',
-  '{ "_id": "CAT", "name": "CAT", "bucket": 1, "rank": 1 }');
-SELECT documentdb_api.shard_collection(
-  'coll_q_idx_dist_explain_db', 'coll_update_route_d',
-  '{ "name": "hashed" }', false);
-
-SELECT pg_catalog.set_config(
-  'documentdb.alternate_index_handler_name', 'extended_rum', false), extname
-FROM pg_extension
-WHERE extname = 'documentdb_extended_rum';
-
-BEGIN;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.defaultUseCompositeOpClass TO on;
-SELECT documentdb_api_internal.create_indexes_non_concurrently(
-  'coll_q_idx_dist_explain_db',
-  '{ "createIndexes": "coll_update_route_d", "indexes": [
-     { "key": { "name": 1 },
-       "name": "idx_update_route_name_en_s1",
-       "collation": { "locale": "en", "strength": 1 } },
-     { "key": { "name": 1 },
-       "name": "idx_update_route_name_binary" },
-     { "key": { "_id": 1, "rank": 1 },
-       "name": "idx_update_route_id_rank_en_s1",
-       "collation": { "locale": "en", "strength": 1 } },
-     { "key": { "_id": 1, "bucket": 1, "rank": -1 },
-       "name": "idx_update_route_id_bucket_rank_en_s1",
-       "collation": { "locale": "en", "strength": 1 } }
-   ] }',
-  TRUE);
-END;
-
-RESET documentdb.alternate_index_handler_name;
-
--- Generated update-many plans must fan out when a non-simple collation changes
--- the meaning of the shard-key equality.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "name": "CaT" }, "u": { "$set": { "selected": "many" } }, "multi": true, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-END;
-
--- Generated single-update plans use the same global sorted lookup as runtime.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "CaT" }, "u": { "$set": { "selected": "one" } }, "sort": { "rank": 1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-END;
-
--- A non-string _id keeps the physical equality filter while allowing the
--- matching collated compound index to provide the requested ordering.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": 1 }, "u": { "$set": { "selected": "numeric-id" } }, "sort": { "rank": 1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-END;
-
--- Generated routing failures preserve the runtime SQLSTATE and message.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-DO $capture$
-BEGIN
-  EXECUTE $explain$
-    EXPLAIN (COSTS OFF)
-    SELECT document FROM bson_aggregation_update(
-      'coll_q_idx_dist_explain_db',
-      '{ "update": "coll_update_route_d", "updates": [ { "q": { "name": "CaT" }, "u": { "$set": { "selected": "one" } }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-  $explain$;
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'SQLSTATE: %, MESSAGE: %', SQLSTATE, SQLERRM;
-END;
-$capture$;
-END;
-
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-DO $capture$
-BEGIN
-  EXECUTE $explain$
-    EXPLAIN (COSTS OFF)
-    SELECT document FROM bson_aggregation_update(
-      'coll_q_idx_dist_explain_db',
-      '{ "update": "coll_update_route_d", "updates": [ { "q": { "rank": 10 }, "u": { "$set": { "selected": "upsert" } }, "multi": false, "upsert": true, "collation": { "locale": "simple" } } ] }')
-  $explain$;
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'SQLSTATE: %, MESSAGE: %', SQLSTATE, SQLERRM;
-END;
-$capture$;
-END;
-
-DO $capture$
-BEGIN
-  EXECUTE $explain$
-    EXPLAIN (COSTS OFF)
-    SELECT document FROM bson_aggregation_update(
-      'coll_q_idx_dist_explain_db',
-      '{ "update": "coll_update_route_d", "updates": [ { "q": { "rank": 10 }, "u": { "$set": { "selected": "one" } }, "multi": false } ] }')
-  $explain$;
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'SQLSTATE: %, MESSAGE: %', SQLSTATE, SQLERRM;
-END;
-$capture$;
-
--- Simple collation preserves one-shard pruning for generated updates.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "name": "cat" }, "u": { "$set": { "selected": "simple-one" } }, "multi": false, "collation": { "locale": "simple" } } ] }')
-$cmd$);
-
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "name": "cat" }, "u": { "$set": { "selected": "simple-many" } }, "multi": true, "collation": { "locale": "simple" } } ] }')
-$cmd$);
-END;
-
--- An exact _id lookup without a sort uses the physical index. The deterministic
--- tie-break sorts only the bounded set of candidate rows.
-BEGIN;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "cat" }, "u": { "$set": { "selected": "binary-id" } }, "multi": false } ] }')
-$cmd$);
-END;
-
--- A collation-sensitive lookup without a sort uses the matching index prefix. The
--- deterministic tie-break sorts only the bounded set of candidate rows.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "CaT" }, "u": { "$set": { "selected": "collated-id" } }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-END;
-
--- A simple-collation _id lookup keeps the physical index and applies the
--- requested sort globally.
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "cat" }, "u": { "$set": { "selected": "simple-id" } }, "sort": { "rank": 1 }, "multi": false, "collation": { "locale": "simple" } } ] }')
-$cmd$);
-END;
-
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "CaT" }, "u": { "$set": { "selected": "compound" } }, "sort": { "bucket": 1, "rank": -1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
-$cmd$);
-END;
-
-BEGIN;
-SET LOCAL documentdb_core.enableCollation TO on;
-SET LOCAL documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
-SET LOCAL documentdb.enableExtendedExplainPlans TO on;
-SET LOCAL enable_seqscan TO off;
-SET LOCAL enable_bitmapscan TO off;
-SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$
-EXPLAIN (COSTS OFF, VERBOSE ON)
-SELECT document FROM bson_aggregation_update(
-  'coll_q_idx_dist_explain_db',
-  '{ "update": "coll_update_route_d", "updates": [ { "q": { "_id": "CaT" }, "u": { "$set": { "selected": "descending" } }, "sort": { "rank": -1 }, "multi": false, "collation": { "locale": "en", "strength": 1 } } ] }')
 $cmd$);
 END;

@@ -22,7 +22,6 @@
 #include "utils/documentdb_errors.h"
 #include "commands/parse_error.h"
 #include "commands/update.h"
-#include "commands/write_commands.h"
 #include "metadata/collection.h"
 #include "query/query_operator.h"
 #include "sharding/sharding.h"
@@ -133,16 +132,6 @@ static pgbson * BuildResponseMessage(FindAndModifyResult *result);
 extern bool SkipFailOnCollation;
 extern bool EnableBypassDocumentValidation;
 extern bool EnableSchemaValidation;
-
-
-Query *
-GenerateFindAndModifyQuery(text *database, pgbson *findAndModifySpec,
-						   bool setStatementTimeout)
-{
-	ereport(ERROR, (errmsg(
-						"bson_aggregation_find_and_modify planner replacement is not implemented yet")));
-}
-
 
 /*
  * command_find_and_modify implements findAndModify command.

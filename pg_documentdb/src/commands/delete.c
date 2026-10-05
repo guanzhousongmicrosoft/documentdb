@@ -15,14 +15,7 @@
 #include "access/xact.h"
 #include "executor/spi.h"
 #include "lib/stringinfo.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "parser/analyze.h"
-#include "parser/parse_node.h"
-#include "parser/parse_param.h"
-#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
-#include "utils/lsyscache.h"
 #include "utils/portal.h"
 #include "utils/snapmgr.h"
 
@@ -34,7 +27,6 @@
 #include "commands/commands_common.h"
 #include "commands/delete.h"
 #include "commands/parse_error.h"
-#include "commands/write_commands.h"
 #include "metadata/collection.h"
 #include "metadata/metadata_cache.h"
 #include "query/query_operator.h"
@@ -50,6 +42,7 @@
 #include "utils/query_utils.h"
 #include "api_hooks.h"
 
+extern bool EnableDeleteOnePlanCacheOptimization;
 extern bool EnableCommutativeDeleteMany;
 
 
@@ -107,27 +100,7 @@ typedef struct
 
 	/* Memory context to write results/errors to */
 	MemoryContext resultMemoryContext;
-
-	/* Logical index names resolved while processing this request */
-	HTAB *indexNameCache;
 } BatchDeletionResult;
-
-
-/*
- * DeleteQueryParserState stores a generated delete query and its bound parameters.
- */
-typedef struct
-{
-	StringInfoData deleteQuery;
-	int argCount;
-	Oid *argTypes;
-	Datum *argValues;
-	char *argNulls;
-	uint64 preparedQueryKey;
-	int sortFieldsDocumentsLength;
-	pgbson *variableSpecBson;
-	pgbson *querySpecBson;
-} DeleteQueryParserState;
 
 PG_FUNCTION_INFO_V1(command_delete);
 PG_FUNCTION_INFO_V1(command_delete_one);
@@ -170,14 +143,6 @@ static uint64 DeleteAllMatchingDocuments(MongoCollection *collection, pgbson *qu
 										 const char *collationString,
 										 bool hasShardKeyValueFilter,
 										 int64 shardKeyHash);
-static void FormDeleteAllMatchingDocumentsQuery(MongoCollection *collection,
-												pgbson *queryDoc,
-												const bson_value_t *variableSpec,
-												const char *collationString,
-												bool hasShardKeyValueFilter,
-												int64 shardKeyHash,
-												bool forceBsonOutput,
-												DeleteQueryParserState *state);
 static void DeleteOneInternal(MongoCollection *collection,
 							  DeleteOneParams *deleteOneParams,
 							  int64 shardKeyHash,
@@ -189,9 +154,7 @@ static void DeleteOneObjectId(MongoCollection *collection,
 							  bool queryHasNonIdFilters,
 							  bool forceInlineWrites,
 							  text *transactionId, DeleteOneResult *result);
-static List * ValidateQueryDocuments(BatchDeletionSpec *batchSpec,
-									 MemoryContext requestContext,
-									 HTAB **indexNameCache);
+static List * ValidateQueryDocuments(BatchDeletionSpec *batchSpec);
 static pgbson * BuildResponseMessage(BatchDeletionResult *batchResult);
 static void DeleteOneInternalCore(MongoCollection *collection, int64 shardKeyHash,
 								  DeleteOneParams *deleteOneParams,
@@ -215,11 +178,6 @@ static pgbson * SerializeDeleteWorkerSpecForUnsharded(BatchDeletionSpec *batchSp
 static Datum CommandDeleteCore(PG_FUNCTION_ARGS, WriteMode writeMode,
 							   MemoryContext allocContext);
 static inline void ReportDeleteFeatureUsage(int batchSize);
-static Node * ReplaceQueryTreeArgsForDelete(Node *node, void *context);
-static Query * TransformDeleteQuery(DeleteQueryParserState *state);
-static void FormDeleteOneQuery(MongoCollection *collection,
-							   DeleteOneParams *deleteOneParams,
-							   int64 shardKeyHash, DeleteQueryParserState *state);
 
 
 /*
@@ -354,11 +312,7 @@ CommandDeleteCore(PG_FUNCTION_ARGS, WriteMode writeMode, MemoryContext allocCont
 		 */
 		batchResult.ok = 1;
 		batchResult.rowsDeleted = 0;
-		batchResult.writeErrors = ValidateQueryDocuments(batchSpec,
-														 batchResult.
-														 resultMemoryContext,
-														 &batchResult.
-														 indexNameCache);
+		batchResult.writeErrors = ValidateQueryDocuments(batchSpec);
 		batchResponse = BuildResponseMessage(&batchResult);
 	}
 
@@ -651,15 +605,14 @@ BuildDeletionSpec(bson_iter_t *deletionIter, const bson_value_t *variableSpec)
 		{
 			ReportFeatureUsage(FEATURE_COLLATION);
 
-			const bson_value_t *collationValue = bson_iter_value(deletionIter);
 			if (EnableCollation)
 			{
-				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
-						"delete.collation", deletionIter))
-				{
-					ParseAndGetCollationString(collationValue,
-											   collationString);
-				}
+				EnsureTopLevelFieldType("delete.collation", deletionIter,
+										BSON_TYPE_DOCUMENT);
+
+				const bson_value_t *collationValue = bson_iter_value(deletionIter);
+				ParseAndGetCollationString(collationValue,
+										   collationString);
 			}
 			else
 			{
@@ -821,11 +774,7 @@ DoSingleDeletion(MongoCollection *collection,
 		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  deleteIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  deleteIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -886,11 +835,7 @@ DoSingleDeletionWithSubTxn(MongoCollection *collection,
 		MemoryContextSwitchTo(batchResult->resultMemoryContext);
 		batchResult->writeErrors = lappend(batchResult->writeErrors,
 										   GetWriteErrorFromErrorData(errorData,
-																	  deleteIndex,
-																	  batchResult->
-																	  resultMemoryContext,
-																	  &batchResult->
-																	  indexNameCache));
+																	  deleteIndex));
 		MemoryContextSwitchTo(oldContext);
 		FreeErrorData(errorData);
 		isSuccess = false;
@@ -1027,15 +972,11 @@ ProcessDeletion(MongoCollection *collection, DeletionSpec *deletionSpec,
 /*
  * DeleteAllMatchingDocuments deletes all documents that match the query.
  */
-static void
-FormDeleteAllMatchingDocumentsQuery(MongoCollection *collection,
-									pgbson *queryDoc,
-									const bson_value_t *variableSpec,
-									const char *collationString,
-									bool hasShardKeyValueFilter,
-									int64 shardKeyHash,
-									bool forceBsonOutput,
-									DeleteQueryParserState *state)
+static uint64
+DeleteAllMatchingDocuments(MongoCollection *collection, pgbson *queryDoc,
+						   const bson_value_t *variableSpec,
+						   const char *collationString, bool hasShardKeyValueFilter,
+						   int64 shardKeyHash)
 {
 	uint64 collectionId = collection->collectionId;
 
@@ -1054,23 +995,24 @@ FormDeleteAllMatchingDocumentsQuery(MongoCollection *collection,
 		applyObjectIdFilter = !isIdFilterCollationAware;
 	}
 
-	state->argCount = 0;
+	int argCount = 0;
 	int nextSqlArgIndex = 1;
+	uint64 rowsDeleted = 0;
+	StringInfoData deleteQuery;
 
-	initStringInfo(&state->deleteQuery);
-	appendStringInfoString(&state->deleteQuery,
-						   forceBsonOutput ? "WITH d AS (DELETE FROM " :
-						   "DELETE FROM ");
+	SPI_connect();
+
+	initStringInfo(&deleteQuery);
+	appendStringInfo(&deleteQuery, "DELETE FROM ");
 
 	if (collection->shardTableName[0] != '\0')
 	{
-		appendStringInfo(&state->deleteQuery, " %s.%s", ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.%s", ApiDataSchemaName,
 						 collection->shardTableName);
 	}
 	else
 	{
-		appendStringInfo(&state->deleteQuery, " %s.documents_" UINT64_FORMAT,
-						 ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.documents_" UINT64_FORMAT, ApiDataSchemaName,
 						 collectionId);
 	}
 
@@ -1086,37 +1028,36 @@ FormDeleteAllMatchingDocumentsQuery(MongoCollection *collection,
 	if (applyVariableSpec || applyCollation)
 	{
 		/* utilize the collation and/or variables in matching the document */
-		appendStringInfo(&state->deleteQuery,
+		appendStringInfo(&deleteQuery,
 						 " WHERE %s.bson_query_match(document, $1::%s.bson, $2::%s.bson, $3::text)",
 						 DocumentDBApiInternalSchemaName, CoreSchemaName, CoreSchemaName);
 
-		state->argCount += 3;
+		argCount += 3;
 		nextSqlArgIndex = 4;
 	}
 	else
 	{
-		appendStringInfo(&state->deleteQuery,
+		appendStringInfo(&deleteQuery,
 						 " WHERE document OPERATOR(%s.@@) $1::%s",
 						 ApiCatalogSchemaName, FullBsonTypeName);
 
-		state->argCount++;
+		argCount++;
 		nextSqlArgIndex = 2;
 	}
 
-	state->preparedQueryKey = (applyVariableSpec || applyCollation) ?
-							  QUERY_DELETE_WITH_FILTER_LET_AND_COLLATION :
-							  QUERY_DELETE_WITH_FILTER;
+	uint64 planId = (applyVariableSpec || applyCollation) ?
+					QUERY_DELETE_WITH_FILTER_LET_AND_COLLATION :
+					QUERY_DELETE_WITH_FILTER;
 
 	int shardKeyArgIndex = -1;
 	if (hasShardKeyValueFilter)
 	{
-		state->preparedQueryKey = (applyVariableSpec || applyCollation) ?
-								  QUERY_DELETE_WITH_FILTER_SHARDKEY_LET_AND_COLLATION :
-								  QUERY_DELETE_WITH_FILTER_SHARDKEY;
-		appendStringInfo(&state->deleteQuery, " AND shard_key_value = $%d",
-						 nextSqlArgIndex);
+		planId = (applyVariableSpec || applyCollation) ?
+				 QUERY_DELETE_WITH_FILTER_SHARDKEY_LET_AND_COLLATION :
+				 QUERY_DELETE_WITH_FILTER_SHARDKEY;
+		appendStringInfo(&deleteQuery, " AND shard_key_value = $%d", nextSqlArgIndex);
 
-		state->argCount++;
+		argCount++;
 		shardKeyArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
 	}
@@ -1126,107 +1067,73 @@ FormDeleteAllMatchingDocumentsQuery(MongoCollection *collection,
 	{
 		if (hasShardKeyValueFilter)
 		{
-			state->preparedQueryKey = (applyVariableSpec || applyCollation) ?
-									  QUERY_DELETE_WITH_FILTER_SHARDKEY_ID_LET_AND_COLLATION
-									  :
-									  QUERY_DELETE_WITH_FILTER_SHARDKEY_ID;
+			planId = (applyVariableSpec || applyCollation) ?
+					 QUERY_DELETE_WITH_FILTER_SHARDKEY_ID_LET_AND_COLLATION :
+					 QUERY_DELETE_WITH_FILTER_SHARDKEY_ID;
 
-			appendStringInfo(&state->deleteQuery,
+			appendStringInfo(&deleteQuery,
 							 " AND object_id OPERATOR(%s.=) $%d::%s",
 							 CoreSchemaName, nextSqlArgIndex, FullBsonTypeName);
 		}
 		else
 		{
-			state->preparedQueryKey = (applyVariableSpec || applyCollation) ?
-									  QUERY_DELETE_WITH_FILTER_ID_LET_AND_COLLATION :
-									  QUERY_DELETE_WITH_FILTER_ID;
+			planId = (applyVariableSpec || applyCollation) ?
+					 QUERY_DELETE_WITH_FILTER_ID_LET_AND_COLLATION :
+					 QUERY_DELETE_WITH_FILTER_ID;
 
-			appendStringInfo(&state->deleteQuery,
+			appendStringInfo(&deleteQuery,
 							 " AND object_id OPERATOR(%s.=) $%d::%s",
 							 CoreSchemaName, nextSqlArgIndex, FullBsonTypeName);
 		}
 
-		state->argCount++;
+		argCount++;
 		objectIdArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
 	}
 
-	state->argValues = palloc0(sizeof(Datum) * state->argCount);
-	state->argTypes = palloc0(sizeof(Oid) * state->argCount);
+	Datum *argValues = palloc0(sizeof(Datum) * argCount);
+	Oid *argTypes = palloc0(sizeof(Oid) * argCount);
 
-	state->argNulls = palloc0(sizeof(char) * state->argCount);
-	memset(state->argNulls, ' ', state->argCount);
+	char *argNulls = palloc0(sizeof(char) * argCount);
+	memset(argNulls, ' ', argCount);
 
 	/* assign query value */
 	Oid bsonTypeId = BsonTypeId();
-	state->argTypes[0] = bsonTypeId;
-	state->argValues[0] = PointerGetDatum(queryDoc);
+	argTypes[0] = bsonTypeId;
+	argValues[0] = PointerGetDatum(queryDoc);
 
 	if (applyVariableSpec || applyCollation)
 	{
 		/* set the variable spec */
-		state->argTypes[1] = bsonTypeId;
-		state->argValues[1] = applyVariableSpec ?
-							  PointerGetDatum(variableSpecBson) :
-							  PointerGetDatum(PgbsonInitEmpty());
+		argTypes[1] = bsonTypeId;
+		argValues[1] = applyVariableSpec ? PointerGetDatum(variableSpecBson) :
+					   PointerGetDatum(PgbsonInitEmpty());
 
 		/* set the collation string */
-		state->argTypes[2] = TEXTOID;
-		state->argValues[2] = applyCollation ? CStringGetTextDatum(collationString) :
-							  CStringGetTextDatum("");
+		argTypes[2] = TEXTOID;
+		argValues[2] = applyCollation ? CStringGetTextDatum(collationString) :
+					   CStringGetTextDatum("");
 	}
 
 	/* set shard key value */
 	if (shardKeyArgIndex != -1)
 	{
-		state->argTypes[shardKeyArgIndex] = INT8OID;
-		state->argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
+		argTypes[shardKeyArgIndex] = INT8OID;
+		argValues[shardKeyArgIndex] = Int64GetDatum(shardKeyHash);
 	}
 
 	/* set object id value */
 	if (objectIdArgIndex != -1)
 	{
-		state->argTypes[objectIdArgIndex] = BYTEAOID;
-		state->argValues[objectIdArgIndex] = PointerGetDatum(
-			CastPgbsonToBytea(objectIdFilter));
+		argTypes[objectIdArgIndex] = BYTEAOID;
+		argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(objectIdFilter));
 	}
-
-	if (forceBsonOutput)
-	{
-		appendStringInfo(&state->deleteQuery,
-						 " RETURNING 1) SELECT %s.bson_build_document('n'::text, COUNT(*)::int8, 'ok'::text, 1::float8) AS document FROM d",
-						 CoreSchemaName);
-	}
-}
-
-
-/*
- * DeleteAllMatchingDocuments deletes all documents that match the query.
- */
-static uint64
-DeleteAllMatchingDocuments(MongoCollection *collection, pgbson *queryDoc,
-						   const bson_value_t *variableSpec,
-						   const char *collationString, bool hasShardKeyValueFilter,
-						   int64 shardKeyHash)
-{
-	SPI_connect();
-
-	DeleteQueryParserState state = { 0 };
-
-	/* Generate the executable DELETE form because this path runs it through SPI. */
-	bool forceBsonOutput = false;
-	FormDeleteAllMatchingDocumentsQuery(collection, queryDoc, variableSpec,
-										collationString, hasShardKeyValueFilter,
-										shardKeyHash, forceBsonOutput, &state);
 
 	bool readOnly = false;
 	long maxTupleCount = 0;
-	SPIPlanPtr plan = GetSPIQueryPlanWithLocalShard(collection->collectionId,
-													collection->shardTableName,
-													state.preparedQueryKey,
-													state.deleteQuery.data,
-													state.argTypes,
-													state.argCount);
+	SPIPlanPtr plan = GetSPIQueryPlanWithLocalShard(collectionId,
+													collection->shardTableName, planId,
+													deleteQuery.data, argTypes, argCount);
 
 	if (collection->shardKey != NULL && EnableCommutativeDeleteMany)
 	{
@@ -1236,203 +1143,21 @@ DeleteAllMatchingDocuments(MongoCollection *collection, pgbson *queryDoc,
 		 * execution to avoid leaking into subsequent operations (e.g., updates)
 		 * in the same transaction.
 		 */
-		RunMultiValueQueryWithCommutativeWrites(state.deleteQuery.data, plan,
-												state.argCount,
-												state.argTypes, state.argValues,
-												state.argNulls,
+		RunMultiValueQueryWithCommutativeWrites(deleteQuery.data, plan, argCount,
+												argTypes, argValues, argNulls,
 												readOnly, maxTupleCount);
 	}
 	else
 	{
-		SPI_execute_plan(plan, state.argValues, state.argNulls, readOnly,
-						 maxTupleCount);
+		SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
 	}
+	rowsDeleted = SPI_processed;
 
-	uint64 rowsDeleted = SPI_processed;
-
-	pfree(state.deleteQuery.data);
+	pfree(deleteQuery.data);
 
 	SPI_finish();
 
 	return rowsDeleted;
-}
-
-
-static Node *
-ReplaceQueryTreeArgsForDelete(Node *node, void *context)
-{
-	if (node == NULL)
-	{
-		return NULL;
-	}
-
-	if (IsA(node, Query))
-	{
-		return (Node *) query_tree_mutator((Query *) node,
-										   ReplaceQueryTreeArgsForDelete,
-										   context,
-										   QTW_DONT_COPY_QUERY);
-	}
-
-	if (IsA(node, Param))
-	{
-		Param *param = (Param *) node;
-		DeleteQueryParserState *state = (DeleteQueryParserState *) context;
-		if (param->paramkind == PARAM_EXTERN)
-		{
-			int paramIndex = param->paramid - 1;
-			Oid constType = state->argTypes[paramIndex];
-			bool typByVal;
-			int16 typLen;
-			get_typlenbyval(param->paramtype, &typLen, &typByVal);
-			return (Node *) makeConst(constType, -1, InvalidOid, typLen,
-									  state->argValues[paramIndex],
-									  state->argNulls[paramIndex] == 'n', typByVal);
-		}
-	}
-
-	return expression_tree_mutator(node, ReplaceQueryTreeArgsForDelete, context);
-}
-
-
-static Query *
-TransformDeleteQuery(DeleteQueryParserState *state)
-{
-	List *rawParseTree = pg_parse_query(state->deleteQuery.data);
-	ParseState *pstate = make_parsestate(NULL);
-	pstate->p_sourcetext = state->deleteQuery.data;
-	setup_parse_fixed_parameters(pstate, state->argTypes, state->argCount);
-	Query *querytree = transformTopLevelStmt(pstate, linitial(rawParseTree));
-	querytree = (Query *) query_tree_mutator(querytree,
-											 ReplaceQueryTreeArgsForDelete,
-											 state, QTW_DONT_COPY_QUERY);
-	free_parsestate(pstate);
-
-	return querytree;
-}
-
-
-/*
- * Generates the delete query tree consumed by the planner hook without executing it.
- */
-Query *
-GenerateDeleteQuery(text *database, pgbson *deleteSpec, bool setStatementTimeout)
-{
-	ThrowIfServerOrTransactionReadOnly();
-
-	bson_iter_t deleteCommandIter;
-	PgbsonInitIterator(deleteSpec, &deleteCommandIter);
-
-	pgbsonsequence *deleteDocs = NULL;
-	Datum databaseDatum = database == NULL ? (Datum) 0 : PointerGetDatum(database);
-	BatchDeletionSpec *batchSpec = BuildBatchDeletionSpec(&deleteCommandIter,
-														  deleteDocs,
-														  &databaseDatum);
-	PostProcessDeleteBatchSpec(batchSpec);
-
-	if (list_length(batchSpec->deletionsProcessed) != 1)
-	{
-		ereport(ERROR, (errmsg(
-							"delete request must contain exactly one delete document")));
-	}
-
-	DeletionSpec *deletionSpec = linitial(batchSpec->deletionsProcessed);
-	ValidateQueryDocumentValue(deletionSpec->deleteOneParams.query);
-
-	Datum collectionNameDatum = CStringGetTextDatum(batchSpec->collectionName);
-	MongoCollection *collection =
-		GetMongoCollectionByNameDatum(databaseDatum, collectionNameDatum,
-									  RowExclusiveLock);
-	if (collection == NULL)
-	{
-		ereport(ERROR, (errmsg(
-							"Cannot find collection \"%s\" in database for delete request",
-							batchSpec->collectionName)));
-	}
-
-	Oid shardOid = TryGetCollectionShardTable(collection, NoLock);
-	if (shardOid == InvalidOid)
-	{
-		collection->shardTableName[0] = '\0';
-	}
-
-	pgbson *query = PgbsonInitFromDocumentBsonValue(
-		deletionSpec->deleteOneParams.query);
-	int64 shardKeyHash = 0;
-	bool isShardKeyValueCollationAware = false;
-	bool hasShardKeyValueFilter =
-		ComputeShardKeyHashForQuery(collection->shardKey, collection->collectionId,
-									query, &shardKeyHash,
-									&isShardKeyValueCollationAware);
-	bool applyCollationToShardKeyValue =
-		IsCollationApplicable(deletionSpec->deleteOneParams.collationString) &&
-		isShardKeyValueCollationAware;
-	if (applyCollationToShardKeyValue)
-	{
-		hasShardKeyValueFilter = false;
-	}
-
-	DeleteQueryParserState state = { 0 };
-	if (deletionSpec->limit == 1)
-	{
-		bson_value_t idFromQueryDocument = { 0 };
-		bool errorOnConflict = false;
-		bool queryHasNonIdFilters = false;
-		bool isIdFilterCollationAware = false;
-		bson_iter_t queryDocIter;
-		PgbsonInitIterator(query, &queryDocIter);
-		bool hasObjectIdFilter =
-			TraverseQueryDocumentAndGetId(&queryDocIter, &idFromQueryDocument,
-										  errorOnConflict, &queryHasNonIdFilters,
-										  &isIdFilterCollationAware);
-
-		/* With limit = 1, we currently target only one shard for the deletion. */
-		/* If the shard key value is collation-sensitive, we cannot target a single */
-		/* shard with it.*/
-		/* We then fall on any _id value filter. If none is provided, we fail. */
-		bool useShardKeyValueFilter = hasShardKeyValueFilter &&
-									  !applyCollationToShardKeyValue;
-		if (useShardKeyValueFilter)
-		{
-			/*
-			 * Delete at most 1 document that matches the query on a single shard.
-			 *
-			 * For unsharded collection, this is the shard that contains all the
-			 * data.
-			 */
-			FormDeleteOneQuery(collection, &deletionSpec->deleteOneParams, shardKeyHash,
-							   &state);
-		}
-		else if (hasObjectIdFilter)
-		{
-			/*
-			 * Delete at most 1 document that matches an _id equality filter from
-			 * a sharded collection without specifying a a shard key filter.
-			 */
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg(
-								"in query mode, delete query with limit 1 on a sharded collection "
-								"must include the shard key when not using an _id filter")));
-		}
-		else
-		{
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("delete query with limit 1 must include either "
-								   "_id or%s shard key filter",
-								   isShardKeyValueCollationAware ?
-								   " collation-insensitive" : "")));
-		}
-	}
-	else
-	{
-		bool forceBsonOutput = true;
-		FormDeleteAllMatchingDocumentsQuery(
-			collection, query, deletionSpec->deleteOneParams.variableSpec,
-			deletionSpec->deleteOneParams.collationString,
-			hasShardKeyValueFilter, shardKeyHash, forceBsonOutput, &state);
-	}
-
-	return TransformDeleteQuery(&state);
 }
 
 
@@ -1671,17 +1396,17 @@ command_delete_worker(PG_FUNCTION_ARGS)
  * Returns 1 if a row was deleted, and 0 if No rows were found matching the provided query.
  */
 static void
-FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams,
-				   int64 shardKeyHash, DeleteQueryParserState *state)
+DeleteOneInternal(MongoCollection *collection, DeleteOneParams *deleteOneParams,
+				  int64 shardKeyHash, DeleteOneResult *result)
 {
-	state->preparedQueryKey = QUERY_DELETE_ONE;
+	uint64 planId = QUERY_DELETE_ONE;
 	bool applyCollation = IsCollationApplicable(deleteOneParams->collationString);
 
 	List *sortFieldDocuments = deleteOneParams->sort == NULL ? NIL :
 							   BsonValueDocumentDecomposeFields(deleteOneParams->sort);
-	state->sortFieldsDocumentsLength = list_length(sortFieldDocuments);
+	int sortFieldDocumentsLength = list_length(sortFieldDocuments);
 
-	state->argCount = state->sortFieldsDocumentsLength;
+	int argCount = sortFieldDocumentsLength;
 
 	bool queryHasNonIdFilters = false;
 	bool isIdFilterCollationAware = false;
@@ -1699,6 +1424,9 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 	}
 
 	int nextSqlArgIndex = 1;
+	MemoryContext outerContext = CurrentMemoryContext;
+
+	SPI_connect();
 
 	/*
 	 * We construct a query that the distribution layer can route to a single shard, which
@@ -1716,24 +1444,24 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 	 * For this reason, here we use a materialized cte to compute the ctid of the
 	 * tuple that needs to be deleted.
 	 */
-	initStringInfo(&state->deleteQuery);
-	appendStringInfo(&state->deleteQuery, "WITH s AS MATERIALIZED (SELECT ctid FROM ");
+	StringInfoData deleteQuery;
+	initStringInfo(&deleteQuery);
+	appendStringInfo(&deleteQuery, "WITH s AS MATERIALIZED (SELECT ctid FROM ");
 
 	if (collection->shardTableName[0] != '\0')
 	{
-		appendStringInfo(&state->deleteQuery, " %s.%s", ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.%s", ApiDataSchemaName,
 						 collection->shardTableName);
 	}
 	else
 	{
-		appendStringInfo(&state->deleteQuery, " %s.documents_" UINT64_FORMAT,
-						 ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.documents_" UINT64_FORMAT, ApiDataSchemaName,
 						 collection->collectionId);
 	}
 
-	appendStringInfo(&state->deleteQuery, " WHERE shard_key_value = $1 ");
+	appendStringInfo(&deleteQuery, " WHERE shard_key_value = $1 ");
 	nextSqlArgIndex++;
-	state->argCount++;
+	argCount++;
 
 	const bson_value_t *variableSpec = deleteOneParams->variableSpec;
 	pgbson *variableSpecBson = variableSpec != NULL &&
@@ -1743,37 +1471,35 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 							deleteOneParams->query->value_type == BSON_TYPE_DOCUMENT ?
 							PgbsonInitFromDocumentBsonValue(
 		deleteOneParams->query) : NULL;
-	state->variableSpecBson = variableSpecBson;
-	state->querySpecBson = querySpecBson;
 
 	bool applyVariableSpec = queryHasNonIdFilters && variableSpecBson != NULL;
 	if (applyVariableSpec || applyCollation)
 	{
-		state->preparedQueryKey = QUERY_DELETE_ONE_LET_AND_COLLATION;
+		planId = QUERY_DELETE_ONE_LET_AND_COLLATION;
 
 		/* utilize the collation and/or variables in matching the document */
-		appendStringInfo(&state->deleteQuery,
+		appendStringInfo(&deleteQuery,
 						 " AND %s.bson_query_match(document, $2, $3, $4) ",
 						 ApiInternalSchemaNameV2);
 
 		nextSqlArgIndex += 3;
-		state->argCount += 3;
+		argCount += 3;
 	}
-	else if (queryHasNonIdFilters)
+	else if (!EnableDeleteOnePlanCacheOptimization || queryHasNonIdFilters)
 	{
-		appendStringInfo(&state->deleteQuery,
+		appendStringInfo(&deleteQuery,
 						 " AND document OPERATOR(%s.@@) $2::%s ",
 						 ApiCatalogSchemaName, FullBsonTypeName);
 
 		nextSqlArgIndex += 1;
-		state->argCount += 1;
+		argCount += 1;
 	}
 	else
 	{
 		/* No query filter clause needed — only shard_key_value filter
 		 * delete({})
 		 */
-		state->preparedQueryKey = QUERY_DELETE_ONE_NO_FILTER;
+		planId = QUERY_DELETE_ONE_NO_FILTER;
 	}
 
 	int objectIdArgIndex = -1;
@@ -1781,85 +1507,84 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 	{
 		if (applyVariableSpec || applyCollation)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_ID_LET_AND_COLLATION;
+			planId = QUERY_DELETE_ONE_ID_LET_AND_COLLATION;
 		}
-		else if (queryHasNonIdFilters)
+		else if (!EnableDeleteOnePlanCacheOptimization || queryHasNonIdFilters)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_ID;
+			planId = QUERY_DELETE_ONE_ID;
 		}
 		else
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_ID_ONLY;
+			planId = QUERY_DELETE_ONE_ID_ONLY;
 		}
 
-		appendStringInfo(&state->deleteQuery,
+		appendStringInfo(&deleteQuery,
 						 " AND object_id OPERATOR(%s.=) $%d::%s ",
 						 CoreSchemaName, nextSqlArgIndex, FullBsonTypeName);
 
 		objectIdArgIndex = nextSqlArgIndex - 1;
 		nextSqlArgIndex++;
-		state->argCount++;
+		argCount++;
 	}
 
-	state->argValues = palloc0(sizeof(Datum) * state->argCount);
-	state->argTypes = palloc0(sizeof(Oid) * state->argCount);
-	state->argNulls = palloc0(sizeof(char) * state->argCount);
+	Datum *argValues = palloc0(sizeof(Datum) * argCount);
+	Oid *argTypes = palloc0(sizeof(Oid) * argCount);
+	char *argNulls = palloc0(sizeof(char) * argCount);
 
 	/* set shard key value */
-	state->argTypes[0] = INT8OID;
-	state->argValues[0] = Int64GetDatum(shardKeyHash);
-	state->argNulls[0] = ' ';
+	argTypes[0] = INT8OID;
+	argValues[0] = Int64GetDatum(shardKeyHash);
+	argNulls[0] = ' ';
 
 	/* assign query value only when it is referenced in the SQL query */
 	pgbson *query = NULL;
-	if (state->preparedQueryKey != QUERY_DELETE_ONE_ID_ONLY)
+	if (planId != QUERY_DELETE_ONE_ID_ONLY)
 	{
-		query = querySpecBson;
+		query = PgbsonInitFromDocumentBsonValue(deleteOneParams->query);
 	}
 
 	Oid bsonTypeId = BsonTypeId();
 	if (applyVariableSpec || applyCollation)
 	{
-		state->argTypes[1] = bsonTypeId;
-		state->argValues[1] = PointerGetDatum(query);
-		state->argNulls[1] = ' ';
+		argTypes[1] = bsonTypeId;
+		argValues[1] = PointerGetDatum(query);
+		argNulls[1] = ' ';
 
 		/* set the variable spec */
-		state->argTypes[2] = bsonTypeId;
-		state->argValues[2] = applyVariableSpec ? PointerGetDatum(variableSpecBson) :
-							  PointerGetDatum(PgbsonInitEmpty());
-		state->argNulls[2] = ' ';
+		argTypes[2] = bsonTypeId;
+		argValues[2] = applyVariableSpec ? PointerGetDatum(variableSpecBson) :
+					   PointerGetDatum(PgbsonInitEmpty());
+		argNulls[2] = ' ';
 
 		/* set the collation string */
-		state->argTypes[3] = TEXTOID;
-		state->argValues[3] = applyCollation ? CStringGetTextDatum(
+		argTypes[3] = TEXTOID;
+		argValues[3] = applyCollation ? CStringGetTextDatum(
 			deleteOneParams->collationString) :
-							  CStringGetTextDatum("");
-		state->argNulls[3] = ' ';
+					   CStringGetTextDatum("");
+		argNulls[3] = ' ';
 	}
-	else if (queryHasNonIdFilters)
+	else if (!EnableDeleteOnePlanCacheOptimization || queryHasNonIdFilters)
 	{
-		state->argTypes[1] = bsonTypeId;
-		state->argValues[1] = PointerGetDatum(query);
-		state->argNulls[1] = ' ';
+		argTypes[1] = bsonTypeId;
+		argValues[1] = PointerGetDatum(query);
+		argNulls[1] = ' ';
 	}
 
 	/* set id filter value */
 	if (objectIdArgIndex != -1)
 	{
-		state->argTypes[objectIdArgIndex] = BYTEAOID;
-		state->argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(
-																 objectIdFilter));
-		state->argNulls[objectIdArgIndex] = ' ';
+		argTypes[objectIdArgIndex] = BYTEAOID;
+		argValues[objectIdArgIndex] = PointerGetDatum(CastPgbsonToBytea(objectIdFilter));
+		argNulls[objectIdArgIndex] = ' ';
 	}
 
 	/* assign sorting values */
-	if (state->sortFieldsDocumentsLength > 0)
+	if (sortFieldDocumentsLength > 0)
 	{
-		appendStringInfoString(&state->deleteQuery, " ORDER BY");
+		appendStringInfoString(&deleteQuery, " ORDER BY");
 
 		int sortItemSqlArgBaseIndex = nextSqlArgIndex;
-		for (int i = 0; i < state->sortFieldsDocumentsLength; i++)
+		for (int i = 0; i < sortFieldDocumentsLength; i++)
 		{
 			pgbson *sortDoc = list_nth(sortFieldDocuments, i);
 			bool isAscending = ValidateOrderbyExpressionAndGetIsAscending(sortDoc);
@@ -1868,7 +1593,7 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 
 			if (applyCollation)
 			{
-				appendStringInfo(&state->deleteQuery,
+				appendStringInfo(&deleteQuery,
 								 "%s %s.bson_orderby(document, $%d::%s.bson, $4) USING OPERATOR(%s.%s)",
 								 i > 0 ? "," : "", ApiInternalSchemaNameV2,
 								 sqlArgPosition, CoreSchemaNameV2,
@@ -1876,66 +1601,64 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 			}
 			else
 			{
-				appendStringInfo(&state->deleteQuery,
+				appendStringInfo(&deleteQuery,
 								 "%s %s.bson_orderby(document, $%d) %s",
 								 i > 0 ? "," : "", ApiCatalogSchemaName,
 								 sqlArgPosition, isAscending ? "ASC" : "DESC");
 			}
 
-			state->argTypes[sqlArgPosition - 1] = BsonTypeId();
-			state->argValues[sqlArgPosition - 1] = PointerGetDatum(sortDoc);
-			state->argNulls[sqlArgPosition - 1] = ' ';
+			argTypes[sqlArgPosition - 1] = BsonTypeId();
+			argValues[sqlArgPosition - 1] = PointerGetDatum(sortDoc);
+			argNulls[sqlArgPosition - 1] = ' ';
 		}
 	}
 
-	appendStringInfo(&state->deleteQuery,
+	appendStringInfo(&deleteQuery,
 					 " LIMIT 1 FOR UPDATE)");
 
 	/* Now build the actual delete query in the same string buffer */
-	appendStringInfo(&state->deleteQuery, " DELETE FROM");
+	appendStringInfo(&deleteQuery, " DELETE FROM");
 
 	if (collection->shardTableName[0] != '\0')
 	{
-		appendStringInfo(&state->deleteQuery, " %s.%s", ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.%s", ApiDataSchemaName,
 						 collection->shardTableName);
 	}
 	else
 	{
-		appendStringInfo(&state->deleteQuery, " %s.documents_" UINT64_FORMAT,
-						 ApiDataSchemaName,
+		appendStringInfo(&deleteQuery, " %s.documents_" UINT64_FORMAT, ApiDataSchemaName,
 						 collection->collectionId);
 	}
 
-	appendStringInfo(&state->deleteQuery,
+	appendStringInfo(&deleteQuery,
 					 " d USING s WHERE d.ctid = s.ctid AND shard_key_value = $1"
 					 " RETURNING object_id");
 
 	if (deleteOneParams->returnDeletedDocument)
 	{
-		if (state->preparedQueryKey == QUERY_DELETE_ONE_NO_FILTER)
+		if (planId == QUERY_DELETE_ONE_NO_FILTER)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_NO_FILTER_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_NO_FILTER_RETURN_DOCUMENT;
 		}
-		else if (state->preparedQueryKey == QUERY_DELETE_ONE_ID_ONLY)
+		else if (planId == QUERY_DELETE_ONE_ID_ONLY)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_ID_ONLY_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_ID_ONLY_RETURN_DOCUMENT;
 		}
-		else if (state->preparedQueryKey == QUERY_DELETE_ONE_LET_AND_COLLATION)
+		else if (planId == QUERY_DELETE_ONE_LET_AND_COLLATION)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_LET_AND_COLLATION_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_LET_AND_COLLATION_RETURN_DOCUMENT;
 		}
-		else if (state->preparedQueryKey == QUERY_DELETE_ONE_ID_LET_AND_COLLATION)
+		else if (planId == QUERY_DELETE_ONE_ID_LET_AND_COLLATION)
 		{
-			state->preparedQueryKey =
-				QUERY_DELETE_ONE_ID_LET_AND_COLLATION_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_ID_LET_AND_COLLATION_RETURN_DOCUMENT;
 		}
-		else if (state->preparedQueryKey == QUERY_DELETE_ONE)
+		else if (planId == QUERY_DELETE_ONE)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_RETURN_DOCUMENT;
 		}
-		else if (state->preparedQueryKey == QUERY_DELETE_ONE_ID)
+		else if (planId == QUERY_DELETE_ONE_ID)
 		{
-			state->preparedQueryKey = QUERY_DELETE_ONE_ID_RETURN_DOCUMENT;
+			planId = QUERY_DELETE_ONE_ID_RETURN_DOCUMENT;
 		}
 		else
 		{
@@ -1943,52 +1666,32 @@ FormDeleteOneQuery(MongoCollection *collection, DeleteOneParams *deleteOneParams
 			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
 							errmsg(
 								"unexpected planId %lu when adding return document clause",
-								state->preparedQueryKey)));
+								planId)));
 		}
-		appendStringInfo(&state->deleteQuery, ", document");
+		appendStringInfo(&deleteQuery, ", document");
 	}
-}
-
-
-/*
- * DeleteOneInternal deletes a single row with a specific shard key value filter.
- *
- * Returns 1 if a row was deleted, and 0 if No rows were found matching the provided query.
- */
-static void
-DeleteOneInternal(MongoCollection *collection, DeleteOneParams *deleteOneParams,
-				  int64 shardKeyHash, DeleteOneResult *result)
-{
-	MemoryContext outerContext = CurrentMemoryContext;
-
-	SPI_connect();
-
-	DeleteQueryParserState state = { 0 };
-	FormDeleteOneQuery(collection, deleteOneParams, shardKeyHash, &state);
 
 	bool readOnly = false;
 	long maxTupleCount = 0;
 
-	if (state.sortFieldsDocumentsLength > 0)
+	if (list_length(sortFieldDocuments) > 0)
 	{
 		/* we can't cache sort query */
-		SPI_execute_with_args(state.deleteQuery.data, state.argCount,
-							  state.argTypes, state.argValues, state.argNulls,
+		SPI_execute_with_args(deleteQuery.data, argCount, argTypes, argValues, argNulls,
 							  readOnly, maxTupleCount);
 	}
 	else
 	{
 		SPIPlanPtr plan = GetSPIQueryPlanWithLocalShard(collection->collectionId,
 														collection->shardTableName,
-														state.preparedQueryKey,
-														state.deleteQuery.data,
-														state.argTypes,
-														state.argCount);
+														planId, deleteQuery.data,
+														argTypes,
+														argCount);
 
-		SPI_execute_plan(plan, state.argValues, state.argNulls, readOnly, maxTupleCount);
+		SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
 	}
 
-	pfree(state.deleteQuery.data);
+	pfree(deleteQuery.data);
 	uint64 rowsDeleted = SPI_processed;
 	Assert(rowsDeleted <= 1);
 
@@ -2037,8 +1740,8 @@ DeleteOneInternal(MongoCollection *collection, DeleteOneParams *deleteOneParams,
 					GetProjectionStateForBsonProjectFind(&projectIter,
 														 forceProjectId,
 														 allowInclusionExclusion,
-														 state.variableSpecBson,
-														 state.querySpecBson,
+														 variableSpecBson,
+														 querySpecBson,
 														 deleteOneParams->
 														 collationString);
 				resultDeletedDocument = ProjectDocumentWithState(resultDeletedDocument,
@@ -2290,14 +1993,12 @@ DeleteOneObjectId(MongoCollection *collection, DeleteOneParams *deleteOneParams,
 		}
 	}
 
-	const bson_value_t *sort = NULL;
 	for (int tryNumber = 0; tryNumber < maxTries; tryNumber++)
 	{
 		int64 shardKeyValue = 0;
 
 		if (!FindShardKeyValueForDocumentId(collection, deleteOneParams->query, objectId,
 											isIdValueCollationAware, queryHasNonIdFilters,
-											sort,
 											&shardKeyValue,
 											deleteOneParams->variableSpec,
 											deleteOneParams->collationString))
@@ -2339,8 +2040,7 @@ DeleteOneObjectId(MongoCollection *collection, DeleteOneParams *deleteOneParams,
  * in the run-time to implicitly perform necessary validations.
  */
 static List *
-ValidateQueryDocuments(BatchDeletionSpec *batchSpec, MemoryContext requestContext,
-					   HTAB **indexNameCache)
+ValidateQueryDocuments(BatchDeletionSpec *batchSpec)
 {
 	/* declared volatile because of the longjmp in PG_CATCH */
 	List *volatile writeErrorList = NIL;
@@ -2371,9 +2071,7 @@ ValidateQueryDocuments(BatchDeletionSpec *batchSpec, MemoryContext requestContex
 			ErrorData *errorData = CopyErrorDataAndFlush();
 
 			writeErrorList = lappend(writeErrorList, GetWriteErrorFromErrorData(errorData,
-																				writeErrorIdx,
-																				requestContext,
-																				indexNameCache));
+																				writeErrorIdx));
 			isSuccess = false;
 		}
 		PG_END_TRY();

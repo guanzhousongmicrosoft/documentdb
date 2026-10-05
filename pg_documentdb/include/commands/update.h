@@ -12,7 +12,6 @@
 
 #include <postgres.h>
 
-#include "collation/collation.h"
 #include "metadata/collection.h"
 #include "operators/bson_expr_eval.h"
 
@@ -59,9 +58,6 @@ typedef struct
 
 	/* parsed variable spec */
 	const bson_value_t *variableSpec;
-
-	/* collation string for document selection */
-	char collationString[MAX_ICU_COLLATION_LENGTH];
 } UpdateOneParams;
 
 

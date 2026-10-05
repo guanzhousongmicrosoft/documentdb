@@ -222,7 +222,6 @@ extern bool EnableHighKeyOptimization;
 extern bool EnableFailureOnParallelIndexArraysForMetadataTracking;
 extern bool EnableDynamicCursorDedupTracking;
 extern bool EnableCompositeSecondaryPathOrderPushdown;
-extern bool EnableOrderedSaopMultiRangeSkipAdvance;
 
 static void ValidateCompositePathSpec(const char *prefix);
 static Size FillCompositePathSpec(const char *prefix, void *buffer);
@@ -249,7 +248,6 @@ static void ParseBoundsForCompositeOperator(pgbsonelement *singleElement, const
 											int32_t numPaths,
 											int32_t wildcardPathIndex,
 											ScanDirection *scanDirection,
-											bool *requiresOrderedScan,
 											VariableIndexBounds *variableBounds,
 											const char *indexCollation,
 											bool hasArrayPaths,
@@ -311,7 +309,8 @@ static Datum * ProcessStandardCompositeQueryEntries(int32_t totalPathTerms,
 													uint32_t *indexPathLengths,
 													int8_t *sortOrders, bool
 													isOrderedScan);
-static Datum * ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *
+static Datum * ProcessOrderedCompositeQueryEntries(int32_t totalPathTerms,
+												   IndexTermCreateMetadata *
 												   singlePathMetadata,
 												   IndexTermCreateMetadata *
 												   compositeMetadata,
@@ -556,7 +555,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 
 	/* Round 1, collect fixed index bounds and collect variable index bounds */
 	ScanDirection scanDir = NoMovementScanDirection;
-	bool requiresOrderedScan = false;
 	if (strategy == BSON_INDEX_STRATEGY_UNIQUE_EQUAL)
 	{
 		if (*searchMode == RUM_ORDERED_ANY_SCAN)
@@ -584,7 +582,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 
 		ParseOperatorStrategy(indexPaths, indexPathLengths, sortOrders, numPaths,
 							  metaInfo->wildcardPathIndex, &singleElement, strategy,
-							  &scanDir, &requiresOrderedScan, &variableBounds,
+							  &scanDir, &variableBounds,
 							  metaInfo->collation,
 							  hasArrayPaths, multiKeyBitMask,
 							  options->enableMetadataBasedTracking);
@@ -601,7 +599,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 										sortOrders, numPaths,
 										metaInfo->wildcardPathIndex,
 										&scanDir,
-										&requiresOrderedScan,
 										&variableBounds,
 										metaInfo->collation,
 										hasArrayPaths, multiKeyBitMask,
@@ -617,7 +614,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 	{
 		metaInfo->dedupState = variableBounds.dedupState;
 	}
-	metaInfo->numGroupKeyPaths = variableBounds.numGroupKeyPaths;
 	metaInfo->isOrderedScan = (*searchMode == RUM_SEARCH_MODE_ORDERED ||
 							   *searchMode == RUM_SEARCH_MODE_ORDERED_REVERSE ||
 							   *searchMode == RUM_ORDERED_ANY_SCAN);
@@ -663,27 +659,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 		metaInfo->isOrderedScan = true;
 		metaInfo->isBackwardScan = false;
 	}
-	else if (*searchMode == RUM_SEARCH_MODE_ORDERED)
-	{
-		/* The physical layer wants a forward scan */
-		metaInfo->isOrderedScan = true;
-		metaInfo->isBackwardScan = false;
-	}
-	else if (*searchMode == RUM_SEARCH_MODE_ORDERED_REVERSE)
-	{
-		/* The physical layer wants a backward scan */
-		metaInfo->isOrderedScan = true;
-		metaInfo->isBackwardScan = true;
-	}
-	else if (requiresOrderedScan)
-	{
-		/* The operator classes request an ordered scan of any kind, but the physical
-		 * opclass did not provide one - just do a forward walk.
-		 */
-		*searchMode = RUM_SEARCH_MODE_ORDERED;
-		metaInfo->isOrderedScan = true;
-		metaInfo->isBackwardScan = false;
-	}
 
 	/* First thing to check: Optimization - if no arrays and there are bounds with 1 bound
 	 * add it to the global bounds
@@ -705,7 +680,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 	 * with each of the boundaries.
 	 */
 	int32_t totalPathTerms = 1;
-	bool termPathsOverflowed = false;
 
 	/* These are the scan keys to validate in consistent checks */
 	runData->metaInfo->numScanKeys = list_length(variableBounds.variableBoundsList);
@@ -728,7 +702,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 			{
 				/* If one scanKey is unsatisfiable then the query is not satisfiable */
 				totalPathTerms = 0;
-				termPathsOverflowed = false;
 			}
 
 			/* Insert the index into the active key */
@@ -748,14 +721,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 											 (list_length(
 												  pathScanTermMap[i].scanKeyIndexList) >
 											  1);
-				if (!termPathsOverflowed &&
-					totalPathTerms > 0 &&
-					__builtin_mul_overflow(totalPathTerms,
-										   pathScanTermMap[i].numTermsPerPath,
-										   &totalPathTerms))
-				{
-					termPathsOverflowed = true;
-				}
+				totalPathTerms = totalPathTerms * pathScanTermMap[i].numTermsPerPath;
 			}
 		}
 	}
@@ -773,11 +739,10 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 	 */
 	Datum *entries;
 	if (supportsOrderedOperatorScans &&
-		((MaxNonOrderedTermScanThreshold > 0 &&
-		  totalPathTerms > MaxNonOrderedTermScanThreshold) ||
-		 termPathsOverflowed))
+		MaxNonOrderedTermScanThreshold > 0 &&
+		totalPathTerms > MaxNonOrderedTermScanThreshold)
 	{
-		entries = ProcessOrderedCompositeQueryEntries(&singlePathMetadata,
+		entries = ProcessOrderedCompositeQueryEntries(totalPathTerms, &singlePathMetadata,
 													  &compositeMetadata, nentries,
 													  partialmatch, extra_data,
 													  runData, &variableBounds,
@@ -786,10 +751,6 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 													  hasArrayPaths,
 													  metaInfo->isOrderedScan,
 													  searchMode);
-	}
-	else if (termPathsOverflowed)
-	{
-		ereport(ERROR, (errmsg("Query generates too many index terms to process")));
 	}
 	else
 	{
@@ -804,7 +765,7 @@ gin_bson_composite_path_extract_query(PG_FUNCTION_ARGS)
 			ReportFeatureUsage(FEATURE_QUERY_ORDERED_SAOP_50_TERMS);
 		}
 
-		entries = ProcessStandardCompositeQueryEntries((int32_t) totalPathTerms,
+		entries = ProcessStandardCompositeQueryEntries(totalPathTerms,
 													   &singlePathMetadata,
 													   &compositeMetadata,
 													   pathScanTermMap, nentries,
@@ -941,7 +902,8 @@ CompareCompositeIndexBoundsForOrderedScan(const void *a, const void *b,
  * revs the ordered path data to keep the keys moving forward.
  */
 static Datum *
-ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *singlePathMetadata,
+ProcessOrderedCompositeQueryEntries(int32_t totalPathTerms,
+									IndexTermCreateMetadata *singlePathMetadata,
 									IndexTermCreateMetadata *compositeMetadata,
 									int32_t *nentries, bool **partialmatch,
 									Pointer **extra_data,
@@ -1765,18 +1727,6 @@ CompareOnBoundsForSearch(const void *a, const void *b, void *arg)
 }
 
 
-inline static void
-EnsureUnsatisfiableIndexBounds(int unsatisfiableIndex, int compareIndex)
-{
-	if (unsatisfiableIndex != -1 && unsatisfiableIndex < compareIndex)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg(
-							"Ordered scan found an unsatisfiable bound before the current scan path. This is a bug.")));
-	}
-}
-
-
 static int
 AdvanceOrderedScanData(CompositeQueryRunData *runData,
 					   SerializedCompositeTermPair *serializedTermsSet,
@@ -1791,7 +1741,6 @@ AdvanceOrderedScanData(CompositeQueryRunData *runData,
 	ListCell *pathCell;
 	CompositeOrderedScanEntryData *entryData = runData->metaInfo->orderedScanEntryData;
 	IndexTermCreateMetadata metadata;
-
 	PopulateTermMetadataForTruncation(&metadata, &entryData->basePathMetadata,
 									  runData, entryData->indexPaths[compareIndex],
 									  entryData->indexPathLengths[compareIndex],
@@ -1800,7 +1749,6 @@ AdvanceOrderedScanData(CompositeQueryRunData *runData,
 advance_ordered_scan_data_start:
 	finalResult = -2;
 	perPathEntries = entryData->perPathEntries[compareIndex].entries;
-	bool hasScalarArrayMismatch = false;
 
 	/* If we exhausted on the current equality, first retry without the equality */
 	if (entryData->perPathEntries[compareIndex].currentPathEqualityTerm != NULL)
@@ -1838,7 +1786,6 @@ advance_ordered_scan_data_start:
 			entry->boundsSet->wildcardPath != NULL, allowSkipScansOnBoundary,
 			&priorMatchesEquality, &hasUnspecifiedPrefix,
 			runData->metaInfo->collation);
-		hasScalarArrayMismatch = hasScalarArrayMismatch || compareResult != 0;
 		if (compareResult == 1)
 		{
 			/* This particular bound is exhausted - move to the next one
@@ -1887,47 +1834,6 @@ advance_ordered_scan_data_start:
 		}
 	}
 
-	int32_t unsatisfiableIndex = -1;
-	if (EnableOrderedSaopMultiRangeSkipAdvance && !hasScalarArrayMismatch)
-	{
-		UpdateRunDataForOrderedBounds(runData, entryData, &unsatisfiableIndex);
-		EnsureUnsatisfiableIndexBounds(unsatisfiableIndex, compareIndex);
-
-		MemoryContext context = MemoryContextSwitchTo(entryData->scanKeyMemoryContext);
-		TryUpdateBoundsForTruncation(
-			runData, &entryData->basePathMetadata, entryData->indexPaths,
-			entryData->indexPathLengths, entryData->sortOrders);
-		MemoryContextSwitchTo(context);
-
-		bool priorMatchesEquality = true;
-		bool hasUnspecifiedPrefix = false;
-		bool hasEqualityPrefix = true;
-		bool allowSkipScanBoundaries = true;
-		int combinedCompareResult = RunCompareOnPathIndex(
-			runData, serializedTermsSet, allowSkipScanBoundaries,
-			&priorMatchesEquality, &hasUnspecifiedPrefix, &hasEqualityPrefix,
-			compareIndex);
-
-		/*
-		 * The scalar-array cursor may already have advanced while runData still
-		 * contains the prior intersection. Recheck after rebuilding the bounds.
-		 * If the full path still rejects the key, no scalar-array bound can move
-		 * it forward and requesting the same skip boundary would not progress.
-		 */
-		if (combinedCompareResult != 0)
-		{
-			*hasNoScalarArrayBounds = true;
-			if (combinedCompareResult == 1 && compareIndex == 0)
-			{
-				return 1;
-			}
-
-			return -2;
-		}
-
-		return finalResult;
-	}
-
 	/* Reset all subsequent bounds back to the start */
 	for (int i = compareIndex + 1; i < runData->metaInfo->numIndexPaths; i++)
 	{
@@ -1941,54 +1847,26 @@ advance_ordered_scan_data_start:
 		}
 	}
 
+	int32_t unsatisfiableIndex = -1;
 	UpdateRunDataForOrderedBounds(runData, entryData, &unsatisfiableIndex);
-	if (!EnableOrderedSaopMultiRangeSkipAdvance)
-	{
-		if (unsatisfiableIndex != -1)
-		{
-			compareIndex = unsatisfiableIndex;
-			if (!MoveUnsatisfiableBoundForward(runData, compareIndex))
-			{
-				if (compareIndex == 0)
-				{
-					return 1;
-				}
 
-				UpdateRunDataForOrderedBounds(runData, entryData,
-											  &unsatisfiableIndex);
-			}
-			else
-			{
-				goto advance_ordered_scan_data_start;
-			}
-		}
-	}
-	else
+	if (unsatisfiableIndex != -1)
 	{
-		EnsureUnsatisfiableIndexBounds(unsatisfiableIndex, compareIndex);
-		while (unsatisfiableIndex != -1)
+		/* One of the bounds can't be pushed forward, restart with that index */
+		compareIndex = unsatisfiableIndex;
+		if (!MoveUnsatisfiableBoundForward(runData, compareIndex))
 		{
-			/*
-			 * A leading-path advance resets each following scalar-array cursor.
-			 * Move those cursors past values excluded by the fixed bounds before
-			 * comparing them with the current index key, which belongs to the
-			 * prior prefix.
-			 */
-			int previousUnsatisfiableIndex = unsatisfiableIndex;
-			if (!MoveUnsatisfiableBoundForward(runData, unsatisfiableIndex) &&
-				unsatisfiableIndex == 0)
+			if (compareIndex == 0)
 			{
 				return 1;
 			}
 
+			/* Move forward after moving the bounds to infinity */
 			UpdateRunDataForOrderedBounds(runData, entryData, &unsatisfiableIndex);
-			if (unsatisfiableIndex != -1 &&
-				unsatisfiableIndex < previousUnsatisfiableIndex)
-			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-								errmsg(
-									"Ordered scan bounds moved to an earlier index path. This is a bug.")));
-			}
+		}
+		else
+		{
+			goto advance_ordered_scan_data_start;
 		}
 	}
 
@@ -2682,11 +2560,9 @@ CompositeIndexTermGenerateDistinctSkipBound(PG_FUNCTION_ARGS)
 	Pointer extraData = PG_GETARG_POINTER(3);
 	int32_t orderByPathCount = PG_NARGS() > 4 ? PG_GETARG_INT32(4) : 0;
 	Datum orderByQuery = PG_NARGS() > 5 ? PG_GETARG_DATUM(5) : (Datum) 0;
-	int32_t totalSearchEntries = PG_NARGS() > 6 ? PG_GETARG_INT32(6) : 1;
 
 	CompositeQueryRunData *runData = (CompositeQueryRunData *) extraData;
 	int32_t numIndexPaths = runData->metaInfo->numIndexPaths;
-	int32_t numGroupKeyPaths = runData->metaInfo->numGroupKeyPaths;
 
 	/* The distinct skip-scan re-seeks the ordered scan to a synthetic term that
 	 * pins the order-by prefix and pushes the trailing suffix past the end of
@@ -2700,17 +2576,10 @@ CompositeIndexTermGenerateDistinctSkipBound(PG_FUNCTION_ARGS)
 		return (Datum) 0;
 	}
 
-	if (totalSearchEntries != 1 && numGroupKeyPaths <= 0)
-	{
-		PG_FREE_IF_COPY(compareKeyValue, 0);
-		return (Datum) 0;
-	}
-
 	/* Without the order-by query key we cannot tell which index path drives the
 	 * scan, so we cannot know which trailing paths are safe to skip. Fall back
 	 * to the per-TID skip. */
-	if (numGroupKeyPaths <= 0 &&
-		(orderByPathCount <= 0 || orderByQuery == (Datum) 0))
+	if (orderByPathCount <= 0 || orderByQuery == (Datum) 0)
 	{
 		PG_FREE_IF_COPY(compareKeyValue, 0);
 		return (Datum) 0;
@@ -2750,15 +2619,11 @@ CompositeIndexTermGenerateDistinctSkipBound(PG_FUNCTION_ARGS)
 	 * suffix that is safe to skip. Computing this from the first order-by path
 	 * plus the order-by count would wrongly treat an interleaved order-by
 	 * column as skippable and prune distinct values. */
-	int32_t keepPathCount = numGroupKeyPaths;
-	if (keepPathCount <= 0)
-	{
-		pgbsonelement querySortElement;
-		int orderByIndexPath = GetOrderByIndexPath(DatumGetPgBson(orderByQuery),
-												   indexPaths, indexPathLengths,
-												   numPaths, &querySortElement);
-		keepPathCount = orderByIndexPath + 1;
-	}
+	pgbsonelement querySortElement;
+	int orderByIndexPath = GetOrderByIndexPath(DatumGetPgBson(orderByQuery),
+											   indexPaths, indexPathLengths,
+											   numPaths, &querySortElement);
+	int32_t keepPathCount = orderByIndexPath + 1;
 
 	/* Nothing to skip over if the last order-by column already reaches the last
 	 * index path. Fall back to the per-TID skip. */
@@ -6157,8 +6022,8 @@ GetIndexPathsFromOptionsWithLength(BsonGinCompositePathOptions *options,
 static void
 ParseBoundsForCompositeOperator(pgbsonelement *singleElement, const char **indexPaths,
 								uint32_t *indexPathsLengths, int8_t *sortOrders, int32_t
-								numPaths, int32_t wildcardPathIndex,
-								ScanDirection *scanDirection, bool *requiresOrderedScan,
+								numPaths,
+								int32_t wildcardPathIndex, ScanDirection *scanDirection,
 								VariableIndexBounds *variableBounds,
 								const char *indexCollation,
 								bool hasArrayPaths, uint32_t multiKeyBitMask,
@@ -6227,8 +6092,7 @@ ParseBoundsForCompositeOperator(pgbsonelement *singleElement, const char **index
 
 		ParseOperatorStrategy(indexPaths, indexPathsLengths, sortOrders, numPaths,
 							  wildcardPathIndex,
-							  &queryElement, queryStrategy,
-							  scanDirection, requiresOrderedScan,
+							  &queryElement, queryStrategy, scanDirection,
 							  variableBounds, indexCollation,
 							  hasArrayPaths, multiKeyBitMask,
 							  isGlobalIndexMetadataTracked);

@@ -22,7 +22,8 @@ SELECT documentdb_api.shard_collection('db', 'fl_collation_test', '{ "_id": "has
 
 SET documentdb_core.enableCollation TO on;
 
--- Collation-sensitive $first/$last after sharding
+-- 1a. GUC ON: collation-sensitive $first/$last after sharding
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 set citus.propagate_set_commands to 'local';
 BEGIN;
@@ -43,6 +44,15 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "fl_collati
 
 ROLLBACK;
 
+-- 1b. Without the WithExpr accumulators there is nothing that can honor the
+--     collation, so the whole $group stage is rejected.
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
+
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "fl_collation_test", "pipeline": [{ "$group": { "_id": "$g", "f": { "$first": "$name" }, "l": { "$last": "$name" } } }, { "$sort": { "_id": 1 } }], "cursor": {}, "collation": { "locale": "en", "strength": 1 } }');
+
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 SET documentdb_core.enableCollation TO off;
 
 -- =============================================================================
@@ -57,7 +67,19 @@ SELECT documentdb_api.insert_one('db', 'fl_missing_test', '{ "_id": 2, "category
 
 SELECT documentdb_api.shard_collection('db', 'fl_missing_test', '{ "_id": "hashed" }', false);
 
--- $first and $last on missing nested field
+-- 2a. GUC ON: $first and $last on missing nested field
+SET documentdb.enableNewWithExprAccumulators TO on;
+
+set citus.propagate_set_commands to 'local';
+BEGIN;
+set local citus.max_adaptive_executor_pool_size to 1;
+set local citus.enable_local_execution to off;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "fl_missing_test", "pipeline": [{ "$group": { "_id": "$category", "firstResult": { "$first": "$profile.email" }, "lastResult": { "$last": "$profile.email" } } }], "cursor": {} }');
+ROLLBACK;
+
+-- 2b. GUC OFF: $first and $last on missing nested field
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 set citus.propagate_set_commands to 'local';
 BEGIN;
@@ -71,7 +93,7 @@ SELECT documentdb_api.drop_collection('db', 'fl_missing_test');
 -- =============================================================================
 -- Test 3: Sharded $setWindowFields for $first/$last
 -- Covers data correctness and EXPLAIN for both sortBy and no-sortBy paths
--- using both $first and $last in every query.
+-- with GUC on and off. Uses both $first and $last in every query.
 -- =============================================================================
 
 SELECT documentdb_api.insert_one('db', 'wfl_dist_test', '{ "_id": 1, "g": "A", "v": 10, "name": "alpha" }');
@@ -81,7 +103,8 @@ SELECT documentdb_api.insert_one('db', 'wfl_dist_test', '{ "_id": 4, "g": "B", "
 
 SELECT documentdb_api.shard_collection('db', 'wfl_dist_test', '{ "_id": "hashed" }', false);
 
--- 3a. $first/$last with sortBy - data correctness
+-- 3a. GUC ON: $first/$last with sortBy - data correctness
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 set citus.propagate_set_commands to 'local';
 BEGIN;
@@ -90,16 +113,42 @@ set local citus.enable_local_execution to off;
 
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "sortBy": { "v": 1 }, "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }, { "$sort": { "_id": 1 } }], "cursor": {} }');
 
--- 3b. $first/$last without sortBy - data correctness
+-- 3b. GUC ON: $first/$last without sortBy - data correctness
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }, { "$sort": { "_id": 1 } }], "cursor": {} }');
 
 ROLLBACK;
 
--- 3c. EXPLAIN $first/$last with sortBy: bsonfirst / bsonlast (sorted path)
+-- 3c. GUC OFF: $first/$last with sortBy - data correctness
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
+
+set citus.propagate_set_commands to 'local';
+BEGIN;
+set local citus.max_adaptive_executor_pool_size to 1;
+set local citus.enable_local_execution to off;
+
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "sortBy": { "v": 1 }, "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }, { "$sort": { "_id": 1 } }], "cursor": {} }');
+
+-- 3d. GUC OFF: $first/$last without sortBy - data correctness
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }, { "$sort": { "_id": 1 } }], "cursor": {} }');
+
+ROLLBACK;
+
+-- 3e. GUC ON: EXPLAIN $first/$last with sortBy → bsonfirst / bsonlast (sorted path)
+SET documentdb.enableNewWithExprAccumulators TO on;
 
 SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, VERBOSE ON) SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "sortBy": { "v": 1 }, "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }], "cursor": {} }') $cmd$);
 
--- 3d. EXPLAIN $first/$last without sortBy: bsonfirstwithexpr / bsonlastwithexpr
+-- 3f. GUC ON: EXPLAIN $first/$last without sortBy → bsonfirstwithexpr / bsonlastwithexpr
+SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, VERBOSE ON) SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }], "cursor": {} }') $cmd$);
+
+-- 3g. GUC OFF: EXPLAIN $first/$last with sortBy → bsonfirst / bsonlast (sorted path)
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
+
+SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, VERBOSE ON) SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "sortBy": { "v": 1 }, "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }], "cursor": {} }') $cmd$);
+
+-- 3h. GUC OFF: EXPLAIN $first/$last without sortBy → bsonfirstonsorted / bsonlastonsorted
 SELECT documentdb_distributed_test_helpers.run_explain_and_trim($cmd$ EXPLAIN (COSTS OFF, VERBOSE ON) SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "wfl_dist_test", "pipeline": [{ "$setWindowFields": { "partitionBy": "$g", "output": { "firstVal": { "$first": "$v" }, "lastName": { "$last": "$name" } } } }], "cursor": {} }') $cmd$);
 
 SELECT documentdb_api.drop_collection('db', 'wfl_dist_test');
@@ -155,12 +204,15 @@ set citus.propagate_set_commands to 'local';
 BEGIN;
 set local citus.max_adaptive_executor_pool_size to 1;
 set local citus.enable_local_execution to off;
+SET LOCAL documentdb.enableNewWithExprAccumulators TO on;
 SET LOCAL documentdb.enableDistinctScanForGroupFirst TO on;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "fl_distinct_dist", "pipeline": [ { "$group": { "_id": "$category", "firstExpr": { "$first": { "$concat": ["$name", "-seen"] } } } }, { "$sort": { "_id": 1 } } ], "cursor": {} }');
 ROLLBACK;
 
 SELECT documentdb_api.drop_collection('db', 'fl_distinct_dist');
 
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;
 
 -- =============================================================================
 -- Test 6: reshaping ($project) stage before $group on a sharded collection.
@@ -182,6 +234,7 @@ set citus.propagate_set_commands to 'local';
 BEGIN;
 set local citus.max_adaptive_executor_pool_size to 1;
 set local citus.enable_local_execution to off;
+SET LOCAL documentdb.enableNewWithExprAccumulators TO on;
 
 -- Global group after a $project: $first/$last on a projected field.
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "fl_project_group_dist", "pipeline": [ { "$project": { "_id": 0, "a": 1 } }, { "$group": { "_id": null, "firstVal": { "$first": "$a" }, "lastVal": { "$last": "$a" } } } ], "cursor": {} }');
@@ -193,3 +246,5 @@ ROLLBACK;
 
 SELECT documentdb_api.drop_collection('db', 'fl_project_group_dist');
 
+SET documentdb.enableNewMinMaxAccumulators TO off;
+SET documentdb.enableNewWithExprAccumulators TO off;

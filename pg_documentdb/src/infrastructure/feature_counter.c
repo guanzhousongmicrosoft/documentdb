@@ -221,8 +221,6 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_AGGREGATE_GROUP_MERGE_OBJECTS] = "group_merge_objects",
 	[FEATURE_AGGREGATE_GROUP_MIN] = "group_min",
 	[FEATURE_AGGREGATE_GROUP_MIN_N] = "group_min_n",
-	[FEATURE_AGGREGATE_GROUP_ORDERED_FIRST_DISTINCT_SCAN_CANDIDATE] =
-		"group_ordered_first_distinct_scan_candidate",
 	[FEATURE_AGGREGATE_GROUP_PERCENTILE] = "group_percentile",
 	[FEATURE_AGGREGATE_GROUP_PUSH] = "group_push",
 	[FEATURE_AGGREGATE_GROUP_SCALAR_AGG_INDEX_PUSHDOWN] =
@@ -459,14 +457,6 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 
 	/* Feature mapping region - Role CRUD */
 	[FEATURE_ROLE_CREATE] = "role_create",
-	[FEATURE_ROLE_CREATE_CUSTOM_PRIVILEGES] = "role_create_custom_privileges",
-	[FEATURE_ROLE_CREATE_WITH_PARENT_ROLES] = "role_create_with_parent_roles",
-	[FEATURE_ROLE_GRANT_PRIVILEGES_TO_ROLE] = "role_grant_privileges_to_role",
-	[FEATURE_ROLE_GRANT_ROLES_TO_ROLE] = "role_grant_roles_to_role",
-	[FEATURE_ROLE_GRANT_ROLES_TO_USER] = "role_grant_roles_to_user",
-	[FEATURE_ROLE_REVOKE_PRIVILEGES_FROM_ROLE] = "role_revoke_privileges_from_role",
-	[FEATURE_ROLE_REVOKE_ROLES_FROM_ROLE] = "role_revoke_roles_from_role",
-	[FEATURE_ROLE_REVOKE_ROLES_FROM_USER] = "role_revoke_roles_from_user",
 
 	/* Feature mapping region - Search operators */
 	[FEATURE_SEARCH_OPERATOR_AUTO_COMPLETE] = "search_operator_auto_complete",
@@ -505,6 +495,7 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_STAGE_GROUP] = "group",
 	[FEATURE_STAGE_GROUP_ACC_FIRSTN_GT10] = "firstN_acc_GT10",
 	[FEATURE_STAGE_GROUP_ACC_LASTN_GT10] = "lastN_acc_GT10",
+	[FEATURE_STAGE_GROUP_DUPLICATE_ID] = "group_duplicate_id",
 	[FEATURE_STAGE_INDEXSTATS] = "indexStats",
 	[FEATURE_STAGE_INTERNAL_INHIBIT_OPTIMIZATION] = "_internalInhibitOptimization",
 	[FEATURE_STAGE_INVERSEMATCH] = "inverseMatch",
@@ -570,7 +561,6 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 
 	/* Feature mapping region - User CRUD*/
 	[FEATURE_USER_CREATE] = "user_create",
-	[FEATURE_USER_CREATE_CUSTOM_ROLE] = "user_create_custom_role",
 	[FEATURE_USER_DROP] = "user_drop",
 	[FEATURE_USER_GET] = "user_get",
 	[FEATURE_USER_UPDATE] = "user_update",

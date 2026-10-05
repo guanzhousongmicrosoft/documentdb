@@ -91,21 +91,6 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
      "indexes": [{ "key": {"_id": 1, "v": 1}, "name": "idx_id_v_en_s1",
                    "collation": {"locale": "en", "strength": 1} }] }', TRUE);
 
--- Section 20 coll_distinct: scalar, dotted, numeric-ordering, and multikey
--- collation-aware distinct paths.
-SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
-  '{ "createIndexes": "coll_distinct",
-     "indexes": [
-       { "key": {"value": 1}, "name": "idx_value_en_s1",
-         "collation": {"locale": "en", "strength": 1} },
-       { "key": {"nested.value": 1}, "name": "idx_nested_value_en_s1",
-         "collation": {"locale": "en", "strength": 1} },
-       { "key": {"numeric": 1}, "name": "idx_numeric_en_s1",
-         "collation": {"locale": "en", "strength": 1, "numericOrdering": true} },
-       { "key": {"items.label": 1}, "name": "idx_items_label_en_s1",
-         "collation": {"locale": "en", "strength": 1} }
-     ] }', TRUE);
-
 -- Section 22 coll_minmax_idx: collated index on the "grp" match field so the
 -- $match in the aggregate is served by the index under the matching collation.
 SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
@@ -119,34 +104,6 @@ SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
 SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
   '{ "createIndexes": "coll_code_collation",
      "indexes": [{ "key": {"v": 1}, "name": "idx_v_en_s1",
-                   "collation": {"locale": "en", "strength": 1} }] }', TRUE);
-
--- Section 26 coll_update_select: collated update predicates on `_id`, `group`,
--- `name`, and the positional-match array.
-SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
-  '{ "createIndexes": "coll_update_select",
-     "indexes": [
-       { "key": {"_id": 1}, "name": "idx_update_id_en_s1",
-         "collation": {"locale": "en", "strength": 1} },
-       { "key": {"group": 1}, "name": "idx_update_group_en_s1",
-         "collation": {"locale": "en", "strength": 1} },
-       { "key": {"name": 1}, "name": "idx_update_name_en_s1",
-         "collation": {"locale": "en", "strength": 1} },
-       { "key": {"values": 1}, "name": "idx_update_values_en_s1",
-         "collation": {"locale": "en", "strength": 1} }
-     ] }', TRUE);
-
--- Section 26 coll_update_sort: matching predicate and sort keys.
-SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
-  '{ "createIndexes": "coll_update_sort",
-     "indexes": [{ "key": {"group": 1, "name": 1},
-                   "name": "idx_update_group_name_en_s1",
-                   "collation": {"locale": "en", "strength": 1} }] }', TRUE);
-
--- Section 26 coll_update_validator: validator-aware update-many predicate.
-SELECT documentdb_api_internal.create_indexes_non_concurrently('coll_q_db',
-  '{ "createIndexes": "coll_update_validator",
-     "indexes": [{ "key": {"name": 1}, "name": "idx_update_name_en_s1",
                    "collation": {"locale": "en", "strength": 1} }] }', TRUE);
 
 -- ======================================================================

@@ -218,9 +218,6 @@ static void AddContinuationQualsToIndexPath(PlannerInfo *root, RelOptInfo *rel,
 											IndexPath *resumePath,
 											ParsedContinuationState *state);
 static bool IsGroupByFullyPushableForStreaming(PlannerInfo *root);
-static List * GetRequiredStreamingPathKeys(PlannerInfo *root);
-static bool PathProvidesRequiredStreamingOrder(PlannerInfo *root, Path *path);
-static bool IsFindProjectionWrapper(PlannerInfo *root);
 
 PG_FUNCTION_INFO_V1(command_cursor_tracker);
 
@@ -311,7 +308,7 @@ IsStreamableGroupingPlan(Plan *plan)
 
 
 bool
-IsDynamicCustomScanPath(Plan *plan, bool allowOffsetLimitNode)
+IsDynamicCustomScanPath(Plan *plan)
 {
 	CHECK_FOR_INTERRUPTS();
 	check_stack_depth();
@@ -326,8 +323,7 @@ IsDynamicCustomScanPath(Plan *plan, bool allowOffsetLimitNode)
 	if (IsA(plan, SubqueryScan))
 	{
 		SubqueryScan *subqueryScan = (SubqueryScan *) plan;
-		return IsDynamicCustomScanPath(subqueryScan->subplan,
-									   allowOffsetLimitNode);
+		return IsDynamicCustomScanPath(subqueryScan->subplan);
 	}
 
 	/*
@@ -340,22 +336,7 @@ IsDynamicCustomScanPath(Plan *plan, bool allowOffsetLimitNode)
 	 */
 	if (IsStreamableGroupingPlan(plan))
 	{
-		return outerPlan(plan) != NULL &&
-			   IsDynamicCustomScanPath(outerPlan(plan),
-									   allowOffsetLimitNode);
-	}
-
-	/*
-	 * Descend through LIMIT only when its limit or offset was authorized for this
-	 * plan. The explicit authorization also lets existing cursors outlive GUC
-	 * changes.
-	 */
-	if (allowOffsetLimitNode &&
-		IsA(plan, Limit))
-	{
-		return outerPlan(plan) != NULL &&
-			   IsDynamicCustomScanPath(outerPlan(plan),
-									   allowOffsetLimitNode);
+		return outerPlan(plan) != NULL && IsDynamicCustomScanPath(outerPlan(plan));
 	}
 
 	return false;
@@ -418,17 +399,6 @@ GetDynamicStreamingCustomScanState(PlanState *planState, bool *isGroupReadAhead)
 												  isGroupReadAhead);
 	}
 
-	/*
-	 * Planning already authorized this LIMIT wrapper; execution must ignore
-	 * later GUC changes.
-	 */
-	if (IsA(planState, LimitState) &&
-		outerPlanState(planState) != NULL)
-	{
-		return GetDynamicStreamingCustomScanState(outerPlanState(planState),
-												  isGroupReadAhead);
-	}
-
 	return NULL;
 }
 
@@ -469,6 +439,7 @@ GetContinuationFromCustomScan(CustomScanState *scan)
 
 	const char *tableName = get_rel_name(cursorScanState->tableOid);
 	PgbsonWriterAppendUtf8(&writer, "tbl", 3, tableName);
+
 
 	WriteContinuationBasedOnScanTypeAndState(ps, &writer, cursorScanState->scanType);
 	return PgbsonWriterGetPgbson(&writer);
@@ -876,7 +847,11 @@ WalkRelPathsAndCreateCustomPathsForFirstPage(PlannerInfo *root, RelOptInfo *rel,
 		 * pushable $group (no ORDER BY) the GroupAggregate needs the index to
 		 * provide the grouping order, i.e. group_pathkeys.
 		 */
-		List *orderingPathKeys = GetRequiredStreamingPathKeys(root);
+		List *orderingPathKeys = root->sort_pathkeys;
+		if (orderingPathKeys == NIL && IsGroupByFullyPushableForStreaming(root))
+		{
+			orderingPathKeys = root->group_pathkeys;
+		}
 
 		if (orderingPathKeys != NIL)
 		{
@@ -886,8 +861,11 @@ WalkRelPathsAndCreateCustomPathsForFirstPage(PlannerInfo *root, RelOptInfo *rel,
 				case QueryScanType_SecondaryIndexScan:
 				case QueryScanType_SecondaryIndexOnlyScan:
 				{
-					if (!PathProvidesRequiredStreamingOrder(root, inputPath))
+					IndexPath *ipath = (IndexPath *) inputPath;
+					if (list_length(ipath->indexorderbys) != list_length(
+							orderingPathKeys))
 					{
+						/* The pathkeys required by the query are not provided by the index order by - we can't use this path for streaming */
 						isSupportedPath = false;
 					}
 					break;
@@ -906,8 +884,10 @@ WalkRelPathsAndCreateCustomPathsForFirstPage(PlannerInfo *root, RelOptInfo *rel,
 						ConsiderBtreeOrderByPushdown(root, ipath);
 					}
 
-					if (!PathProvidesRequiredStreamingOrder(root, inputPath))
+					if (list_length(ipath->path.pathkeys) != list_length(
+							orderingPathKeys))
 					{
+						/* The pathkeys required by the query are not provided by the index order by - we can't use this path for streaming */
 						isSupportedPath = false;
 					}
 					break;
@@ -978,97 +958,12 @@ IsGroupByFullyPushableForStreaming(PlannerInfo *root)
 	return EnableGroupByDynamicStreaming &&
 		   root->group_pathkeys != NIL &&
 		   root->query_pathkeys != NIL &&
-		   list_length(root->group_pathkeys) == list_length(root->query_pathkeys) &&
-		   pathkeys_contained_in(root->group_pathkeys, root->query_pathkeys);
-}
-
-
-/* Returns the explicit sort order, or the index-backed grouping order. */
-static List *
-GetRequiredStreamingPathKeys(PlannerInfo *root)
-{
-	if (root->sort_pathkeys != NIL)
-	{
-		return root->sort_pathkeys;
-	}
-
-	return IsGroupByFullyPushableForStreaming(root) ?
-		   root->group_pathkeys : NIL;
-}
-
-
-/*
- * Compare pathkeys semantically: equal lengths can have different collations,
- * while a longer index ordering may satisfy the required prefix.
- */
-static bool
-PathProvidesRequiredStreamingOrder(PlannerInfo *root, Path *path)
-{
-	List *requiredPathKeys = GetRequiredStreamingPathKeys(root);
-	return requiredPathKeys == NIL ||
-		   pathkeys_contained_in(requiredPathKeys, path->pathkeys);
+		   list_length(root->group_pathkeys) == list_length(root->query_pathkeys);
 }
 
 
 static bool
-IsFindProjectionWrapper(PlannerInfo *root)
-{
-	/*
-	 * The only supported parent shape is the synthetic projection-only wrapper
-	 * created by MigrateQueryToSubQuery and HandleProjectFind
-	 */
-	PlannerInfo *parent = root->parent_root;
-	if (parent == NULL || parent->parent_root != NULL)
-	{
-		return false;
-	}
-
-	Query *parentQuery = parent->parse;
-	if (parentQuery->commandType != CMD_SELECT ||
-		list_length(parentQuery->rtable) != 1 ||
-		list_length(parentQuery->targetList) != 1 ||
-		parentQuery->jointree == NULL ||
-		list_length(parentQuery->jointree->fromlist) != 1 ||
-		parentQuery->jointree->quals != NULL ||
-		parentQuery->cteList != NIL ||
-		parentQuery->rowMarks != NIL ||
-		parentQuery->limitCount != NULL ||
-		parentQuery->limitOffset != NULL ||
-		parentQuery->sortClause != NIL ||
-		parentQuery->groupClause != NIL ||
-		parentQuery->groupingSets != NIL ||
-		parentQuery->distinctClause != NIL ||
-		parentQuery->windowClause != NIL ||
-		parentQuery->havingQual != NULL ||
-		parentQuery->setOperations != NULL ||
-		parentQuery->hasAggs ||
-		parentQuery->hasWindowFuncs)
-	{
-		return false;
-	}
-
-	RangeTblEntry *rte = linitial(parentQuery->rtable);
-	Node *fromItem = linitial(parentQuery->jointree->fromlist);
-	TargetEntry *targetEntry = linitial(parentQuery->targetList);
-	if (rte->rtekind != RTE_SUBQUERY ||
-		!IsA(fromItem, RangeTblRef) ||
-		((RangeTblRef *) fromItem)->rtindex != 1 ||
-		targetEntry->resjunk ||
-		!IsA(targetEntry->expr, FuncExpr))
-	{
-		return false;
-	}
-
-	Oid functionId = ((FuncExpr *) targetEntry->expr)->funcid;
-	return functionId == BsonDollarProjectFindFunctionOid() ||
-		   functionId == BsonDollarProjectFindWithLetFunctionOid() ||
-		   functionId == BsonDollarProjectFindWithLetAndCollationFunctionOid();
-}
-
-
-static bool
-IsPlannerInfoValidForDynamicCursorPlans(PlannerInfo *root,
-										bool allowOffsetLimitNode)
+IsPlannerInfoValidForDynamicCursorPlans(PlannerInfo *root)
 {
 	check_stack_depth();
 	CHECK_FOR_INTERRUPTS();
@@ -1102,23 +997,15 @@ IsPlannerInfoValidForDynamicCursorPlans(PlannerInfo *root,
 		return false;
 	}
 
-	bool allowOffsetLimitOnThisQuery = allowOffsetLimitNode &&
-									   (root->parent_root == NULL ||
-										IsFindProjectionWrapper(root));
-
 	if (root->parse->limitCount != NULL)
 	{
-		/*
-		 * Values above 1 require per-plan authorization. The count may belong
-		 * to the generated subquery below a find projection.
-		 */
+		/* Dynamic streaming requires limit 1 */
 		if (IsA(root->parse->limitCount, Const))
 		{
 			Const *limitConst = (Const *) root->parse->limitCount;
-			int64 limitValue = DatumGetInt64(limitConst->constvalue);
-			if (limitValue != 1 &&
-				!(allowOffsetLimitOnThisQuery && limitValue > 1))
+			if (DatumGetInt64(limitConst->constvalue) != 1)
 			{
+				/* Dynamic streaming cursors only support limit 1 */
 				return false;
 			}
 		}
@@ -1131,14 +1018,13 @@ IsPlannerInfoValidForDynamicCursorPlans(PlannerInfo *root,
 
 	if (root->parse->limitOffset != NULL)
 	{
-		/* Positive offsets require the same per-plan authorization. */
+		/* Dynamic streaming requires offset 0 */
 		if (IsA(root->parse->limitOffset, Const))
 		{
 			Const *offsetConst = (Const *) root->parse->limitOffset;
-			int64 offsetValue = DatumGetInt64(offsetConst->constvalue);
-			if (offsetValue != 0 &&
-				!(allowOffsetLimitOnThisQuery && offsetValue > 0))
+			if (DatumGetInt64(offsetConst->constvalue) != 0)
 			{
+				/* Dynamic streaming cursors only support offset 0 */
 				return false;
 			}
 		}
@@ -1150,8 +1036,7 @@ IsPlannerInfoValidForDynamicCursorPlans(PlannerInfo *root,
 	}
 
 	if (root->parent_root != NULL &&
-		!IsPlannerInfoValidForDynamicCursorPlans(root->parent_root,
-												 false /* allowOffsetLimitNode */))
+		!IsPlannerInfoValidForDynamicCursorPlans(root->parent_root))
 	{
 		/* In an unsupported subquery - use persisted cursors */
 		return false;
@@ -1269,21 +1154,7 @@ UpdatePathsWithDynamicStreamingCursorPlans(PlannerInfo *root, RelOptInfo *rel,
 		return false;
 	}
 
-	bson_iter_t offsetLimitNodeAuthorizationIter;
-	bool hasOffsetLimitNodeAuthorization = PgbsonInitIteratorAtPath(
-		continuation, "allowOffsetLimitNode",
-		&offsetLimitNodeAuthorizationIter);
-	if (!hasOffsetLimitNodeAuthorization ||
-		!BSON_ITER_HOLDS_BOOL(&offsetLimitNodeAuthorizationIter))
-	{
-		ereport(ERROR, (errmsg("Invalid dynamic cursor planning authorization.")));
-	}
-
-	bool allowOffsetLimitNode = bson_iter_bool(
-		&offsetLimitNodeAuthorizationIter);
-
-	if (!IsPlannerInfoValidForDynamicCursorPlans(
-			root, allowOffsetLimitNode))
+	if (!IsPlannerInfoValidForDynamicCursorPlans(root))
 	{
 		/* The planner info is not valid for dynamic cursor plans - use persisted */
 		return false;
@@ -2605,7 +2476,8 @@ GeneratePathFromContinuation(ParsedContinuationState *state,
 			 * WalkRelPathsAndCreateCustomPathsForFirstPage).
 			 */
 			bool needsOrderingPushdown =
-				GetRequiredStreamingPathKeys(root) != NIL;
+				root->sort_pathkeys != NIL ||
+				IsGroupByFullyPushableForStreaming(root);
 			if (existingPkPath != NULL)
 			{
 				if (needsOrderingPushdown && existingPkPath->path.pathkeys == NIL)
@@ -2649,19 +2521,6 @@ GeneratePathFromContinuation(ParsedContinuationState *state,
 				inputPath->indexinfo->indrestrictinfo =
 					ReplaceExtensionFunctionOperatorsInRestrictionPaths(
 						inputPath->indexinfo->indrestrictinfo, indexContext);
-			}
-
-			/*
-			 * The continuation should reproduce the original ordering. Fail
-			 * closed if the index or plan shape changed.
-			 */
-			if (!PathProvidesRequiredStreamingOrder(root, (Path *) inputPath))
-			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_QUERYPLANKILLED),
-								errmsg(
-									"Cannot resume primary key scan with the required ordering."),
-								errdetail_log(
-									"The resumed primary key path no longer provides the ordering required by the query; the index or plan shape changed since the cursor's first page.")));
 			}
 
 			return (Path *) CreateCustomScanPathForStreaming(root, rel,
@@ -2824,19 +2683,6 @@ GeneratePathFromContinuation(ParsedContinuationState *state,
 			{
 				state->scanType = QueryScanType_SecondaryIndexScan;
 				AddOrderByRequiredClausesIfNecessary(resumePath, root, rel);
-			}
-
-			/* Defensive; see the primary key scan resume above. */
-			if (!PathProvidesRequiredStreamingOrder(root, (Path *) resumePath))
-			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_QUERYPLANKILLED),
-								errmsg(
-									"Cannot resume secondary index scan with the required ordering."),
-								errdetail_log(
-									"The resumed secondary index path on \"%s\" no longer provides the ordering required by the query; the index or plan shape changed since the cursor's first page.",
-									resumePath->indexinfo != NULL ?
-									get_rel_name(resumePath->indexinfo->indexoid) :
-									"<unknown>")));
 			}
 
 			inputContinuation->scanType = state->scanType;

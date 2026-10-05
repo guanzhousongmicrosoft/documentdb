@@ -3,7 +3,9 @@
  *
  * include/api_hooks_def.h
  *
- * Definitions of API hooks that allow extension-specific behavior.
+ * Definition of hooks for the extension that allow for handling
+ * distribution type scenarios. These can be overriden to implement
+ * custom distribution logic.
  *
  *-------------------------------------------------------------------------
  */
@@ -40,14 +42,6 @@ extern IsMetadataCoordinator_HookType is_metadata_coordinator_hook;
  */
 typedef bool (*IsClusterInitialized_HookType)(void);
 extern IsClusterInitialized_HookType is_cluster_initialized_hook;
-
-typedef void (*NotifyCollectionMetadataInvalidated_HookType)(void);
-extern NotifyCollectionMetadataInvalidated_HookType
-	notify_collection_metadata_invalidated_hook;
-
-typedef void (*NotifyCollectionRelationInvalidated_HookType)(Oid relationId);
-extern NotifyCollectionRelationInvalidated_HookType
-	notify_collection_relation_invalidated_hook;
 
 /*
  * Indicates whether the Change Stream feature is currently enabled
@@ -93,10 +87,6 @@ typedef void (*RunMultiValueQueryWithCommutativeWrites_HookType)(const char *que
 																 long maxTupleCount);
 extern RunMultiValueQueryWithCommutativeWrites_HookType
 	run_multi_value_query_with_commutative_writes_hook;
-
-typedef void (*AllowCommutativeWritesInCurrentTransaction_HookType)(void);
-extern AllowCommutativeWritesInCurrentTransaction_HookType
-	allow_commutative_writes_in_current_transaction_hook;
 
 
 /*
@@ -160,6 +150,11 @@ typedef const pgbson *(*GetUserInfoFromExternalIdentityProvider_HookType)(const 
 																		  *userName);
 extern GetUserInfoFromExternalIdentityProvider_HookType
 	get_user_info_from_external_identity_provider_hook;
+
+
+/* Method for username validation */
+typedef bool (*UserNameValidation_HookType)(const char *username);
+extern UserNameValidation_HookType username_validation_hook;
 
 
 /* Method for password validation */
@@ -390,12 +385,4 @@ typedef bool (*GetEffectiveAggregateFunctionOid_HookType)(Aggref *aggref,
 extern GetEffectiveAggregateFunctionOid_HookType
 	get_effective_aggregate_function_oid_hook;
 
-
-typedef bool (*ShouldRunOptionalCatalogUpgrades_HookType)(void);
-extern ShouldRunOptionalCatalogUpgrades_HookType
-	should_run_optional_catalog_upgrades_hook;
-
-
-typedef void (*RunOptionalUpgradeDataTables_HookType)(int major, int minor, int patch);
-extern RunOptionalUpgradeDataTables_HookType run_optional_upgrade_data_tables_hook;
 #endif

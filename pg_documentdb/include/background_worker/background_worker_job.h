@@ -59,7 +59,6 @@ typedef enum BackgroundWorkerJobRoleExecutionProfile
 	BackgroundWorkerJobRoleExecutionProfile_Unspecified = 0,
 	BackgroundWorkerJobRoleExecutionProfile_PrimaryOnly,
 	BackgroundWorkerJobRoleExecutionProfile_RecoveryEligible,
-	BackgroundWorkerJobRoleExecutionProfile_RecoveryOnly,
 } BackgroundWorkerJobRoleExecutionProfile;
 
 

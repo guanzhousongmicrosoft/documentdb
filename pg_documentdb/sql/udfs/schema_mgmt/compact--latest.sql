@@ -17,14 +17,3 @@ PARALLEL SAFE STRICT
 AS 'MODULE_PATHNAME', $function$get_bloat_stats_worker$function$;
 COMMENT ON FUNCTION __API_SCHEMA_INTERNAL_V2__.get_bloat_stats_worker(INT8)
     IS 'Gets bloat stats for a collection table in the worker';
-
-
-CREATE OR REPLACE FUNCTION __API_SCHEMA_INTERNAL_V2__.get_storage_stats_worker(
-    p_collection_id INT8,
-    p_spec __CORE_SCHEMA_V2__.bson)
-RETURNS __CORE_SCHEMA_V2__.bson
-LANGUAGE C
-PARALLEL SAFE STRICT
-AS 'MODULE_PATHNAME', $function$get_storage_stats_worker$function$;
-COMMENT ON FUNCTION __API_SCHEMA_INTERNAL_V2__.get_storage_stats_worker(INT8, __CORE_SCHEMA_V2__.bson)
-    IS 'Gets the storage stats requested by the spec for a collection table in the worker';

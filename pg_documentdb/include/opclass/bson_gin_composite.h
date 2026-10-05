@@ -11,12 +11,8 @@
 #ifndef BSON_GIN_COMPOSITE_H
 #define BSON_GIN_COMPOSITE_H
 
-#include <nodes/primnodes.h>
-
 Datum * GenerateCompositeTermsFromIndexSpec(pgbson *document, pgbson *keySpec,
 											uint32_t *numTerms,
 											const StringView *collationStringView);
-
-bool CompositeIndexExprCanRequireRuntimeRecheck(Expr *expr);
 
 #endif

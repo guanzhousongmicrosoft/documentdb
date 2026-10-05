@@ -20,6 +20,4 @@ void RegisterReservoirSampleScanNodes(void);
 void RegisterTidDedupScanNodes(void);
 void RegisterRumIndexOnlyScanNodes(void);
 
-void ResetQueryTextData(void);
-
 #endif

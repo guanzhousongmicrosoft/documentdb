@@ -167,7 +167,6 @@ pgbson * CreateSchemaValidatorInfoDefinition(const
 											 SchemaValidatorInfo *schemaValidatorInfo);
 void ValidateViewDefinition(Datum databaseDatum, const char *viewName, const
 							ViewDefinition *definition);
-void ValidateDatabaseName(Datum databaseDatum);
 void ValidateDatabaseCollection(Datum databaseDatum, Datum collectionDatum);
 
 

@@ -11,10 +11,9 @@ use std::{sync::Arc, time::Duration};
 
 use documentdb_gateway_core::{
     configuration::{DocumentDBSetupConfiguration, PgConfiguration, SetupConfiguration},
-    error::Result,
     postgres::{conn_mgmt, create_query_catalog, DocumentDBDataClient},
     run_gateway,
-    service::{DefaultRequestRouter, TlsProvider},
+    service::TlsProvider,
     shutdown_controller::SHUTDOWN_CONTROLLER,
     startup::{create_postgres_object, get_service_context},
     time::STARTUP_INSTANT,
@@ -73,9 +72,7 @@ pub extern "C-unwind" fn documentdb_gw_worker_main(_arg: pg_sys::Datum) {
         .unwrap();
 
     tokio_runtime.spawn(async move {
-        if let Err(error) = run_docdb_gateway(setup_configuration_file.as_str()).await {
-            tracing::error!("Gateway worker failed to start: {error}");
-        }
+        run_docdb_gateway(setup_configuration_file.as_str()).await;
         SHUTDOWN_CONTROLLER.shutdown();
     });
 
@@ -91,7 +88,7 @@ pub extern "C-unwind" fn documentdb_gw_worker_main(_arg: pg_sys::Datum) {
     log!("{} stopped", worker_name);
 }
 
-async fn run_docdb_gateway(setup_configuration_file: &str) -> Result<()> {
+async fn run_docdb_gateway(setup_configuration_file: &str) {
     let cfg_file = std::path::PathBuf::from(setup_configuration_file);
 
     let shutdown_token = SHUTDOWN_CONTROLLER.token();
@@ -115,7 +112,7 @@ async fn run_docdb_gateway(setup_configuration_file: &str) -> Result<()> {
     .await
     .expect("Failed to create TLS provider.");
 
-    let connection_pool_manager = match create_postgres_object(
+    let connection_pool_manager = create_postgres_object(
         || async {
             conn_mgmt::create_connection_pool_manager(
                 create_query_catalog(),
@@ -125,17 +122,9 @@ async fn run_docdb_gateway(setup_configuration_file: &str) -> Result<()> {
         },
         &setup_configuration,
     )
-    .await
-    {
-        Ok(manager) => manager,
-        // A cancelled shutdown token means the worker was asked to stop while
-        // retrying, not a genuine startup failure; returning early here avoids
-        // logging an expected shutdown as a worker failure.
-        Err(_) if shutdown_token.is_cancelled() => return Ok(()),
-        Err(error) => return Err(error),
-    };
+    .await;
 
-    let dynamic_configuration = match create_postgres_object(
+    let dynamic_configuration = create_postgres_object(
         || async {
             PgConfiguration::new(
                 &setup_configuration,
@@ -146,12 +135,7 @@ async fn run_docdb_gateway(setup_configuration_file: &str) -> Result<()> {
         },
         &setup_configuration,
     )
-    .await
-    {
-        Ok(configuration) => configuration,
-        Err(_) if shutdown_token.is_cancelled() => return Ok(()),
-        Err(error) => return Err(error),
-    };
+    .await;
 
     let service_context = get_service_context(
         Box::new(setup_configuration),
@@ -160,11 +144,7 @@ async fn run_docdb_gateway(setup_configuration_file: &str) -> Result<()> {
         tls_provider,
     );
 
-    run_gateway::<DocumentDBDataClient, _>(
-        service_context,
-        None,
-        DefaultRequestRouter {},
-        shutdown_token,
-    )
-    .await
+    run_gateway::<DocumentDBDataClient>(service_context, None, shutdown_token)
+        .await
+        .unwrap();
 }

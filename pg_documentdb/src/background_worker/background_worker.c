@@ -11,12 +11,10 @@
 #include <postgres.h>
 #include <catalog/pg_extension.h>
 #include <catalog/namespace.h>
-#include <catalog/pg_proc.h>
 #include <nodes/pg_list.h>
 #include <tcop/utility.h>
 #include <postmaster/interrupt.h>
 #include <libpq-fe.h>
-#include <portability/instr_time.h>
 #include <storage/latch.h>
 #include <miscadmin.h>
 #include <postmaster/bgworker.h>
@@ -30,8 +28,10 @@
 #include <utils/builtins.h>
 #include <access/xact.h>
 #include <utils/snapmgr.h>
+#include <catalog/pg_proc_d.h>
 #include "utils/query_utils.h"
 #include "utils/documentdb_errors.h"
+#include "utils/syscache.h"
 #include "utils/lsyscache.h"
 #include "utils/acl.h"
 #include "parser/parse_func.h"
@@ -40,7 +40,6 @@
 #include "api_hooks.h"
 #include "api_hooks_def.h"
 #include "background_worker/background_worker_job.h"
-#include "background_worker/background_worker_private.h"
 #include "commands/connection_management.h"
 #include "infrastructure/job_management.h"
 #include "metadata/metadata_cache.h"
@@ -69,7 +68,6 @@ extern char *LocalhostConnectionString;
 extern int LatchTimeOutSec;
 extern int BackgroundWorkerJobTimeoutThresholdSec;
 extern bool BgWorkerEnableDiagnosticsLog;
-extern bool EnableLegacyJobsTimeout;
 
 static bool BackgroundWorkerReloadConfig = false;
 
@@ -111,26 +109,6 @@ typedef enum BackgroundWorkerBoolOption
 } BackgroundWorkerBoolOption;
 
 /*
- * Per-job attempt observation state owned by the leader's execution object.
- * It persists across scheduling passes until the active attempt is resolved.
- */
-typedef struct
-{
-	/* Wall-clock start of the active attempt for SQL timestamps. */
-	TimestampTz attemptStartTimestamp;
-
-	/* Monotonic start of the active attempt for elapsed duration. */
-	instr_time attemptStartTime;
-
-	/* Whether an attempt has started but has not reached a terminal outcome. */
-	bool attemptInProgress;
-
-	/* Polling metadata for the wait cycle that observed the terminal outcome. */
-	bool hasAttemptObservationInterval;
-	int64 attemptObservationIntervalMilliseconds;
-} BackgroundWorkerJobExecutionStatsState;
-
-/*
  * Background worker job execution object.
  */
 typedef struct
@@ -149,15 +127,6 @@ typedef struct
 
 	/* Job state. */
 	BackgroundWorkerJobState state;
-
-	/* Per-attempt state used to publish execution statistics. */
-	BackgroundWorkerJobExecutionStatsState statsState;
-
-	/* Process-local terminal outcome counters. */
-	uint64 successfulExecutionCount;
-	uint64 failedExecutionCount;
-	uint64 timedOutExecutionCount;
-	uint64 unobservedExecutionCount;
 } BackgroundWorkerJobExecution;
 
 extern void RegisterBackgroundWorkerJobAllowedCommand(BackgroundWorkerJobCommand command);
@@ -181,62 +150,23 @@ static void ValidateJob(BackgroundWorkerJob job);
 static void ValidateRoleExecutionProfile(const char *jobName,
 										 BackgroundWorkerJobRoleExecutionProfile
 										 roleExecutionProfile);
-static void ManageJobsLifeCycle(List *jobExecutions, char *userName, char *databaseName,
-								bool inRecovery);
-static void SetActiveAttemptObservationInterval(List *jobExecutions,
-												int64
-												attemptObservationIntervalMilliseconds);
+static void ManageJobsLifeCycle(List *jobExecutions, char *userName, char *databaseName);
 static void ExecuteJob(BackgroundWorkerJobExecution *jobExec, char *userName,
 					   char *databaseName, TimestampTz currentTime);
 static void CheckJobCompletion(BackgroundWorkerJobExecution *jobExec);
-static BackgroundWorkerJobResult ConsumeJobResults(BackgroundWorkerJobExecution *jobExec);
-static BackgroundWorkerJobResult ClassifyJobResults(bool receivedResult, bool succeeded,
-													bool observedAuthoritativeFailure,
-													bool transportLost);
-static inline void BeginJobAttempt(BackgroundWorkerJobExecution *jobExec);
-static void CompleteJobAttempt(BackgroundWorkerJobExecution *jobExec,
-							   BackgroundWorkerJobResult result);
-static void RecordJobAttemptDiagnostics(BackgroundWorkerJobExecution *jobExec,
-										BackgroundWorkerJobResult result);
-static inline bool IsSuccessfulCommandResult(ExecStatusType resultStatus);
 static void FreeJobExecutions(List *jobExecutions);
 static bool CheckIfMetadataCoordinator(void);
 static bool CheckIfJobCommandIsAllowed(BackgroundWorkerJobCommand command);
-static bool CanExecuteJob(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime,
-						  bool inRecovery);
+static bool CanExecuteJob(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime);
 static bool IsJobEnabled(BackgroundWorkerJobExecution *jobExec);
 static bool CheckIfRoleExists(const char *roleName);
 static List * GenerateJobExecutions(void);
 static BackgroundWorkerJobExecution * CreateJobExecutionObj(BackgroundWorkerJob job);
 static char * GenerateCommandQuery(BackgroundWorkerJob job, MemoryContext stableContext);
-static void CancelJobIfTimeIsUp(BackgroundWorkerJobExecution *jobExec,
-								TimestampTz currentTime);
+static void CancelJobIfTimeIsUp(BackgroundWorkerJobExecution *jobExec, TimestampTz
+								currentTime);
 static void WaitForBackgroundWorkerDependencies(void);
 static void WaitForInitJobsCompletion(void);
-static bool BackgroundWorkerJobsEnabledForRole(bool inRecovery);
-static bool JobCanExecuteForRole(BackgroundWorkerJobRoleExecutionProfile
-								 roleExecutionProfile, bool inRecovery);
-
-/*
- * The scheduler initializes initJobsPending once at startup. It is true only
- * when the server is in recovery, where init jobs are deferred because they
- * may require writes; otherwise, the init jobs run immediately and the flag
- * is false.
- *
- * Promotion does not restart the postmaster or this worker, so
- * initJobsPending retains its startup value. Each scheduling cycle separately
- * refreshes inRecovery by calling RecoveryInProgress(). After promotion,
- * inRecovery becomes false while initJobsPending is still true. The helper
- * returns true in this state, telling the caller to run the deferred init jobs
- * before primary job scheduling. The caller clears initJobsPending after the
- * init jobs complete.
- */
-static inline bool
-ShouldRunDeferredInitJobs(bool initJobsPending, bool inRecovery)
-{
-	return initJobsPending && !inRecovery;
-}
-
 
 /*
  * The allowed commands registry should not be exposed outside this c file to avoid unpredictable behavior.
@@ -254,6 +184,7 @@ static int AllowedCommandEntries = 0;
  * access for consumers (e.g. the stats view) is provided via
  * GetBackgroundWorkerJobCount / GetBackgroundWorkerJob.
  */
+#define MAX_BACKGROUND_WORKER_JOBS 5
 static BackgroundWorkerJob JobRegistry[MAX_BACKGROUND_WORKER_JOBS];
 static int JobEntries = 0;
 
@@ -269,6 +200,32 @@ inline static int
 GetDefaultScheduleIntervalInSeconds(void)
 {
 	return 60;
+}
+
+
+/*
+ * ValidateRoleExecutionProfile validates where a periodic job may be
+ * dispatched.
+ */
+static void
+ValidateRoleExecutionProfile(const char *jobName,
+							 BackgroundWorkerJobRoleExecutionProfile
+							 roleExecutionProfile)
+{
+	if (roleExecutionProfile == BackgroundWorkerJobRoleExecutionProfile_Unspecified)
+	{
+		ereport(ERROR, (errmsg(
+							"Background worker job '%s' must declare a role execution profile",
+							jobName)));
+	}
+
+	if (roleExecutionProfile < BackgroundWorkerJobRoleExecutionProfile_PrimaryOnly ||
+		roleExecutionProfile > BackgroundWorkerJobRoleExecutionProfile_RecoveryEligible)
+	{
+		ereport(ERROR, (errmsg(
+							"Background worker job '%s' has invalid role execution profile value %d",
+							jobName, roleExecutionProfile)));
+	}
 }
 
 
@@ -323,14 +280,10 @@ DocumentDBBackgroundWorkerMain(Datum main_arg)
 	on_shmem_exit(BackgroundWorkerKill, 0);
 
 	/*
-	 * Run init jobs before waiting for dependencies, but defer them until
-	 * recovery ends. The wait helper handles enableBackgroundWorkerInitJobs feature flag.
+	 * Run registered init jobs before waiting for background worker dependencies.
+	 * Guarded by the enableBackgroundWorkerInitJobs feature flag.
 	 */
-	bool initJobsPending = RecoveryInProgress();
-	if (!initJobsPending)
-	{
-		WaitForInitJobsCompletion();
-	}
+	WaitForInitJobsCompletion();
 
 	/*
 	 * After init jobs complete, mark all subsequent transactions as read-only.
@@ -390,11 +343,20 @@ DocumentDBBackgroundWorkerMain(Datum main_arg)
 		MemoryContextSwitchTo(bgWorkerContext);
 
 		/*
-		 * Keep execution state after role or configuration changes so running
-		 * jobs can drain. Role eligibility is checked before each dispatch.
+		 * The background worker job framework is controlled by a GUC
+		 * that enables or disables job executions. The control flow
+		 * below exists to adjust the internal state gracefuly when the
+		 * GUC value changes in real time.
 		 */
-		if (jobExecutions == NIL &&
-			(EnableBackgroundWorkerJobs || EnableBackgroundWorkerJobsInRecovery))
+		if (jobExecutions != NIL)
+		{
+			if (!EnableBackgroundWorkerJobs)
+			{
+				FreeJobExecutions(jobExecutions);
+				jobExecutions = NIL;
+			}
+		}
+		else if (EnableBackgroundWorkerJobs)
 		{
 			jobExecutions = GenerateJobExecutions();
 		}
@@ -448,38 +410,7 @@ DocumentDBBackgroundWorkerMain(Datum main_arg)
 		if (waitResult & WL_TIMEOUT)
 		{
 			/* Event received for schedules */
-			bool inRecovery = RecoveryInProgress();
-
-			if (ShouldRunDeferredInitJobs(initJobsPending, inRecovery))
-			{
-				if (BgWorkerEnableDiagnosticsLog)
-				{
-					ereport(LOG, (errmsg(
-									  "Recovery ended; running deferred background worker init jobs")));
-				}
-
-				PopActiveSnapshot();
-				CommitTransactionCommand();
-
-				set_config_option("default_transaction_read_only", "false",
-								  PGC_USERSET, PGC_S_SESSION,
-								  GUC_ACTION_SET, true, 0, false);
-				WaitForInitJobsCompletion();
-				set_config_option("default_transaction_read_only", "true",
-								  PGC_USERSET, PGC_S_SESSION,
-								  GUC_ACTION_SET, true, 0, false);
-				initJobsPending = false;
-
-				SetCurrentStatementStartTimestamp();
-				StartTransactionCommand();
-				PushActiveSnapshot(GetTransactionSnapshot());
-				MemoryContextSwitchTo(bgWorkerContext);
-			}
-
-			SetActiveAttemptObservationInterval(jobExecutions,
-												latchTimeOut * ONE_SEC_IN_MS);
-			ManageJobsLifeCycle(jobExecutions, ApiBgWorkerRole, databaseName,
-								inRecovery);
+			ManageJobsLifeCycle(jobExecutions, ApiBgWorkerRole, databaseName);
 		}
 
 		latchTimeOut = LatchTimeOutSec;
@@ -561,7 +492,6 @@ RegisterBackgroundWorkerJob(BackgroundWorkerJob job)
 	/* Fails if job is not valid. */
 	ValidateJob(job);
 
-	RegisterBackgroundWorkerJobStats(job.jobId);
 	JobRegistry[JobEntries++] = job;
 }
 
@@ -589,8 +519,7 @@ GetBackgroundWorkerJob(int index)
  * ManageJobsLifeCycle walks through the list of jobs and takes action based on their state.
  */
 static void
-ManageJobsLifeCycle(List *jobExecutions, char *userName, char *databaseName,
-					bool inRecovery)
+ManageJobsLifeCycle(List *jobExecutions, char *userName, char *databaseName)
 {
 	TimestampTz currentTime = GetCurrentTimestamp();
 	ListCell *jobExecCell = NULL;
@@ -604,36 +533,16 @@ ManageJobsLifeCycle(List *jobExecutions, char *userName, char *databaseName,
 		BackgroundWorkerJobExecution *jobExec = (BackgroundWorkerJobExecution *) lfirst(
 			jobExecCell);
 
-		/* Classify an available result before deciding that the job timed out. */
-		CheckJobCompletion(jobExec);
-
-		/* Cancel the job if it is still running after its timeout. */
+		/* Cancels job in case the job is running is open and timeout was reached. */
 		CancelJobIfTimeIsUp(jobExec, currentTime);
 
+		/* Check if job completed in case the job is running. */
+		CheckJobCompletion(jobExec);
+
 		/* Executes job if it hasn't started and the scheduled interval was reached. */
-		if (CanExecuteJob(jobExec, currentTime, inRecovery))
+		if (CanExecuteJob(jobExec, currentTime))
 		{
 			ExecuteJob(jobExec, userName, databaseName, currentTime);
-		}
-	}
-}
-
-
-static void
-SetActiveAttemptObservationInterval(List *jobExecutions,
-									int64 attemptObservationIntervalMilliseconds)
-{
-	ListCell *jobExecCell = NULL;
-	foreach(jobExecCell, jobExecutions)
-	{
-		BackgroundWorkerJobExecution *jobExec = (BackgroundWorkerJobExecution *) lfirst(
-			jobExecCell);
-		BackgroundWorkerJobExecutionStatsState *statsState = &jobExec->statsState;
-		if (statsState->attemptInProgress)
-		{
-			statsState->hasAttemptObservationInterval = true;
-			statsState->attemptObservationIntervalMilliseconds =
-				attemptObservationIntervalMilliseconds;
 		}
 	}
 }
@@ -685,15 +594,8 @@ IsJobEnabled(BackgroundWorkerJobExecution *jobExec)
  * Checks if a given job is eligible to start.
  */
 static bool
-CanExecuteJob(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime,
-			  bool inRecovery)
+CanExecuteJob(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime)
 {
-	if (!BackgroundWorkerJobsEnabledForRole(inRecovery) ||
-		!JobCanExecuteForRole(jobExec->job.roleExecutionProfile, inRecovery))
-	{
-		return false;
-	}
-
 	if (jobExec->job.toBeExecutedOnMetadataCoordinatorOnly &&
 		!CheckIfMetadataCoordinator())
 	{
@@ -715,42 +617,10 @@ CanExecuteJob(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime,
 }
 
 
-static bool
-BackgroundWorkerJobsEnabledForRole(bool inRecovery)
-{
-	return inRecovery ? EnableBackgroundWorkerJobsInRecovery :
-		   EnableBackgroundWorkerJobs;
-}
-
-
-static bool
-JobCanExecuteForRole(BackgroundWorkerJobRoleExecutionProfile roleExecutionProfile,
-					 bool inRecovery)
-{
-	switch (roleExecutionProfile)
-	{
-		case BackgroundWorkerJobRoleExecutionProfile_PrimaryOnly:
-		{
-			return !inRecovery;
-		}
-
-		case BackgroundWorkerJobRoleExecutionProfile_RecoveryEligible:
-		{
-			return true;
-		}
-
-		case BackgroundWorkerJobRoleExecutionProfile_RecoveryOnly:
-		{
-			return inRecovery;
-		}
-
-		default:
-			return false;
-	}
-}
-
-
-/* Checks whether the job completed and classifies every result it returned. */
+/*
+ * Checks if job execution completed by using the LibPQ API.
+ * If positive, closes the job PG connection and resets it.
+ */
 static void
 CheckJobCompletion(BackgroundWorkerJobExecution *jobExec)
 {
@@ -759,281 +629,53 @@ CheckJobCompletion(BackgroundWorkerJobExecution *jobExec)
 		return;
 	}
 
-	PGconn *connection = jobExec->connection;
-	if (PQconsumeInput(connection) == 0)
-	{
-		PGConnReportError(connection, NULL, WARNING);
-		PQfinish(connection);
-		jobExec->connection = NULL;
-		CompleteJobAttempt(jobExec, JOB_RESULT_UNOBSERVED);
-		return;
-	}
+	MemoryContext stableContext = CurrentMemoryContext;
 
-	if (PQisBusy(connection))
-	{
-		return;
-	}
-
-	BackgroundWorkerJobResult jobResult = ConsumeJobResults(jobExec);
-	PQfinish(connection);
-	jobExec->connection = NULL;
-	CompleteJobAttempt(jobExec, jobResult);
-}
-
-
-/* Drains every available command result and classifies the execution. */
-static BackgroundWorkerJobResult
-ConsumeJobResults(BackgroundWorkerJobExecution *jobExec)
-{
-	PGconn *connection = jobExec->connection;
-	bool receivedResult = false;
-	bool succeeded = true;
-	bool observedAuthoritativeFailure = false;
-	PGresult *result = NULL;
-	while ((result = PQgetResult(connection)) != NULL)
-	{
-		receivedResult = true;
-		ExecStatusType resultStatus = PQresultStatus(result);
-		if (!IsSuccessfulCommandResult(resultStatus))
-		{
-			succeeded = false;
-			observedAuthoritativeFailure |=
-				PQresultErrorField(result, PG_DIAG_SQLSTATE) != NULL;
-			if (resultStatus == PGRES_FATAL_ERROR ||
-				resultStatus == PGRES_NONFATAL_ERROR)
-			{
-				PGConnReportError(connection, result, WARNING);
-			}
-			else
-			{
-				ereport(WARNING, (errmsg(
-									  "Background worker job %s with id %d returned unexpected command result status %s",
-									  jobExec->job.jobName, jobExec->job.jobId,
-									  PQresStatus(resultStatus))));
-			}
-		}
-
-		PQclear(result);
-	}
-
-	bool transportLost = PQstatus(connection) != CONNECTION_OK;
-
-	if (!receivedResult)
-	{
-		succeeded = false;
-		ereport(WARNING, (errmsg(
-							  "Background worker job %s with id %d completed without returning a command result",
-							  jobExec->job.jobName, jobExec->job.jobId)));
-	}
-
-	return ClassifyJobResults(receivedResult, succeeded, observedAuthoritativeFailure,
-							  transportLost);
-}
-
-
-static inline BackgroundWorkerJobResult
-ClassifyJobResults(bool receivedResult, bool succeeded,
-				   bool observedAuthoritativeFailure, bool transportLost)
-{
-	if (receivedResult && succeeded)
-	{
-		return JOB_RESULT_SUCCEEDED;
-	}
-
-	if (observedAuthoritativeFailure || !transportLost)
-	{
-		return JOB_RESULT_FAILED;
-	}
-
-	return JOB_RESULT_UNOBSERVED;
-}
-
-
-static inline void
-BeginJobAttempt(BackgroundWorkerJobExecution *jobExec)
-{
-	BackgroundWorkerJobExecutionStatsState *statsState = &jobExec->statsState;
-	if (statsState->attemptInProgress)
-	{
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg(
-							"Background worker job %d already has an active attempt",
-							jobExec->job.jobId)));
-	}
-
-	statsState->attemptStartTimestamp = GetCurrentTimestamp();
-	INSTR_TIME_SET_CURRENT(statsState->attemptStartTime);
-	statsState->attemptInProgress = true;
-	statsState->hasAttemptObservationInterval = false;
-	statsState->attemptObservationIntervalMilliseconds = 0;
-}
-
-
-/* Records one execution resolution after the connection has been closed. */
-static void
-CompleteJobAttempt(BackgroundWorkerJobExecution *jobExec,
-				   BackgroundWorkerJobResult result)
-{
-	BackgroundWorkerJobExecutionStatsState *statsState = &jobExec->statsState;
-	if (!statsState->attemptInProgress)
-	{
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg(
-							"Background worker job %d has no active attempt to complete",
-							jobExec->job.jobId)));
-	}
-
-	MemoryContext savedContext = CurrentMemoryContext;
-	ResourceOwner savedOwner = CurrentResourceOwner;
-	const bool hasAttemptObservationInterval =
-		statsState->hasAttemptObservationInterval;
-	int64 attemptObservationIntervalMilliseconds =
-		statsState->attemptObservationIntervalMilliseconds;
-
-	/*
-	 * Statistics failures must not abort the scheduler transaction or prevent
-	 * the remaining jobs from being processed in this scheduling pass.
-	 */
-	BeginInternalSubTransaction(NULL);
-
+	/* Checks if command is busy. If not, close connection and reset it. */
 	PG_TRY();
 	{
-		PublishBackgroundWorkerJobCompletion(jobExec->job.jobId,
-											 result,
-											 statsState->attemptStartTimestamp,
-											 statsState->attemptStartTime,
-											 hasAttemptObservationInterval,
-											 attemptObservationIntervalMilliseconds);
+		if (PQconsumeInput(jobExec->connection) == 0)
+		{
+			PGConnReportError(jobExec->connection, NULL, ERROR);
+		}
 
-		ReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(savedContext);
-		CurrentResourceOwner = savedOwner;
+		if (!PQisBusy(jobExec->connection))
+		{
+			PQfinish(jobExec->connection);
+			jobExec->connection = NULL;
+			jobExec->state = JOB_IDLE;
+		}
 	}
 	PG_CATCH();
 	{
-		MemoryContextSwitchTo(savedContext);
-		ErrorData *errorData = CopyErrorData();
+		MemoryContextSwitchTo(stableContext);
+
+		/* Clear error context since we don't use it. */
 		FlushErrorState();
 
-		RollbackAndReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(savedContext);
-		CurrentResourceOwner = savedOwner;
-
-		if (IsOperatorInterventionError(errorData))
+		/* Close the connection. */
+		if (jobExec->connection != NULL)
 		{
-			ReThrowError(errorData);
+			PQfinish(jobExec->connection);
+			jobExec->connection = NULL;
 		}
 
-		ereport(WARNING, (errcode(errorData->sqlerrcode),
-						  errmsg(
-							  "Failed to publish statistics for background worker job %s with id %d.",
-							  jobExec->job.jobName, jobExec->job.jobId),
-						  errdetail_internal("%s", errorData->message)));
-		FreeErrorData(errorData);
+		/* Restart the transaction since the error may have aborted it. */
+		PopAllActiveSnapshots();
+		AbortCurrentTransaction();
+		SetCurrentStatementStartTimestamp();
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		MemoryContextSwitchTo(stableContext);
+
+		/* Set state to idle so it can run in the next iteration. */
+		jobExec->state = JOB_IDLE;
+
+		ereport(WARNING, (errmsg(
+							  "Failed to execute background worker job %s with id %d. Could not consume input from the connection.",
+							  jobExec->job.jobName, jobExec->job.jobId)));
 	}
 	PG_END_TRY();
-
-	statsState->attemptInProgress = false;
-	jobExec->state = JOB_IDLE;
-
-	RecordJobAttemptDiagnostics(jobExec, result);
-}
-
-
-/* Updates process-local outcome counters and emits diagnostic completion logs. */
-static void
-RecordJobAttemptDiagnostics(BackgroundWorkerJobExecution *jobExec,
-							BackgroundWorkerJobResult result)
-{
-	switch (result)
-	{
-		case JOB_RESULT_SUCCEEDED:
-		{
-			jobExec->successfulExecutionCount++;
-			if (BgWorkerEnableDiagnosticsLog)
-			{
-				elog_unredacted(
-					"Background worker job with id %d succeeded (successful executions: "
-					UINT64_FORMAT ", failed executions: " UINT64_FORMAT
-					", timed out executions: "
-					UINT64_FORMAT ", unobserved executions: "
-					UINT64_FORMAT ")",
-					jobExec->job.jobId,
-					jobExec->successfulExecutionCount,
-					jobExec->failedExecutionCount,
-					jobExec->timedOutExecutionCount,
-					jobExec->unobservedExecutionCount);
-			}
-			break;
-		}
-
-		case JOB_RESULT_FAILED:
-		{
-			jobExec->failedExecutionCount++;
-			elog_unredacted(
-				"Background worker job with id %d failed (successful executions: "
-				UINT64_FORMAT ", failed executions: " UINT64_FORMAT
-				", timed out executions: "
-				UINT64_FORMAT ", unobserved executions: "
-				UINT64_FORMAT ")",
-				jobExec->job.jobId,
-				jobExec->successfulExecutionCount,
-				jobExec->failedExecutionCount,
-				jobExec->timedOutExecutionCount,
-				jobExec->unobservedExecutionCount);
-			break;
-		}
-
-		case JOB_RESULT_TIMED_OUT:
-		{
-			jobExec->timedOutExecutionCount++;
-			elog_unredacted(
-				"Background worker job with id %d timed out (configured timeout: %d seconds, successful executions: "
-				UINT64_FORMAT ", failed executions: " UINT64_FORMAT
-				", timed out executions: "
-				UINT64_FORMAT ", unobserved executions: "
-				UINT64_FORMAT ")",
-				jobExec->job.jobId,
-				jobExec->job.timeoutInSeconds,
-				jobExec->successfulExecutionCount,
-				jobExec->failedExecutionCount,
-				jobExec->timedOutExecutionCount,
-				jobExec->unobservedExecutionCount);
-			break;
-		}
-
-		case JOB_RESULT_UNOBSERVED:
-		{
-			jobExec->unobservedExecutionCount++;
-			elog_unredacted(
-				"Background worker job with id %d resolved as unobserved (successful executions: "
-				UINT64_FORMAT ", failed executions: " UINT64_FORMAT
-				", timed out executions: "
-				UINT64_FORMAT ", unobserved executions: "
-				UINT64_FORMAT ")",
-				jobExec->job.jobId,
-				jobExec->successfulExecutionCount,
-				jobExec->failedExecutionCount,
-				jobExec->timedOutExecutionCount,
-				jobExec->unobservedExecutionCount);
-			break;
-		}
-
-		default:
-		{
-			ereport(WARNING,
-					(errmsg("Unknown background worker job result: %d", result)));
-			break;
-		}
-	}
-}
-
-
-/* Returns true for terminal statuses produced by supported job commands. */
-static inline bool
-IsSuccessfulCommandResult(ExecStatusType resultStatus)
-{
-	return resultStatus == PGRES_COMMAND_OK || resultStatus == PGRES_TUPLES_OK;
 }
 
 
@@ -1200,8 +842,6 @@ ExecuteJob(BackgroundWorkerJobExecution *jobExec, char *userName, char *database
 	 * heap-allocated struct, avoiding the need for a volatile local variable
 	 * to survive longjmp.
 	 */
-	BeginJobAttempt(jobExec);
-
 	PG_TRY();
 	{
 		char *connStr = localhostConnStr.data;
@@ -1230,12 +870,9 @@ ExecuteJob(BackgroundWorkerJobExecution *jobExec, char *userName, char *database
 		const char *query = jobExec->commandQuery;
 
 		/* We currently limit the number of arguments to be at most 1. */
-		bool hasArgument = jobExec->job.argument.argType != VOIDOID;
-		int nParams = hasArgument ? 1 : 0;
+		int nParams = jobExec->job.argument.isNull ? 0 : 1;
 		Oid paramTypes[1] = { jobExec->job.argument.argType };
-		const char *parameterValues[1] = {
-			jobExec->job.argument.isNull ? NULL : jobExec->job.argument.argValue
-		};
+		const char *parameterValues[1] = { jobExec->job.argument.argValue };
 
 		/* Result in text format. */
 		int resultFormat = 0;
@@ -1272,13 +909,12 @@ ExecuteJob(BackgroundWorkerJobExecution *jobExec, char *userName, char *database
 		PushActiveSnapshot(GetTransactionSnapshot());
 		MemoryContextSwitchTo(stableContext);
 
-		/* Preserve the configured retry cadence after a dispatch failure. */
-		jobExec->lastStartTime = currentTime;
+		/* Set state to idle so it can run in the next iteration. */
+		jobExec->state = JOB_IDLE;
 
 		ereport(WARNING, (errmsg(
 							  "Failed to execute background worker job id %d. Could not establish connection and send query.",
 							  jobExec->job.jobId)));
-		CompleteJobAttempt(jobExec, JOB_RESULT_FAILED);
 	}
 	PG_END_TRY();
 
@@ -1293,11 +929,6 @@ ExecuteJob(BackgroundWorkerJobExecution *jobExec, char *userName, char *database
 static void
 CancelJobIfTimeIsUp(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTime)
 {
-	if (!EnableLegacyJobsTimeout)
-	{
-		return;
-	}
-
 	int timeoutInSeconds = jobExec->job.timeoutInSeconds;
 	if (jobExec->state == JOB_IDLE ||
 		timeoutInSeconds <= 0)
@@ -1314,9 +945,10 @@ CancelJobIfTimeIsUp(BackgroundWorkerJobExecution *jobExec, TimestampTz currentTi
 		{
 			PGConnTryCancel(jobExec->connection);
 		}
+
 		PQfinish(jobExec->connection);
 		jobExec->connection = NULL;
-		CompleteJobAttempt(jobExec, JOB_RESULT_TIMED_OUT);
+		jobExec->state = JOB_IDLE;
 
 		ereport(LOG, (errmsg(
 						  "Canceled background worker job %s with id %d because of connection timeout of %d seconds.",
@@ -1346,18 +978,8 @@ ValidateJob(BackgroundWorkerJob job)
 		ereport(ERROR, (errmsg("Background worker job command schema can not be NULL")));
 	}
 
-	if (!OidIsValid(job.argument.argType))
-	{
-		ereport(ERROR, (errmsg("Background worker job argument type is invalid.")));
-	}
-
-	if (job.argument.argType == VOIDOID && !job.argument.isNull)
-	{
-		ereport(ERROR, (errmsg(
-							"Background worker jobs without arguments must have isNull set to true.")));
-	}
-
-	if (!job.argument.isNull && job.argument.argValue == NULL)
+	if (job.argument.isNull == false && (job.argument.argType == 0 ||
+										 job.argument.argValue == NULL))
 	{
 		ereport(ERROR, (errmsg(
 							"Background worker job argument can not be NULL when isnull is set to false.")));
@@ -1406,38 +1028,6 @@ ValidateJob(BackgroundWorkerJob job)
 	if (!CheckIfJobCommandIsAllowed(job.command))
 	{
 		ereport(ERROR, (errmsg("Background worker job command is not allowed")));
-	}
-}
-
-
-/*
- * ValidateRoleExecutionProfile validates where a periodic job may be
- * dispatched.
- */
-static void
-ValidateRoleExecutionProfile(const char *jobName,
-							 BackgroundWorkerJobRoleExecutionProfile
-							 roleExecutionProfile)
-{
-	if (roleExecutionProfile == BackgroundWorkerJobRoleExecutionProfile_Unspecified)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg(
-							"Background worker job must declare a role execution profile"),
-						errdetail_log(
-							"Background worker job '%s' has unspecified role execution profile value %d",
-							jobName, roleExecutionProfile)));
-	}
-
-	if (roleExecutionProfile < BackgroundWorkerJobRoleExecutionProfile_PrimaryOnly ||
-		roleExecutionProfile > BackgroundWorkerJobRoleExecutionProfile_RecoveryOnly)
-	{
-		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
-						errmsg(
-							"Background worker job has an invalid role execution profile"),
-						errdetail_log(
-							"Background worker job '%s' has invalid role execution profile value %d",
-							jobName, roleExecutionProfile)));
 	}
 }
 
@@ -1518,15 +1108,6 @@ CreateJobExecutionObj(BackgroundWorkerJob job)
 	jobExec->connection = NULL;
 	jobExec->commandQuery = commandQuery;
 	jobExec->state = JOB_IDLE;
-	jobExec->statsState.attemptStartTimestamp = 0;
-	INSTR_TIME_SET_ZERO(jobExec->statsState.attemptStartTime);
-	jobExec->statsState.attemptInProgress = false;
-	jobExec->statsState.hasAttemptObservationInterval = false;
-	jobExec->statsState.attemptObservationIntervalMilliseconds = 0;
-	jobExec->successfulExecutionCount = 0;
-	jobExec->failedExecutionCount = 0;
-	jobExec->timedOutExecutionCount = 0;
-	jobExec->unobservedExecutionCount = 0;
 
 	return jobExec;
 }
@@ -1604,8 +1185,7 @@ GenerateCommandQuery(BackgroundWorkerJob job, MemoryContext stableContext)
 										   makeString(pstrdup(job.command.name)));
 		funcWithArgs->args_unspecified = false;
 
-		bool hasArgument = job.argument.argType != VOIDOID;
-		if (!hasArgument)
+		if (job.argument.isNull)
 		{
 			funcWithArgs->objargs = NIL;
 		}
@@ -1633,7 +1213,7 @@ GenerateCommandQuery(BackgroundWorkerJob job, MemoryContext stableContext)
 
 		/* The command prefix changes depending on the procType (Function or Procedure). */
 		char *commandPrefix = procType == 'p' ? "CALL" : "SELECT";
-		char *parameter = hasArgument ? "$1" : "";
+		char *parameter = job.argument.isNull ? "" : "$1";
 		char *tempQuery = psprintf("%s %s.%s(%s);", commandPrefix, job.command.schema,
 								   job.command.name, parameter);
 

@@ -134,8 +134,6 @@ Oid ExtensionTableSampleSystemRowsFunctionId(void);
 Oid BsonInRangeNumericFunctionId(void);
 Oid BsonInRangeIntervalFunctionId(void);
 Oid BsonQueryMatchWithLetAndCollationFunctionId(void);
-Oid IsReservedUserFunctionId(void);
-Oid IsCustomRoleFunctionId(void);
 
 /* object_id functions */
 Oid BsonRegexObjectIdMatchFunctionId(void);
@@ -228,7 +226,6 @@ Oid ApiCatalogCollectionIndexIdSequenceId(void);
 
 /* order by */
 Oid BsonOrderByFunctionOid(void);
-Oid BsonOrderByMetaFunctionOid(void);
 Oid BsonOrderByWithCollationFunctionOid(void);
 Oid BsonOrderByIndexFunctionOid(void);
 Oid BsonOrderByIndexReverseFunctionOid(void);
@@ -379,9 +376,6 @@ Oid TsMatchFunctionOid(void);
 Oid ApiCatalogAggregationPipelineFunctionId(void);
 Oid ApiCatalogAggregationFindFunctionId(void);
 Oid ApiCatalogAggregationCountFunctionId(void);
-Oid ApiCatalogAggregationUpdateFunctionId(void);
-Oid ApiCatalogAggregationDeleteFunctionId(void);
-Oid ApiCatalogAggregationFindAndModifyFunctionId(void);
 Oid ApiCatalogAggregationDistinctFunctionId(void);
 Oid ApiCatalogAggregationGetMoreFunctionId(void);
 Oid BsonCovariancePopAggregateFunctionOid(void);
@@ -417,6 +411,7 @@ Oid BsonCommandCountAggregateFunctionOid(void);
 Oid BsonCountAggregateFunctionOid(void);
 Oid BsonIntegralAggregateFunctionOid(void);
 Oid BsonDerivativeAggregateFunctionOid(void);
+Oid BsonAvgAggregateFunctionOid(void);
 Oid BsonRepathAndBuildFunctionOid(void);
 Oid BsonBuildDocumentFunctionOid(void);
 Oid BsonExpressionGetFunctionOid(void);
@@ -429,8 +424,10 @@ Oid BsonExpressionPartitionGetWithLetAndCollationFunctionOid(void);
 Oid BsonExpressionMapFunctionOid(void);
 Oid BsonExpressionMapWithLetFunctionOid(void);
 Oid BsonExpressionAppendCollationFunctionOid(void);
+Oid BsonMaxAggregateFunctionOid(void);
 Oid BsonMaxWithExprAggregateFunctionOid(void);
 Oid BsonMaxWithExprInternalAggregateFunctionOid(void);
+Oid BsonMinAggregateFunctionOid(void);
 Oid BsonMinWithExprAggregateFunctionOid(void);
 Oid BsonMinWithExprInternalAggregateFunctionOid(void);
 Oid BsonFirstWithExprAggregateFunctionOid(void);
@@ -447,6 +444,10 @@ Oid BsonObjectAggregateFunctionOid(void);
 Oid BsonMergeObjectsOnSortedFunctionOid(void);
 Oid BsonMergeObjectsFunctionOid(void);
 Oid BsonDollarFacetProjectFunctionOid(void);
+Oid BsonFirstOnSortedAggregateFunctionOid(void);
+Oid BsonFirstOnSortedAggregateAllArgsFunctionOid(void);
+Oid BsonLastOnSortedAggregateFunctionOid(void);
+Oid BsonLastOnSortedAggregateAllArgsFunctionOid(void);
 Oid BsonFirstAggregateFunctionOid(void);
 Oid BsonFirstAggregateAllArgsFunctionOid(void);
 Oid BsonLastAggregateFunctionOid(void);
@@ -470,7 +471,6 @@ Oid BsonDollarLookupJoinFilterFunctionOid(void);
 Oid BsonLookupExtractFilterArrayFunctionOid(void);
 Oid BsonLookupUnwindFunctionOid(void);
 Oid BsonDistinctUnwindFunctionOid(void);
-Oid BsonDistinctUnwindWithCollationFunctionOid(void);
 Oid BsonDollarBucketAutoFunctionOid(void);
 Oid BsonDistinctAggregateFunctionOid(void);
 Oid RowGetBsonFunctionOid(void);
@@ -500,7 +500,6 @@ Oid BsonDensifyFullWindowFunctionOid(void);
 
 /* Catalog */
 Oid ApiDataNamespaceOid(void);
-Oid CatalogCollectionsTableId(void);
 
 /* CRUD functions */
 Oid UpdateWorkerFunctionOid(void);
@@ -514,14 +513,6 @@ Oid DocumentDBCoreBsonToBsonFunctionOId(void);
 
 /* Helper functions */
 TypeName * ParseTypeNameCore(const char *typeName);
-
-
-/* Roles */
-Oid ApiAdminV2RoleOid(void);
-Oid ApiReadOnlyRoleOid(void);
-Oid CollectionRbacBaselineReadRoleOid(void);
-Oid CollectionRbacBaselineWriteRoleOid(void);
-Oid CollectionRbacReadWriteAnyDatabaseRoleOid(void);
 
 
 /* Statistics functions */

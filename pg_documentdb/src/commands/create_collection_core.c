@@ -22,7 +22,6 @@
 #include "utils/error_utils.h"
 #include "utils/query_utils.h"
 #include "utils/type_cache.h"
-#include "utils/role_utils.h"
 #include "utils/version_utils.h"
 #include "api_hooks.h"
 #include "commands/retryable_writes.h"
@@ -314,7 +313,6 @@ CreatePostgresDataTable(uint64_t collectionId, const char *colocateWith, const
 
 	bool includeRetryTable = retryTableName != NULL;
 	GrantCollectionPrivilegesToBaselineRoles(collectionId, includeRetryTable);
-	PostCreateCollection(collectionId);
 
 	return dataTableNameInfo->data;
 }
