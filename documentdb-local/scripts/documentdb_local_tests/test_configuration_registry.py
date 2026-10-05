@@ -393,9 +393,14 @@ class ImageDefaultPinTests(unittest.TestCase):
         self.assertGreaterEqual(len(table), 17)
         for var, (flag, default, typ) in table.items():
             with self.subTest(var=var):
-                self.assertRegex(typ, r"^(uint|bool|string|enum:[A-Za-z0-9_,]+)$")
+                self.assertRegex(typ, r"^(uint|bool|boolish|string|enum:[A-Za-z0-9_,]+)$")
                 if default and typ.startswith("enum:"):
                     self.assertIn(default, typ[len("enum:"):].split(","))
+                if typ == "boolish":
+                    # A boolish setting exists so its off switch can never
+                    # abort the container; that only makes sense for a
+                    # setting whose default is on.
+                    self.assertEqual(default, "true")
 
     # Deliberately absent from the ENV block: the legacy password must not be
     # baked into an inspectable layer, and the TOAST default is applied by the

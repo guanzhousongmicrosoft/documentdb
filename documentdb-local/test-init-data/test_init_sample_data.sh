@@ -214,6 +214,7 @@ test_skip_init_data_legacy_alias() {
         -p $DOCUMENTDB_PORT:10260 \
         -e PASSWORD=$PASSWORD \
         -e INIT_DATA=true \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD \
         --skip-init-data
@@ -248,6 +249,7 @@ test_invalid_init_data_value() {
         --name $CONTAINER_NAME \
         -p $DOCUMENTDB_PORT:10260 \
         -e PASSWORD=$PASSWORD \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD \
         --init-data maybe
@@ -289,6 +291,7 @@ test_environment_variable() {
         -p $((DOCUMENTDB_PORT + 1)):10260 \
         -e PASSWORD=$PASSWORD \
         -e INIT_DATA=true \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD
     
@@ -367,6 +370,7 @@ test_skip_init_data_false_environment_variable() {
         -p $((DOCUMENTDB_PORT + 2)):10260 \
         -e PASSWORD=$PASSWORD \
         -e SKIP_INIT_DATA=false \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD
 
@@ -447,6 +451,7 @@ main() {
         --name $CONTAINER_NAME \
         -p $DOCUMENTDB_PORT:10260 \
         -e PASSWORD=$PASSWORD \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD
 
@@ -500,6 +505,7 @@ main() {
         --name $CONTAINER_NAME \
         -p $DOCUMENTDB_PORT:10260 \
         -e PASSWORD=$PASSWORD \
+        -e DOCUMENTDB_USAGE_TELEMETRY=false \
         $IMAGE_NAME \
         --password $PASSWORD \
         --init-data true
