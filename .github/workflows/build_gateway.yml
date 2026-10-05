@@ -171,7 +171,10 @@ jobs:
 
         # Runtime-generated smoke credential so no password literal lives in source.
         SMOKE_PW="$(openssl rand -hex 12)Aa1!"
-        docker run -d --name "$CONTAINER_NAME" --mount "type=bind,source=$SMOKE_DIR,target=/init_doc_db.d,readonly" "$IMAGE" --username docdb_admin --password "$SMOKE_PW" --init-data-path /init_doc_db.d
+        # Telemetry off: a CI smoke run is not a deployment. The emitter's own
+        # CI detection reads CI/GITHUB_ACTIONS inside the container, and docker
+        # run does not forward them from the runner, so it has to be explicit.
+        docker run -d --name "$CONTAINER_NAME" -e DOCUMENTDB_USAGE_TELEMETRY=false --mount "type=bind,source=$SMOKE_DIR,target=/init_doc_db.d,readonly" "$IMAGE" --username docdb_admin --password "$SMOKE_PW" --init-data-path /init_doc_db.d
 
         wait_for_log "=== DocumentDB is ready ===" 240
         wait_for_log "Custom data initialization completed." 180
