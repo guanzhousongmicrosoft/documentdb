@@ -13,7 +13,8 @@
 # postgresql.conf directly using managed blocks.
 
 set -euo pipefail
-umask 077
+# Everything tune writes must be readable by postgres; 077 left the fragment parents 0700.
+umask 022
 
 readonly PROG="documentdb-tune"
 
