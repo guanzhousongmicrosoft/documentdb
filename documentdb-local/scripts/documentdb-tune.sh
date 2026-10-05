@@ -973,6 +973,14 @@ do_print() {
     printf '%s\n' "${MANAGED_BLOCK_END}"
 }
 
+# postgres must traverse every level; under umask 077 they would be 0700.
+ensure_debian_fragment_dir() {
+    local dir
+    dir="$(dirname "${CONFIG_TARGET}")"
+    mkdir -p "${dir}"
+    chmod 0755 "$(dirname "$(dirname "${dir}")")" "$(dirname "${dir}")" "${dir}"
+}
+
 do_apply() {
     local current_preload="" merged_preload="" block=""
     local existing_block=""
@@ -1001,6 +1009,11 @@ do_apply() {
 
     block="$(build_config_block "${merged_preload}")" \
         || die "Failed to render the DocumentDB configuration block."
+
+    # Before the up-to-date return, so a rerun also repairs older installs.
+    if [[ "${DRY_RUN}" != "true" && "${IS_DEBIAN}" == "true" && -z "${PGDATA}" ]]; then
+        ensure_debian_fragment_dir
+    fi
 
     if [[ -f "${CONFIG_TARGET}" ]]; then
         local fragment_is_current=false
@@ -1068,13 +1081,6 @@ do_apply() {
         else
             die "Non-interactive run requires --yes (refusing to write ${CONFIG_TARGET} without confirmation)."
         fi
-    fi
-
-    # Ensure parent directory exists (Debian per-cluster path)
-    local parent_dir
-    parent_dir="$(dirname "${CONFIG_TARGET}")"
-    if [[ ! -d "${parent_dir}" ]]; then
-        install -d -m 0755 "${parent_dir}"
     fi
 
     # Safety: check for foreign markers and back up before writing

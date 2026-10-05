@@ -8828,6 +8828,15 @@ class DebianIdempotentIncludeRepairTests(unittest.TestCase):
             "do_apply must fall through to the write path to repair a missing include line",
         )
 
+    def test_fragment_dir_repair_runs_before_up_to_date_return(self):
+        body = self._do_apply_body()
+        self.assertIn("ensure_debian_fragment_dir", body)
+        self.assertLess(
+            body.index("ensure_debian_fragment_dir"),
+            body.index("Config is already up to date"),
+            "a rerun with a current fragment must still repair 0700 parent directories",
+        )
+
     def test_include_satisfied_helper_exists(self):
         script = TUNE_SCRIPT.read_text(encoding="utf-8")
         self.assertRegex(
