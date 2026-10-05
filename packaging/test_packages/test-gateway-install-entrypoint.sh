@@ -2155,6 +2155,18 @@ verify_createcluster_start_creates_extensions() {
     # ── (1) --start: create + tune + start + create extensions ──────
     local start_out=""
     if ! start_out="$(sudo documentdb-createcluster "${PG_MAJOR}" "${probe_cluster}" --start 2>&1)"; then
+        {
+            echo "=== DEBUG pg_lsclusters"; pg_lsclusters
+            echo "=== DEBUG createcluster.conf (active lines)"; grep -v -E '^\s*(#|$)' /etc/postgresql-common/createcluster.conf
+            echo "=== DEBUG createcluster.d"; ls -la /etc/postgresql-common/createcluster.d/; cat /etc/postgresql-common/createcluster.d/*
+            echo "=== DEBUG include/preload lines in postgresql.conf"; sudo grep -n -E 'include|shared_preload' /etc/postgresql/${PG_MAJOR}/${probe_cluster}/postgresql.conf
+            echo "=== DEBUG conf.d"; sudo ls -la /etc/postgresql/${PG_MAJOR}/${probe_cluster}/conf.d/ 2>&1; sudo sh -c "cat /etc/postgresql/${PG_MAJOR}/${probe_cluster}/conf.d/* 2>/dev/null"
+            echo "=== DEBUG fragment"; sudo cat /etc/postgresql-common/documentdb/${PG_MAJOR}/${probe_cluster}/documentdb.conf
+            echo "=== DEBUG live settings"; sudo -u postgres psql --cluster "${PG_MAJOR}/${probe_cluster}" -d postgres -X -tA -c "SELECT name, setting, sourcefile, sourceline FROM pg_settings WHERE name IN ('shared_preload_libraries','config_file');" 2>&1
+            echo "=== DEBUG pg_file_settings"; sudo -u postgres psql --cluster "${PG_MAJOR}/${probe_cluster}" -d postgres -X -tA -c "SELECT sourcefile, sourceline, name, setting, applied, error FROM pg_file_settings WHERE name='shared_preload_libraries' OR error IS NOT NULL;" 2>&1
+            echo "=== DEBUG server log tail"; sudo tail -30 /var/log/postgresql/postgresql-${PG_MAJOR}-${probe_cluster}.log
+            echo "=== DEBUG os"; cat /etc/os-release | head -3; dpkg -l postgresql-common "postgresql-${PG_MAJOR}" | tail -2
+        } >&2 || true
         sudo pg_dropcluster --stop "${PG_MAJOR}" "${probe_cluster}" >/dev/null 2>&1 || true
         fail "documentdb-createcluster --start failed: ${start_out}"
     fi
