@@ -1447,8 +1447,8 @@ SELECT document FROM bson_aggregation_pipeline('coll_q_db',
 -- findAndModify with collation.
 SELECT documentdb_api.find_and_modify('fam', '{"findAndModify": "coll_multi_collation", "query": {"a": 1}, "update": {"_id": 1, "b": 1}, "collation" : {"locale" : "en", "strength": 1} }');
 
--- findAndModify $elemMatch projection with collation (documents current unimplemented state).
-SELECT documentdb_api.find_and_modify('fam', '{"findAndModify": "coll_multi_collation", "query": {"a": "Cat"}, "update": {"$set": {"b": 99}}, "fields": {"a": 1}, "collation": {"locale": "en", "strength": 1}}');
+-- The returned $elemMatch projection uses the command collation.
+SELECT documentdb_api.find_and_modify('coll_q_db', '{"findAndModify": "coll_multi_collation", "query": {"_id": 1, "a": "CAT"}, "update": {"$set": {"items": [{"label": "cat"}, {"label": "dog"}]}}, "new": true, "fields": {"_id": 1, "a": 1, "items": {"$elemMatch": {"label": "CAT"}}}, "collation": {"locale": "en", "strength": 1}}');
 
 -- update with collation + arrayFilters.
 SELECT documentdb_api.update('coll_q_db', '{"update":"coll_multi_collation", "updates":[{"q":{"_id": 134111, "b": [ 5, 2, 4 ] },"u":{"$set" : {"b.$[a]":3} },"upsert":true,"collation" : {"locale" : "en", "strength": 1}, "arrayFilters": [ { "a": 2 } ]}]}');
@@ -1860,5 +1860,80 @@ SELECT documentdb_api.drop_collection('coll_q_db', 'nested_arrays');
 SELECT documentdb_api.drop_collection('coll_q_db', 'nested_arrays_docs');
 SELECT documentdb_api.drop_collection('coll_q_db', 'nested_docs');
 SELECT documentdb_api.drop_collection('coll_q_db', 'coll_sortArray');
+
+-- ==============================================================================
+-- findAndModify with collation
+-- ==============================================================================
+
+-- findAndModify applies collation to selection, sort, update effects, and projection.
+SELECT documentdb_api.insert_one(
+  'coll_q_db', 'coll_find_modify',
+  '{"_id": 1, "group": "pet", "name": "Zulu", "state": "old", "tags": ["cat"], "items": [{"label": "dog"}]}');
+SELECT documentdb_api.insert_one(
+  'coll_q_db', 'coll_find_modify',
+  '{"_id": 2, "group": "PET", "name": "alpha", "state": "old", "tags": ["cat"], "items": [{"label": "dog"}, {"label": "cat"}]}');
+SELECT documentdb_api.insert_one(
+  'coll_q_db', 'coll_find_modify',
+  '{"_id": 3, "group": "other", "name": "Beta", "state": "old", "tags": [], "items": []}');
+
+-- The command remains gated by enableCollation.
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO off;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "update": {"$set": {"state": "disabled"}}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+-- Compatibility mode preserves the existing binary behavior while the feature is disabled.
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO off;
+SET LOCAL documentdb.skipFailOnCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "update": {"$set": {"state": "ignored"}}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+-- Validate command collation before document selection.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "pet"}, "update": {"$set": {"state": "invalid"}}, "collation": 1}');
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "pet"}, "update": {"$set": {"state": "invalid"}}, "collation": {"strength": 1}}');
+
+BEGIN;
+-- Without a collation, mixed-case matching remains binary.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "update": {"$set": {"state": "binary"}}, "new": true}');
+
+-- Collated sorting selects "alpha" before "Zulu". The same collation applies
+-- to $addToSet and the $elemMatch returned-document projection.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "sort": {"name": 1}, "update": {"$set": {"state": "updated"}, "$addToSet": {"tags": "CAT"}}, "new": true, "fields": {"_id": 1, "name": 1, "state": 1, "tags": 1, "items": {"$elemMatch": {"label": "CAT"}}}, "collation": {"locale": "en", "strength": 1}}');
+
+-- Returning the old document preserves its pre-update value.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "sort": {"name": -1}, "update": {"$set": {"state": "changed"}}, "new": false, "fields": {"_id": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+
+-- Explicit simple collation uses binary matching.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "pet"}, "sort": {"name": 1}, "update": {"$set": {"simple": true}}, "new": true, "fields": {"_id": 1, "group": 1, "name": 1, "simple": 1}, "collation": {"locale": "simple"}}');
+
+-- Remove returns the collated, sorted document selected for deletion.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "PeT"}, "sort": {"name": -1}, "remove": true, "fields": {"_id": 1, "name": 1, "state": 1, "items": {"$elemMatch": {"label": "DOG"}}}, "collation": {"locale": "en", "strength": 1}}');
+
+-- Upsert retains the command collation and returns the inserted document.
+SELECT documentdb_api.find_and_modify(
+  'coll_q_db',
+  '{"findAndModify": "coll_find_modify", "query": {"group": "new", "name": "kitten"}, "update": {"$setOnInsert": {"_id": 4}, "$set": {"state": "upserted"}}, "upsert": true, "new": true, "fields": {"_id": 1, "group": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+SELECT documentdb_api.drop_collection('coll_q_db', 'coll_find_modify');
 
 RESET documentdb_core.enableCollation;

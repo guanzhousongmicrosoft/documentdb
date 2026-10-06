@@ -44,7 +44,10 @@ SELECT 1 FROM insert_one(
     'sharded_find_collation_db', 'sharded_default',
     '{ "_id": 5, "region": "central", "category": "tea" }');
 
-ANALYZE;
+SELECT documentdb_api.compact(
+    '{ "compact": "sharded_default",
+       "$db": "sharded_find_collation_db",
+       "mode": "updateStats" }');
 
 SELECT count(DISTINCT s.shardid) > 1 AS spans_shards
 FROM documentdb_api_catalog.collections c

@@ -3837,19 +3837,13 @@ ExecuteLocalUpdateOne(MongoCollection *collection, UpdateOneParams *updateOnePar
 								PgbsonInitFromDocumentBsonValue(
 			updateOneParams->query) : NULL;
 
-		/*
-		 * Result projection is only requested by findAndModify, which rejects
-		 * collation before constructing UpdateOneParams.
-		 */
-		const char *collationString = NULL;
-
 		const BsonProjectionQueryState *projectionState =
 			GetProjectionStateForBsonProjectFind(&projectIter,
 												 forceProjectId,
 												 allowInclusionExclusion,
 												 variableSpecBson,
 												 querySpecBson,
-												 collationString);
+												 updateOneParams->collationString);
 		result->resultDocument = ProjectDocumentWithState(result->resultDocument,
 														  projectionState);
 	}

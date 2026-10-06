@@ -16,6 +16,7 @@
 
 #include "io/bson_core.h"
 #include "update/bson_update.h"
+#include "collation/collation.h"
 #include "commands/commands_common.h"
 #include "commands/delete.h"
 #include "commands/insert.h"
@@ -68,6 +69,9 @@ typedef struct
 
 	/* "bypassDocumentValidation" field */
 	bool bypassDocumentValidation;
+
+	/* command collation */
+	char collationString[MAX_ICU_COLLATION_LENGTH];
 
 	/* parsed variable spec */
 	bson_value_t variableSpec;
@@ -204,9 +208,8 @@ command_find_and_modify(PG_FUNCTION_ARGS)
 			if (!spec.remove)
 			{
 				const bson_value_t *variableSpec = NULL;
-				const char *collationString = NULL;
 				ValidateUpdateDocument(spec.update, spec.query, spec.arrayFilters,
-									   variableSpec, collationString);
+									   variableSpec, spec.collationString);
 			}
 
 			FindAndModifyResult result = {
@@ -359,7 +362,17 @@ ParseFindAndModifyMessage(pgbson *message, Datum *databaseNameDatum)
 		{
 			ReportFeatureUsage(FEATURE_COLLATION);
 
-			if (!SkipFailOnCollation)
+			if (EnableCollation &&
+				IsClusterVersionAtleast(DocDB_V1, 1, 0))
+			{
+				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
+						"findAndModify.collation", &messageIter))
+				{
+					ParseAndGetCollationString(bson_iter_value(&messageIter),
+											   spec.collationString);
+				}
+			}
+			else if (!SkipFailOnCollation)
 			{
 				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
 								errmsg(
@@ -522,6 +535,15 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 										 &shardKeyHash,
 										 &shardKeyValueCollationAware);
 
+	if (IsCollationValid(spec->collationString) &&
+		shardKeyValueCollationAware)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
+						errmsg("findAndModify on a sharded collection cannot "
+							   "be routed to a single shard when the shard key "
+							   "value is collation-sensitive (string type).")));
+	}
+
 	if (!hasShardKeyValueFilter)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_SHARDKEYNOTFOUND),
@@ -538,6 +560,9 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 			.sort = spec->sort,
 			.variableSpec = &spec->variableSpec
 		};
+
+		strlcpy((char *) deleteOneParams.collationString, spec->collationString,
+				sizeof(deleteOneParams.collationString));
 
 		DeleteOneResult deleteOneResult = { 0 };
 		bool forceInlineWrites = false;
@@ -579,6 +604,9 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 			.update = spec->update,
 			.variableSpec = &spec->variableSpec
 		};
+
+		strlcpy(updateOneParams.collationString, spec->collationString,
+				sizeof(updateOneParams.collationString));
 
 		UpdateOneResult updateOneResult = { 0 };
 		bool forceInlineWrites = false;
