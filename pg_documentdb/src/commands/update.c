@@ -134,6 +134,8 @@ extern bool EnableCommutativeUpdateMany;
  */
 extern bool EnableUpdateWorkerPlanCache;
 
+extern bool EnableUpdateWorkerSingleWriteNoSubTransaction;
+
 /*
  * UpdateSpec describes a single update operation.
  */
@@ -319,6 +321,13 @@ typedef struct
 	/* False by default. It can be set to true in request command. */
 	bool bypassDocumentValidation;
 
+	/*
+	 * When true the caller handles a failure of this update by rolling back, so
+	 * the worker must run the update without a sub-transaction and let any error
+	 * propagate. Only set for a batch holding a single update.
+	 */
+	bool callerHandlesError;
+
 	/* parsed variable spec */
 	bson_value_t *variableSpec;
 } WorkerUpdateParam;
@@ -349,7 +358,17 @@ static void ProcessBatchUpdateCore(MongoCollection *collection, List *updates,
 								   WriteMode writeMode);
 static pgbson * ProcessBatchUpdateUnsharded(MongoCollection *collection,
 											BatchUpdateSpec *batchSpec,
-											text *transactionId, bool *hasWriteErrors);
+											text *transactionId,
+											bool callerHandlesError,
+											bool *hasWriteErrors);
+static bool IsSingleUpdateBatch(BatchUpdateSpec *batchSpec);
+static pgbson * ProcessSingleUpdateUnshardedCallerHandlesError(
+	MongoCollection *collection,
+	BatchUpdateSpec *batchSpec,
+	text *transactionId,
+	BatchUpdateResult *
+	batchResult,
+	bool *hasWriteErrors);
 static void ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 						  text *transactionId, UpdateResult *result,
 						  bool forceInlineWrites,
@@ -422,6 +441,7 @@ static void DeserializeUpdateOneResult(pgbson *resultBson, UpdateOneResult *resu
 static pgbson * SerializeUnshardedUpdateParams(const bson_value_t *updateSpec,
 											   bool isOrdered,
 											   bool bypassDocumentValidation,
+											   bool callerHandlesError,
 											   const bson_value_t *variableSpec);
 static Datum CallUpdateWorker(MongoCollection *collection, pgbson *serializedSpec,
 							  pgbsonsequence *updateDocs, int64 shardKeyHash,
@@ -430,6 +450,7 @@ static pgbson * ProcessUnshardedUpdateBatchWorker(MongoCollection *collection,
 												  List *updates, bool isOrdered,
 												  int64 shardKeyHash,
 												  text *transactionId,
+												  bool callerHandlesError,
 												  ExprEvalState *stateForSchemaValidation);
 static void ExecuteWorkerUpdateOne(MongoCollection *collection,
 								   UpdateOneParams *updateOneParams,
@@ -754,8 +775,24 @@ PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 	else
 	{
 		/* Unsharded and the shard table is in a remote node we can push the whole batch to the worker directly. */
-		result = ProcessBatchUpdateUnsharded(collection, batchSpec, transactionId,
-											 &hasWriteErrors);
+		bool callerHandlesError = EnableUpdateWorkerSingleWriteNoSubTransaction &&
+								  writeMode == WriteMode_Txn_Proc &&
+								  transactionId == NULL &&
+								  IsSingleUpdateBatch(batchSpec);
+
+		if (callerHandlesError)
+		{
+			result = ProcessSingleUpdateUnshardedCallerHandlesError(collection,
+																	batchSpec,
+																	transactionId,
+																	&batchResult,
+																	&hasWriteErrors);
+		}
+		else
+		{
+			result = ProcessBatchUpdateUnsharded(collection, batchSpec, transactionId,
+												 callerHandlesError, &hasWriteErrors);
+		}
 	}
 
 	if (EnableSchemaValidation && state != NULL)
@@ -1547,7 +1584,8 @@ DeserializeBatchUpdateWorkerResponse(pgbson *response, bool *hasWriteErrors)
 
 static pgbson *
 ProcessBatchUpdateUnsharded(MongoCollection *collection, BatchUpdateSpec *batchSpec,
-							text *transactionId, bool *hasWriteErrors)
+							text *transactionId, bool callerHandlesError,
+							bool *hasWriteErrors)
 {
 	Assert(collection->shardKey == NULL);
 
@@ -1559,6 +1597,7 @@ ProcessBatchUpdateUnsharded(MongoCollection *collection, BatchUpdateSpec *batchS
 														 batchSpec->isOrdered,
 														 batchSpec->
 														 bypassDocumentValidation,
+														 callerHandlesError,
 														 &batchSpec->variableSpec);
 
 	/* since this is unsharded, the keyHash is just the collection id. */
@@ -1568,6 +1607,113 @@ ProcessBatchUpdateUnsharded(MongoCollection *collection, BatchUpdateSpec *batchS
 
 	pgbson *response = DatumGetPgBson(workerResult);
 	return DeserializeBatchUpdateWorkerResponse(response, hasWriteErrors);
+}
+
+
+/*
+ * Checks whether the batch holds exactly one update, without parsing the whole
+ * batch. Used to decide whether the single update optimization applies, so it
+ * must not walk a large batch in full.
+ */
+static bool
+IsSingleUpdateBatch(BatchUpdateSpec *batchSpec)
+{
+	if (batchSpec->updateSequence != NULL)
+	{
+		return PgbsonSequenceHasSingleDocument(batchSpec->updateSequence);
+	}
+
+	if (batchSpec->updateValue.value_type != BSON_TYPE_ARRAY)
+	{
+		return false;
+	}
+
+	bson_iter_t updateIter;
+	BsonValueInitIterator(&batchSpec->updateValue, &updateIter);
+	return bson_iter_next(&updateIter) && !bson_iter_next(&updateIter);
+}
+
+
+/*
+ * Pushes a batch holding a single update to the worker and tells it to skip its
+ * sub-transaction. Nothing follows the update, so instead of the worker writing
+ * the WAL for a sub-transaction it would only roll back, the error propagates
+ * here and the transaction is rolled back and reported as a write error.
+ *
+ * Only valid from a procedure (WriteMode_Txn_Proc), where the transaction being
+ * aborted is the top level transaction of this command.
+ */
+static pgbson *
+ProcessSingleUpdateUnshardedCallerHandlesError(MongoCollection *collection,
+											   BatchUpdateSpec *batchSpec,
+											   text *transactionId,
+											   BatchUpdateResult *batchResult,
+											   bool *hasWriteErrors)
+{
+	/* declared volatile because of the longjmp in PG_CATCH */
+	volatile bool isSuccess = false;
+	pgbson *volatile result = NULL;
+
+	PG_TRY();
+	{
+		bool callerHandlesError = true;
+
+		/*
+		 * The worker is not expected to return write errors. It immediately
+		 * propagates any error it encounters, which is caught by this
+		 * PG_TRY/PG_CATCH block.
+		 */
+		bool ignoreHasWriteErrors = false;
+		result = ProcessBatchUpdateUnsharded(collection, batchSpec, transactionId,
+											 callerHandlesError,
+											 &ignoreHasWriteErrors);
+		isSuccess = true;
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(
+			batchResult->resultMemoryContext);
+		ErrorData *errorData = CopyErrorDataAndFlush();
+		MemoryContextSwitchTo(oldContext);
+
+		if (IsOperatorInterventionError(errorData))
+		{
+			ReThrowError(errorData);
+		}
+
+		/*
+		 * The worker did not roll back the failed update, so roll back the whole
+		 * transaction here. This is the top level transaction of the procedure.
+		 */
+		PopAllActiveSnapshots();
+		AbortCurrentTransaction();
+		StartTransactionCommand();
+
+		oldContext = MemoryContextSwitchTo(batchResult->resultMemoryContext);
+
+		/* the batch holds a single update, so the failure is always at index 0 */
+		int updateIndex = 0;
+		batchResult->writeErrors = lappend(batchResult->writeErrors,
+										   GetWriteErrorFromErrorData(errorData,
+																	  updateIndex,
+																	  batchResult->
+																	  resultMemoryContext,
+																	  &batchResult->
+																	  indexNameCache));
+		MemoryContextSwitchTo(oldContext);
+		FreeErrorData(errorData);
+		isSuccess = false;
+	}
+	PG_END_TRY();
+
+	if (isSuccess)
+	{
+		return result;
+	}
+
+	batchResult->ok = 1;
+	*hasWriteErrors = true;
+	return BuildResponseMessage(batchResult);
 }
 
 
@@ -2979,6 +3125,7 @@ command_update_worker(PG_FUNCTION_ARGS)
 													   params.isOrdered,
 													   shardKeyHash,
 													   transactionId,
+													   params.callerHandlesError,
 													   stateForSchemaValidation);
 
 	if (EnableSchemaValidation && stateForSchemaValidation != NULL)
@@ -2998,6 +3145,7 @@ static pgbson *
 ProcessUnshardedUpdateBatchWorker(MongoCollection *collection, List *updates,
 								  bool isOrdered, int64 shardKeyHash,
 								  text *transactionId,
+								  bool callerHandlesError,
 								  ExprEvalState *stateForSchemaValidation)
 {
 	int updateCount = list_length(updates);
@@ -3018,6 +3166,33 @@ ProcessUnshardedUpdateBatchWorker(MongoCollection *collection, List *updates,
 	memset(&batchUpdateResult, 0, sizeof(BatchUpdateResult));
 	batchUpdateResult.resultMemoryContext = CurrentMemoryContext;
 
+	if (callerHandlesError && updateCount == 1 && transactionId == NULL)
+	{
+		/*
+		 * The caller sent a single update and rolls back and reports the failure
+		 * itself, so there is nothing left to resume here after an error. Run the
+		 * update directly and let any error propagate rather than paying for a
+		 * sub-transaction that would only be rolled back.
+		 *
+		 * This deliberately does not reuse the WriteMode_Txn_Proc path of
+		 * ProcessBatchUpdateCore. That path aborts and restarts the current
+		 * transaction, which is only valid on the coordinator where the
+		 * transaction is the top level one for the command.
+		 */
+		batchUpdateResult.ok = 1;
+
+		UpdateResult updateResult;
+		memset(&updateResult, 0, sizeof(updateResult));
+
+		int updateIndex = 0;
+		ProcessUpdate(collection, linitial(updates), transactionId, &updateResult,
+					  forceInlineWrites, stateForSchemaValidation);
+		UpdateResultInBatch(&batchUpdateResult, &updateResult,
+							batchUpdateResult.resultMemoryContext, updateIndex);
+
+		return SerializeBatchUpdateResult(&batchUpdateResult);
+	}
+
 	/* In the worker we're always transactional */
 	ProcessBatchUpdateCore(collection, updates, transactionId, &batchUpdateResult,
 						   isOrdered, forceInlineWrites, stateForSchemaValidation,
@@ -3031,6 +3206,7 @@ ProcessUnshardedUpdateBatchWorker(MongoCollection *collection, List *updates,
 static pgbson *
 SerializeUnshardedUpdateParams(const bson_value_t *updateSpec, bool isOrdered,
 							   bool bypassDocumentValidation,
+							   bool callerHandlesError,
 							   const bson_value_t *variableSpec)
 {
 	if (updateSpec != NULL && updateSpec->value_type != BSON_TYPE_ARRAY)
@@ -3055,6 +3231,15 @@ SerializeUnshardedUpdateParams(const bson_value_t *updateSpec, bool isOrdered,
 	PgbsonWriterAppendBool(&innerWriter, "isOrdered", -1, isOrdered);
 	PgbsonWriterAppendBool(&innerWriter, "bypassDocumentValidation", -1,
 						   bypassDocumentValidation);
+
+	/*
+	 * Only emitted when set so that the spec stays byte identical to the
+	 * previous shape otherwise. Older workers reject unknown fields.
+	 */
+	if (callerHandlesError)
+	{
+		PgbsonWriterAppendBool(&innerWriter, "callerHandlesError", -1, true);
+	}
 
 	if (variableSpec != NULL &&
 		variableSpec->value_type == BSON_TYPE_DOCUMENT)
@@ -3279,6 +3464,16 @@ DeserializeUpdateUnshardedWorkerSpec(const bson_value_t *value, WorkerUpdatePara
 
 			params->bypassDocumentValidation = BsonValueAsBool(bson_iter_value(&iter));
 		}
+		else if (strcmp(key, "callerHandlesError") == 0)
+		{
+			if (!BSON_ITER_HOLDS_BOOL(&iter))
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR), (errmsg(
+																				"Update worker expects updateUnsharded.callerHandlesError to be a bool."))));
+			}
+
+			params->callerHandlesError = BsonValueAsBool(bson_iter_value(&iter));
+		}
 		else if (strcmp(key, "variableSpec") == 0)
 		{
 			params->variableSpec = CreateBsonValueCopy(bson_iter_value(&iter));
@@ -3316,6 +3511,7 @@ DeserializeUpdateWorkerSpec(pgbson *updateInternalSpec,
 	params->isUpdateOne = false;
 	params->isUpdateMany = false;
 	params->bypassDocumentValidation = false;
+	params->callerHandlesError = false;
 
 	/* The top level is a pgbsonelement describing a type of update
 	 * Right now the only supported mode is single doc update (updateOne)

@@ -599,6 +599,11 @@ bool EnableCommutativeDeleteMany =
 bool EnableUpdateWorkerPlanCache =
 	DEFAULT_ENABLE_UPDATE_WORKER_PLAN_CACHE;
 
+/* Added in v1.2, pending stabilization, enable in v1.3 */
+#define DEFAULT_ENABLE_UPDATE_WORKER_SINGLE_WRITE_NO_SUB_TRANSACTION false
+bool EnableUpdateWorkerSingleWriteNoSubTransaction =
+	DEFAULT_ENABLE_UPDATE_WORKER_SINGLE_WRITE_NO_SUB_TRANSACTION;
+
 
 /*
  * SECTION: Changestream feature flags
@@ -1571,6 +1576,18 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableUpdateWorkerPlanCache,
 		DEFAULT_ENABLE_UPDATE_WORKER_PLAN_CACHE,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_update_worker_single_write_no_sub_transaction",
+				 newGucPrefix),
+		gettext_noop(
+			"Whether a single update pushed to the update worker skips the worker side sub-transaction, letting the caller roll back and report the failure instead."),
+		NULL,
+		&EnableUpdateWorkerSingleWriteNoSubTransaction,
+		DEFAULT_ENABLE_UPDATE_WORKER_SINGLE_WRITE_NO_SUB_TRANSACTION,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
