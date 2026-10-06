@@ -1,8 +1,10 @@
 import re
 import shutil
 import shlex
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 import os
 from pathlib import Path
@@ -5991,7 +5993,7 @@ class GatewayEnvFragmentCarriesListenAddrTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         body = match.group("body")
-        self.assertIn('--listen-addr ":${GATEWAY_PORT}"', body,
+        self.assertIn('--listen-addr "${GATEWAY_LISTEN_HOST}:${GATEWAY_PORT}"', body,
                       "setup must thread --listen-port through register-gateway --listen-addr")
         self.assertIn('--tls-auto-generate true', body,
                       "setup must enable TLS auto-gen on standalone (design §4.3 default)")
@@ -10298,3 +10300,683 @@ class ExtendedRumPackagedInstallTests(unittest.TestCase):
             recipe = next(l for l in r.stdout.splitlines() if self.BASE_SQL in l)
             self.assertIn(self.EXTRA_SQL, recipe,
                           "the inferred requirement still belongs in the remedy")
+
+
+def _shell_function(test, path, name):
+    """Return the full definition of shell function ``name`` in ``path``."""
+    match = re.search(
+        rf"^{re.escape(name)}\(\)\s*\{{.*?^\}}",
+        Path(path).read_text(encoding="utf-8"),
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    test.assertIsNotNone(match, f"could not locate shell function {name} in {path}")
+    return match.group(0)
+
+
+class PgCtlRestartDetachesFromCallerTests(unittest.TestCase):
+    """A non-systemd restart must not leave
+    the new postmaster holding setup's stdout, and the nohup gateway must not
+    share the caller's process group."""
+
+    def test_restart_path_returns_to_a_piped_caller(self):
+        shell = shutil.which("bash")
+        if not shell:
+            self.skipTest("bash not available")
+        func = _shell_function(self, SETUP_SCRIPT, "start_or_restart_postgres")
+        with tempfile.TemporaryDirectory() as tmp:
+            # Stand-in pg_ctl: the "postmaster" is a long-lived child that keeps
+            # the caller's stdout unless -l redirects it, exactly like the real one.
+            fake = Path(tmp) / "pg_ctl"
+            fake.write_text(
+                "#!/bin/bash\n"
+                'log=""; prev=""\n'
+                'for a in "$@"; do [[ "$prev" == -l ]] && log="$a"; prev="$a"; done\n'
+                'case " $* " in *" status "*) exit 0 ;; esac\n'
+                'if [[ -n "$log" ]]; then sleep 30 >>"$log" 2>&1 & else sleep 30 & fi\n'
+                f'echo "$!" > {tmp}/postmaster.pid\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            script = (
+                "set -euo pipefail\n"
+                "log_info() { :; }; log_warn() { :; }\n"
+                "ensure_socket_dir_writable() { :; }; wait_for_postgres() { :; }\n"
+                "has_systemd_unit_file() { return 1; }\n"
+                'run_as_user() { shift; "$@"; }\n'
+                'TARGET_CLUSTER=""; HAS_WORKING_SYSTEMD=false\n'
+                "PG_CONFIG_CHANGED=true; PG_RELOAD_CHANGED=false; PG_VERSION=17\n"
+                f"DATA_DIR={tmp}; PG_CTL={fake}\n"
+                + func + "\nstart_or_restart_postgres\necho restarted\n"
+            )
+            try:
+                r = subprocess.run([shell, "-c", script], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                self.fail("pg_ctl restart without -l kept the caller's pipe open")
+            finally:
+                pid_file = Path(tmp) / "postmaster.pid"
+                if pid_file.exists():
+                    subprocess.run(["kill", pid_file.read_text().strip()],
+                                   capture_output=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("restarted", r.stdout)
+
+    def test_nohup_gateway_launch_gets_its_own_session(self):
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("{ ${setsid_clause}nohup ${escaped_binary}", text)
+        shell = shutil.which("bash")
+        if not shell or not shutil.which("setsid") or not os.path.isdir("/proc"):
+            self.skipTest("needs bash, setsid and /proc")
+        with tempfile.TemporaryDirectory() as tmp:
+            # Same shape as the shipped launch: $! must still be the daemon,
+            # and the daemon must lead its own session.
+            cmd = (f"{{ setsid nohup sleep 30 > {tmp}/gw.log 2>&1 & "
+                   f"{{ echo $! > {tmp}/gw.pid; }} 2>/dev/null || true; }}")
+            subprocess.run([shell, "-c", cmd], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=10)
+            pid = (Path(tmp) / "gw.pid").read_text().strip()
+            try:
+                comm = sid = ""
+                for _ in range(50):
+                    stat = Path(f"/proc/{pid}/stat").read_text()
+                    comm = stat[stat.index("(") + 1:stat.rindex(")")]
+                    sid = stat[stat.rindex(")") + 2:].split()[3]
+                    if comm == "sleep":
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(comm, "sleep", "the record must name the daemon")
+                self.assertEqual(sid, pid, "the daemon must lead its own session")
+            finally:
+                subprocess.run(["kill", pid], capture_output=True)
+
+
+class NohupGatewayLifecycleTests(unittest.TestCase):
+    """Without systemd, scoped --restore,
+    --status and a --listen-port change must go through the per-port gateway
+    record instead of trusting (or ignoring) whatever holds the port."""
+
+    def setUp(self):
+        self.shell = shutil.which("bash")
+        if not self.shell:
+            self.skipTest("bash not available")
+
+    def _lib(self, *names):
+        return "\n".join(
+            _shell_function(self, SETUP_SCRIPT if name in (
+                "stop_gateway_process", "wait_for_listener_to_clear",
+                "stop_recorded_nohup_gateway", "status_only",
+                "find_listener_pid", "command_exists") else TOOLS_LIB, name)
+            for name in names
+        ) + "\n"
+
+    def test_stop_recorded_nohup_gateway_stops_the_recorded_pid(self):
+        if not os.access("/proc/net/tcp", os.R_OK):
+            self.skipTest("needs readable /proc/net/tcp")
+        proc, port = GatewayListenerPidSafetyTests._spawn_listener()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                record = Path(tmp) / f"gateway-{port}.pid"
+                record.write_text(str(proc.pid))
+                script = (
+                    'log_info() { echo "INFO: $*"; }; log_warn() { echo "WARN: $*" >&2; }\n'
+                    + self._lib("port_listen_inodes", "wait_for_listener_to_clear",
+                                "stop_gateway_process", "stop_recorded_nohup_gateway")
+                    + f"nohup_gateway_pidfile() {{ printf '%s' {tmp}/gateway-$1.pid; }}\n"
+                    + f"nohup_gateway_pid_for_port() {{ printf '%s' {proc.pid}; }}\n"
+                    + f"stop_recorded_nohup_gateway {port}\n"
+                )
+                r = subprocess.run([self.shell, "-c", script], capture_output=True,
+                                   text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(f"pid {proc.pid}", r.stdout)
+                self.assertIsNotNone(proc.wait(timeout=5), "the recorded gateway must be stopped")
+                self.assertFalse(record.exists(), "the record of a stopped gateway must go")
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_stop_recorded_nohup_gateway_leaves_unrecorded_listeners_alone(self):
+        proc, port = GatewayListenerPidSafetyTests._spawn_listener()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                record = Path(tmp) / f"gateway-{port}.pid"
+                record.write_text("999999")
+                script = (
+                    "log_info() { :; }; log_warn() { :; }\n"
+                    + self._lib("stop_recorded_nohup_gateway")
+                    + f"nohup_gateway_pidfile() {{ printf '%s' {tmp}/gateway-$1.pid; }}\n"
+                    + "nohup_gateway_pid_for_port() { return 1; }\n"
+                    + "stop_gateway_process() { echo SIGNALLED; }\n"
+                    + f"stop_recorded_nohup_gateway {port}\n"
+                )
+                r = subprocess.run([self.shell, "-c", script], capture_output=True,
+                                   text=True, timeout=20)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("SIGNALLED", r.stdout)
+                self.assertIsNone(proc.poll(), "an unrecorded listener must survive")
+                self.assertFalse(record.exists(), "a stale record must still be dropped")
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def _status(self, port, recorded, uid):
+        script = (
+            "log_warn() { :; }; documentdb_default_pg_port() { echo 1; }\n"
+            + f"id() {{ echo {uid}; }}\n"
+            + ("nohup_gateway_pid_for_port() { echo 4242; }\n" if recorded
+               else "nohup_gateway_pid_for_port() { return 1; }\n")
+            + self._lib("status_only")
+            + f"PG_VERSION=99; GATEWAY_PORT={port}\nstatus_only\n"
+        )
+        return subprocess.run([self.shell, "-c", script], capture_output=True,
+                              text=True, timeout=20)
+
+    def test_status_does_not_call_a_foreign_listener_active(self):
+        if not (shutil.which("ss") or os.access("/proc/net/tcp", os.R_OK)):
+            self.skipTest("needs ss or /proc/net/tcp")
+        proc, port = GatewayListenerPidSafetyTests._spawn_listener()
+        try:
+            r = self._status(port, recorded=False, uid=0)
+            self.assertIn(f"gateway listener:              {port}", r.stdout)
+            self.assertNotIn("active (nohup", r.stdout)
+            self.assertIn("not this install's recorded gateway", r.stdout)
+            self.assertNotEqual(r.returncode, 0)
+
+            r = self._status(port, recorded=False, uid=1000)
+            self.assertIn("run as root", r.stdout)
+            self.assertNotIn("active (nohup", r.stdout)
+
+            r = self._status(port, recorded=True, uid=0)
+            self.assertIn("active (nohup; no systemd)", r.stdout)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_scoped_restore_stops_its_gateway_before_removing_state(self):
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+        start = text.index('if [[ "${RESTORE}" == "true" ]]; then\n        [[ "${DRY_RUN}"')
+        body = text[start:text.index('log_success "Restore complete.', start)]
+        read_at = body.index('scoped_gateway_port="$(persisted_gateway_port "${restore_scope}")"')
+        self.assertLess(read_at, body.index('rm -f "${per_major_conf}"'),
+                        "the port must be read before setup.conf is deleted")
+        self.assertLess(read_at, body.index('rm -f "${per_major_brownfield}"'))
+        stop_at = body.index('stop_recorded_nohup_gateway "${scoped_gateway_port}"')
+        self.assertLess(stop_at, body.index('rm -f "${per_major_conf}"'),
+                        "a gateway that will not stop must leave the install intact")
+        self.assertLess(stop_at, body.index('rm -f "${per_major_brownfield}"'))
+        self.assertIn("Nothing was removed", body[stop_at:stop_at + 300])
+
+    def test_listen_port_change_stops_the_previous_ports_gateway(self):
+        # Right before the new state is moved into place: a refused or failed
+        # run must leave the old gateway serving.
+        for persist, refusal, publish in (
+                ("persist_self_managed_postgres_state", "A brownfield install", 'mv "${per_major_temp}"'),
+                ("persist_brownfield_state", "A greenfield (package-owned)", 'mv "${tmp}" "${brownfield_conf}"')):
+            body = _shell_function(self, SETUP_SCRIPT, persist)
+            retire_at = body.index("retire_previous_port_gateway")
+            self.assertGreater(retire_at, body.index(refusal), persist)
+            self.assertGreater(retire_at, body.index("GATEWAY_PORT="), persist)
+            self.assertLess(retire_at, body.index(publish), persist)
+        retire = _shell_function(self, SETUP_SCRIPT, "retire_previous_port_gateway")
+        self.assertLess(retire.index('"${NO_ENABLE}" == "true"'), retire.index("stop_recorded_nohup_gateway"))
+        persisted = _shell_function(self, SETUP_SCRIPT, "default_gateway_settings_from_persisted_state")
+        self.assertIn('[[ -n "${PERSISTED_GATEWAY_PORT}" ]] || PERSISTED_GATEWAY_PORT=', persisted,
+                      "the previous port must be captured once, before setup.conf is rewritten")
+
+
+class TeardownStopsWhatSetupStartedTests(unittest.TestCase):
+    """Reset and package removal must not
+    report success while this major's postmaster or nohup gateway still runs
+    on a host without systemd."""
+
+    GATEWAY_PRERM = OSS_ROOT / "documentdb-local" / "maintainer-scripts" / "gateway" / "prerm"
+    GATEWAY_SPEC = OSS_ROOT / "packaging" / "rpm" / "spec" / "documentdb-gateway.spec"
+
+    def setUp(self):
+        self.shell = shutil.which("bash")
+        if not self.shell or not os.path.isdir("/proc"):
+            self.skipTest("needs bash and /proc")
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+
+    def _spawn(self, tmp, name, *args):
+        # A symlink sets both argv[0] and /proc/PID/comm to `name`.
+        bindir = Path(tmp) / "bin"
+        bindir.mkdir(exist_ok=True)
+        link = bindir / name
+        if not link.exists():
+            link.symlink_to(shutil.which("python3"))
+        p = subprocess.Popen([str(link), "-c", "import time; time.sleep(60)", *args])
+        self.procs.append(p)
+        for _ in range(50):
+            if Path(f"/proc/{p.pid}/comm").read_text().strip() == name[:15]:
+                break
+            time.sleep(0.1)
+        return p
+
+    def _lib(self, body):
+        return (f'. {TOOLS_LIB}\n' 'log_warn() { echo "WARN: $*" >&2; }\n'
+                'die() { echo "$*" >&2; exit 1; }\n' + body)
+
+    def test_postmaster_found_after_its_data_directory_is_gone(self):
+        # Only the socket lock is left; a same-path cluster elsewhere is not ours.
+        with tempfile.TemporaryDirectory() as tmp:
+            gone = f"{tmp}/data"
+            ours = self._spawn(tmp, "postgres", "-D", gone)
+            self._spawn(tmp, "postgres", "-D", gone)
+            lock = Path(tmp) / ".s.PGSQL.9717.lock"
+            lock.write_text(f"{ours.pid}\n{gone}\n")
+            r = subprocess.run([self.shell, "-c", self._lib(
+                f'documentdb_postmaster_pids {gone} {lock}\n')],
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.stdout.split(), [str(ours.pid)], r.stderr)
+
+    def test_persisted_path_matches_pg_ctls_normalized_argv(self):
+        # pg_ctl strips trailing slashes, "//" and "/./" before exec'ing postgres.
+        with tempfile.TemporaryDirectory() as tmp:
+            ours = self._spawn(tmp, "postgres", "-D", f"{tmp}/data")
+            lock = Path(tmp) / ".s.PGSQL.9717.lock"
+            lock.write_text(f"{ours.pid}\n")
+            r = subprocess.run([self.shell, "-c", self._lib(
+                f'documentdb_postmaster_pids {tmp}//./data/ {lock}\n')],
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.stdout.split(), [str(ours.pid)], r.stderr)
+
+    def test_a_symlinked_data_dir_matches_only_the_same_directory(self):
+        # Setup accepts --data-dir via a symlink while postgres keeps the -D it started with.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "volume" / "other").mkdir(parents=True)
+            for alias in ("db", "alt"):
+                (Path(tmp) / alias).symlink_to(Path(tmp) / "volume")
+            other = self._spawn(tmp, "postgres", "-D", f"{tmp}/volume/other")
+            data = Path(tmp) / "volume" / "data"
+            lock = Path(tmp) / ".s.PGSQL.9717.lock"
+
+            def pids():
+                r = subprocess.run([self.shell, "-c", self._lib(
+                    f'documentdb_postmaster_pids {tmp}/db/data {lock}\n')],
+                    capture_output=True, text=True, timeout=20)
+                return r.stdout.split(), r.stderr
+
+            # Attached form through a second alias: neither spelling is literal.
+            for argv in (["-D", str(data)], [f"-D{tmp}/alt/data"]):
+                data.mkdir()
+                ours = self._spawn(tmp, "postgres", *argv)
+                (data / "postmaster.pid").write_text(f"{ours.pid}\n")
+                lock.write_text(f"{other.pid}\n")
+                found, err = pids()
+                self.assertEqual(found, [str(ours.pid)], f"{argv}: {err}")
+
+                # Still found by its socket lock once the directory is gone.
+                shutil.rmtree(data)
+                lock.write_text(f"{ours.pid}\n")
+                found, err = pids()
+                self.assertEqual(found, [str(ours.pid)], f"{argv}: {err}")
+
+    def test_a_relative_data_dir_matches_only_the_recorded_postmaster(self):
+        # Two clusters launched from different directories share "-D data".
+        with tempfile.TemporaryDirectory() as tmp:
+            ours = self._spawn(tmp, "postgres", "-D", "data")
+            self._spawn(tmp, "postgres", "-D", "data")
+            lock = Path(tmp) / ".s.PGSQL.9717.lock"
+            lock.write_text(f"{ours.pid}\n")
+            r = subprocess.run([self.shell, "-c", self._lib(f'documentdb_postmaster_pids data {lock}\n')],
+                               capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.stdout.split(), [str(ours.pid)], r.stderr)
+
+    def test_setup_persists_an_absolute_normalized_data_dir(self):
+        func = _shell_function(self, SETUP_SCRIPT, "parse_arguments")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run([self.shell, "-c", func + '\nparse_arguments --data-dir "clusters//18/./data/"\n'
+                                'echo "DATA_DIR=${DATA_DIR}"'], cwd=tmp, capture_output=True, text=True, timeout=20)
+            self.assertIn(f"DATA_DIR={os.path.realpath(tmp)}/clusters/18/data", r.stdout, r.stderr)
+
+    def test_pid_and_lock_files_are_not_trusted(self):
+        # A stale file's PID may now be another cluster's postgres.
+        with tempfile.TemporaryDirectory() as tmp:
+            other = self._spawn(tmp, "postgres", "-D", f"{tmp}/pg17")
+            data = Path(tmp) / "data"
+            data.mkdir()
+            (data / "postmaster.pid").write_text(f"{other.pid}\n{data}\n")
+            r = subprocess.run([self.shell, "-c", self._lib(f'documentdb_postmaster_pids {data}\n')],
+                               capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.stdout.strip(), "")
+
+    def test_stop_local_major_stops_gateway_and_greenfield_postmaster(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "etc" / "17"
+            conf.mkdir(parents=True)
+            data = f"{tmp}/data-already-deleted"
+            (conf / "setup.conf").write_text(
+                "DOCUMENTDB_MANAGED_POSTGRES=true\nDOCUMENTDB_MODE=greenfield\n"
+                f"PG_PORT=9717\nDATA_DIR={data}\nGATEWAY_PORT=10399\n")
+            pm = self._spawn(tmp, "postgres", "-D", data)
+            gw = self._spawn(tmp, "documentdb-gateway-daemon")
+            record = Path(tmp) / "gateway-10399.pid"
+            record.write_text(str(gw.pid))
+            (Path(tmp) / "run" / "17" / "postgresql").mkdir(parents=True)
+            (Path(tmp) / "run" / "17" / "postgresql" / ".s.PGSQL.9717.lock").write_text(f"{pm.pid}\n")
+            func = _shell_function(self, TOOLS_LIB, "documentdb_stop_local_major").replace(
+                "/etc/documentdb/local/", f"{tmp}/etc/").replace("/run/documentdb-local/", f"{tmp}/run/")
+            r = subprocess.run([self.shell, "-c", self._lib(
+                func + "\n"
+                + f"nohup_gateway_pidfile() {{ printf '%s' {tmp}/gateway-$1.pid; }}\n"
+                + f'nohup_gateway_pid_for_port() {{ documentdb_pid_running {gw.pid} && printf %s {gw.pid}; }}\n'
+                + "documentdb_stop_local_major 17\n")],
+                capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIsNotNone(gw.wait(timeout=5))
+            self.assertIsNotNone(pm.wait(timeout=5))
+            self.assertFalse(record.exists())
+
+    def test_stop_local_major_leaves_brownfield_postgres_alone(self):
+        func = _shell_function(self, TOOLS_LIB, "documentdb_stop_local_major")
+        self.assertIn('[[ "${managed}" == "true" && -n "${data_dir}" ]]', func)
+        self.assertIn('"${conf_dir}/setup.conf"', func[func.index("Brownfield PostgreSQL"):])
+
+    def test_stop_postmaster_escalates_to_immediate_shutdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = f"{tmp}/data"
+            Path(data).mkdir()
+            (Path(tmp) / "bin").mkdir()
+            (Path(tmp) / "bin" / "postgres").symlink_to(shutil.which("python3"))
+            # A fast shutdown that never finishes, e.g. a long checkpoint.
+            pm = subprocess.Popen([str(Path(tmp) / "bin" / "postgres"), "-c",
+                                   "import signal, time; signal.signal(signal.SIGINT, signal.SIG_IGN); time.sleep(60)",
+                                   "-D", data])
+            self.procs.append(pm)
+            (Path(data) / "postmaster.pid").write_text(f"{pm.pid}\n{data}\n")
+            time.sleep(0.5)
+            func = _shell_function(self, TOOLS_LIB, "documentdb_stop_postmaster").replace("i < 150", "i < 10")
+            r = subprocess.run([self.shell, "-c", self._lib(func + f"\ndocumentdb_stop_postmaster {data}\n")],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.stdout.strip(), "", r.stderr)
+            self.assertEqual(pm.wait(timeout=5), -signal.SIGQUIT)
+
+    def _run_gateway_prerm(self, tmp):
+        text = self.GATEWAY_PRERM.read_text(encoding="utf-8")
+        text = text.replace("/run/documentdb-gateway/", f"{tmp}/run/")
+        text = text.replace("[[ -d /run/systemd/system ]]", "false")
+        prerm = Path(tmp) / "prerm"
+        prerm.write_text(text)
+        return subprocess.run([self.shell, str(prerm), "remove"],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_gateway_prerm_stops_recorded_nohup_gateways_without_systemd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "run").mkdir()
+            gw = self._spawn(tmp, "documentdb-gateway-daemon")
+            bystander = self._spawn(tmp, "unrelated")
+            stat = Path(f"/proc/{gw.pid}/stat").read_text()
+            start = stat[stat.rindex(")") + 2:].split()[19]
+            (Path(tmp) / "run" / "gateway-10260.pid").write_text(f"{gw.pid} {start}")
+            (Path(tmp) / "run" / "gateway-10261.pid").write_text(str(bystander.pid))
+            r = self._run_gateway_prerm(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn(f"pid {gw.pid}", r.stdout)
+            self.assertIsNotNone(gw.wait(timeout=5))
+            self.assertIsNone(bystander.poll(), "a record naming another program must not be signalled")
+            self.assertEqual(list((Path(tmp) / "run").iterdir()), [])
+
+    def test_gateway_prerm_ignores_a_record_with_a_different_start_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "run").mkdir()
+            gw = self._spawn(tmp, "documentdb-gateway-daemon")
+            (Path(tmp) / "run" / "gateway-10260.pid").write_text(f"{gw.pid} 1")
+            r = self._run_gateway_prerm(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIsNone(gw.poll(), "a recycled PID must not be signalled")
+
+    def _hostile_records(self, run):
+        # The record directory is gateway-writable; root must never block on it.
+        for f in run.iterdir():
+            f.unlink()
+        for i in range(200):
+            os.mkfifo(run / f"gateway-{i}.pid")
+        held = run / "gateway-900.pid"
+        os.mkfifo(held)
+        self.procs.append(subprocess.Popen(["sh", "-c", f'exec 3<> "{held}"; sleep 30']))
+        (run / "gateway-901.pid").symlink_to("/dev/zero")
+
+    def test_hostile_records_never_stall_readers_or_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            self._hostile_records(run)
+            r = subprocess.run([self.shell, "-c", self._lib(
+                f'for f in {run}/gateway-0.pid {run}/gateway-900.pid {run}/gateway-901.pid; do '
+                'nohup_gateway_record_pid "$f" && echo "read $f"; done; echo done\n')],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.stdout.strip(), "done", r.stderr)
+
+            preun = "\n".join(l for l in self._preun(self.GATEWAY_SPEC).splitlines()
+                              if not l.startswith("%systemd_preun"))
+            preun = preun.replace("/run/documentdb-gateway/", f"{run}/").replace("[ -d /run/systemd/system ]", "false")
+            r = subprocess.run(["sh", "-c", preun, "preun", "0"], capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+            self._hostile_records(run)
+            r = self._run_gateway_prerm(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    @staticmethod
+    def _preun(spec):
+        return re.search(r"^%preun\n(.*?)^%postun", spec.read_text(encoding="utf-8"),
+                         flags=re.DOTALL | re.MULTILINE).group(1)
+
+    def test_rpm_gateway_preun_mirrors_the_deb_prerm(self):
+        preun = self._preun(self.GATEWAY_SPEC)
+        self.assertIn('elif [ "$1" -eq 0 ]; then', preun)
+        self.assertIn("/run/documentdb-gateway/gateway-*.pid", preun)
+        self.assertIn('[ "${start}" = "${cur}" ]', preun)
+        self.assertIn("warning: gateway pid(s)", preun)
+        self.assertNotIn("exit 1", preun, "removal must never be blocked")
+
+    def test_documentdb_n_removal_stops_its_major_without_systemd(self):
+        deb = STANDALONE_BUILD_SCRIPT.read_text(encoding="utf-8")
+        prerm = re.search(r'cat > "\$\{PKG_DIR\}/DEBIAN/prerm" <<PRERM\n(.*?)\nPRERM',
+                          deb, flags=re.DOTALL).group(1)
+        preun = self._preun(STANDALONE_SPEC)
+        for body, major in ((prerm, "${PG_VERSION}"), (preun, "%{pg_version}")):
+            else_branch = body[body.index("else" if body is prerm else "elif"):]
+            self.assertIn("documentdb_stop_local_major", else_branch)
+            self.assertIn(f'"{major}" || {{', else_branch)
+            self.assertIn("warning: DocumentDB for PostgreSQL", else_branch)
+            self.assertNotRegex(else_branch, r"warning:[^\n]*\n\s*exit 1", "removal must never be blocked")
+
+    def test_reset_finds_the_postmaster_and_verifies_before_deleting(self):
+        script = RESET_SCRIPT.read_text(encoding="utf-8")
+        first_rm = script.index('rm -rf "${data_dir}"')
+        nothing = script.index("Nothing to reset for PostgreSQL")
+        self.assertLess(nothing, script.index('systemctl stop "documentdb-local@'),
+                        "a never-installed major must be reported before touching anything")
+        finder = script.index('_pm_pids="$(documentdb_postmaster_pids', nothing + 1)
+        self.assertLess(finder, first_rm)
+        self.assertLess(script.index("still running for ${data_dir}"), first_rm)
+        self.assertLess(script.index("did not stop. Nothing was deleted"), first_rm)
+
+
+class ListenAddressSurvivesRerunTests(unittest.TestCase):
+    """A re-run must keep a restricted
+    gateway bind address, and --status must show it plus the extension
+    versions actually created."""
+
+    def setUp(self):
+        self.shell = shutil.which("bash")
+        if not self.shell:
+            self.skipTest("bash not available")
+
+    def _funcs(self, tmp, *names):
+        return "\n".join(
+            _shell_function(self, SETUP_SCRIPT, n).replace("/etc/documentdb/local/", f"{tmp}/")
+            for n in names) + "\n"
+
+    def _defaults(self, env_lines, extra=""):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "17").mkdir()
+            (Path(tmp) / "17" / "gateway.env").write_text("\n".join(env_lines) + "\n")
+            (Path(tmp) / "17" / "setup.conf").write_text("GATEWAY_PORT=10260\n")
+            script = (
+                'log_info() { echo "INFO: $*"; }\n'
+                + self._funcs(tmp, "persisted_listen_addr", "persisted_gateway_port",
+                              "default_gateway_settings_from_persisted_state")
+                + 'PG_VERSION=17; GATEWAY_PORT=10260; GATEWAY_PORT_EXPLICIT=false; DRY_RUN=false\n'
+                + 'PERSISTED_GATEWAY_PORT=""; GATEWAY_LISTEN_HOST=""\n'
+                + 'TLS_CERT_FILE=""; TLS_KEY_FILE=""; TLS_AUTO_GENERATE=""\n' + extra
+                + 'default_gateway_settings_from_persisted_state\n'
+                + 'echo "ADDR=${GATEWAY_LISTEN_HOST}:${GATEWAY_PORT}"\n'
+            )
+            r = subprocess.run([self.shell, "-c", script], capture_output=True,
+                               text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+
+    def test_rerun_keeps_a_loopback_bind(self):
+        out = self._defaults(["DOCUMENTDB_PG_URL_FILE=/x", "DOCUMENTDB_LISTEN_ADDR=127.0.0.1:10260"])
+        self.assertIn("ADDR=127.0.0.1:10260", out)
+        self.assertIn("Keeping gateway bind address 127.0.0.1", out)
+
+    def test_the_effective_last_assignment_wins(self):
+        # An operator line outside the managed block comes first; the block's
+        # value is the one the gateway sees.
+        out = self._defaults(["DOCUMENTDB_LISTEN_ADDR=127.0.0.1:10260",
+                              "# >>> documentdb-register-gateway managed env >>>",
+                              "DOCUMENTDB_LISTEN_ADDR=[::1]:10260",
+                              "# <<< documentdb-register-gateway managed env <<<"])
+        self.assertIn("ADDR=[::1]:10260", out)
+
+    def test_a_port_change_does_not_widen_the_bind(self):
+        out = self._defaults(["DOCUMENTDB_LISTEN_ADDR=localhost:10260"],
+                             extra="GATEWAY_PORT=27017; GATEWAY_PORT_EXPLICIT=true\n")
+        self.assertIn("ADDR=localhost:27017", out)
+
+    def test_quoted_and_exported_binds_are_kept(self):
+        # The gateway wrapper accepts these forms, so a re-run must too.
+        for line in ('DOCUMENTDB_LISTEN_ADDR="127.0.0.1:10260"',
+                     "export DOCUMENTDB_LISTEN_ADDR='127.0.0.1:10260'",
+                     "  DOCUMENTDB_LISTEN_ADDR = 127.0.0.1:10260  ",
+                     'DOCUMENTDB_LISTEN_ADDR=" 127.0.0.1:10260 "'):
+            with self.subTest(line=line):
+                self.assertIn("ADDR=127.0.0.1:10260", self._defaults([line]))
+
+    def test_only_binds_the_gateway_accepts_are_kept(self):
+        # The gateway refuses explicit non-loopback hosts; keeping one would break every re-run.
+        for line in ("DOCUMENTDB_LISTEN_ADDR=0.0.0.0:10260", "DOCUMENTDB_LISTEN_ADDR=[::]:10260",
+                     "DOCUMENTDB_LISTEN_ADDR=10.0.0.5:10260"):
+            with self.subTest(line=line):
+                self.assertIn("ADDR=:10260", self._defaults([line]))
+        self.assertIn("ADDR=[::1]:10260", self._defaults(["DOCUMENTDB_LISTEN_ADDR=[::1]"]))
+        self.assertIn("ADDR=::1:10260", self._defaults(["DOCUMENTDB_LISTEN_ADDR=::1:10260"]))
+
+    def test_a_wildcard_bind_stays_wildcard(self):
+        out = self._defaults(["DOCUMENTDB_LISTEN_ADDR=:10260"])
+        self.assertIn("ADDR=:10260", out)
+        self.assertNotIn("bind address", out)
+
+    def test_register_gateway_accepts_a_bracketed_ipv6_loopback(self):
+        text = GATEWAY_SETUP_SCRIPT.read_text(encoding="utf-8")
+        regex = re.search(r'if ! \[\[ "\$2" =~ (\S+) \]\]; then\n\s*die "--listen-addr', text).group(1)
+        for value, ok in (("[::1]:10260", True), ("127.0.0.1:10260", True), (":10260", True),
+                          ("[::1]", False), ("a b:1", False)):
+            r = subprocess.run([self.shell, "-c", f'[[ "$1" =~ {regex} ]]', "_", value])
+            self.assertEqual(r.returncode == 0, ok, value)
+
+    def test_status_shows_the_bind_address_and_extension_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "99").mkdir()
+            (Path(tmp) / "99" / "setup.conf").write_text("GATEWAY_PORT=10399\n")
+            (Path(tmp) / "99" / "gateway.env").write_text("DOCUMENTDB_LISTEN_ADDR=127.0.0.1:10399\n")
+            script = (
+                "log_warn() { :; }; documentdb_default_pg_port() { echo 1; }\n"
+                "nohup_gateway_pid_for_port() { return 1; }\n"
+                "status_extension_versions() { echo 'documentdb_core 0.110-0, documentdb 0.110-0'; }\n"
+                + self._funcs(tmp, "persisted_listen_addr", "status_only")
+                + "PG_VERSION=99; GATEWAY_PORT=10260\nstatus_only\n"
+            )
+            r = subprocess.run([self.shell, "-c", script], capture_output=True,
+                               text=True, timeout=20)
+            self.assertIn("gateway bind address:          127.0.0.1:10399", r.stdout)
+            self.assertIn("extensions:                    documentdb_core 0.110-0, documentdb 0.110-0",
+                          r.stdout)
+
+    def test_status_labels_only_a_bare_port_as_all_interfaces(self):
+        for addr, shown in (("::1:10399", "::1:10399\n"), (":10399", ":10399 (all interfaces)")):
+            with self.subTest(addr=addr), tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "99").mkdir()
+                (Path(tmp) / "99" / "setup.conf").write_text("GATEWAY_PORT=10399\n")
+                (Path(tmp) / "99" / "gateway.env").write_text(f"DOCUMENTDB_LISTEN_ADDR={addr}\n")
+                script = ("log_warn() { :; }; documentdb_default_pg_port() { echo 1; }\n"
+                          "nohup_gateway_pid_for_port() { return 1; }\n"
+                          "status_extension_versions() { :; }\n"
+                          + self._funcs(tmp, "persisted_listen_addr", "status_only")
+                          + "PG_VERSION=99; GATEWAY_PORT=10260\nstatus_only\n")
+                r = subprocess.run([self.shell, "-c", script], capture_output=True, text=True, timeout=20)
+                self.assertIn(f"gateway bind address:          {shown}", r.stdout)
+
+    def test_status_extension_versions_flags_a_stale_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "psql").write_text("#!/bin/sh\n")
+            (Path(tmp) / "psql").chmod(0o755)
+            (Path(tmp) / "pg-url").write_text("postgresql://documentdb-gateway@/postgres?host=/x\n")
+            rows = ("documentdb_core 0.110-0 0.111-0\n"
+                    "documentdb 0.110-0 0.111-0\n"
+                    "documentdb_extended_rum - 0.111-0\n")
+            script = (
+                "id() { echo 0; }\n"
+                f"documentdb_pg_bindir_candidates() {{ echo {tmp}; }}\n"
+                f"run_as_user() {{ printf '%s' {shlex.quote(rows)}; }}\n"
+                + _shell_function(self, SETUP_SCRIPT, "status_extension_versions")
+                + f"\nstatus_extension_versions 17 {tmp}/pg-url\n"
+            )
+            r = subprocess.run([self.shell, "-c", script], capture_output=True,
+                               text=True, timeout=20)
+            self.assertEqual(
+                r.stdout.strip(),
+                "documentdb_core 0.110-0 (package has 0.111-0; re-run documentdb-setup), "
+                "documentdb 0.110-0 (package has 0.111-0; re-run documentdb-setup)")
+
+
+class ProcpsDependencyTests(unittest.TestCase):
+    """pgrep/ps come from procps, which minimal
+    RHEL images lack. Declare it, and never let a missing pgrep turn the
+    orphan-gateway sweep into a silent no-op."""
+
+    def test_the_package_shipping_setup_and_reset_declares_procps(self):
+        self.assertRegex(COMMON_BUILD_SCRIPT.read_text(encoding="utf-8"), r"(?m)^Depends:.*\bprocps\b")
+        self.assertRegex(COMMON_SPEC.read_text(encoding="utf-8"), r"(?m)^Requires:\s+procps-ng\s*$")
+
+    def _sweep(self, pgrep_body):
+        shell = shutil.which("bash")
+        if not shell:
+            self.skipTest("bash not available")
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+        func = re.search(r"^(\s+)_kill_nohup_gateway_orphans\(\) \{\n.*?^\1\}", text,
+                         flags=re.DOTALL | re.MULTILINE).group(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "pgrep").write_text("#!/bin/sh\n" + pgrep_body)
+            (Path(tmp) / "pgrep").chmod(0o755)
+            script = ('set -euo pipefail\ndie() { echo "DIE: $*"; exit 3; }\n'
+                      'log_info() { echo "INFO: $*"; }\nDRY_RUN=false\n'
+                      f'PATH={tmp}:$PATH\n{func}\n'
+                      '_kill_nohup_gateway_orphans TERM && echo HIT || echo "NONE rc=$?"\n')
+            return subprocess.run([shell, "-c", script], capture_output=True, text=True, timeout=20)
+
+    def test_sweep_fails_loudly_when_pgrep_cannot_run(self):
+        r = self._sweep("exit 127\n")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("pgrep exit 127", r.stdout)
+
+    def test_sweep_treats_no_match_as_nothing_to_stop(self):
+        r = self._sweep("exit 1\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("NONE rc=1", r.stdout)
+
+    def test_unscoped_restore_checks_for_pgrep_before_changing_anything(self):
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+        check = text.index('if [[ -z "${restore_scope}" ]] && ! command_exists pgrep; then')
+        self.assertLess(check, text.index('_restore_strip_block "${config_file}"'))

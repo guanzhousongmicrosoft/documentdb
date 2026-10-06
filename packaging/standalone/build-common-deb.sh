@@ -157,7 +157,7 @@ Version: ${VERSION}
 Architecture: ${ARCH}
 Maintainer: ${DEB_MAINTAINER}
 Installed-Size: @INSTALLED_SIZE@
-Depends: documentdb-postgresql-tools (>= ${VERSION}), documentdb-gateway (>= ${VERSION}), jq
+Depends: documentdb-postgresql-tools (>= ${VERSION}), documentdb-gateway (>= ${VERSION}), jq, procps
 Replaces: documentdb-16, documentdb-17, documentdb-18
 Section: database
 Priority: optional

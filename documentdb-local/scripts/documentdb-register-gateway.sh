@@ -1613,8 +1613,8 @@ parse_arguments() {
                 [[ $# -ge 2 ]] || die "--listen-addr requires a value (e.g. :10260)."
                 # Conservative validation: forms ":<port>" or "<addr>:<port>"
                 # with port digits only, addr letters/digits/dots/colons.
-                if ! [[ "$2" =~ ^([A-Za-z0-9._:-]*):[0-9]+$ ]]; then
-                    die "--listen-addr must be HOST:PORT or :PORT (got '$2')."
+                if ! [[ "$2" =~ ^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._:-]*):[0-9]+$ ]]; then
+                    die "--listen-addr must be HOST:PORT, [IPV6]:PORT or :PORT (got '$2')."
                 fi
                 GATEWAY_LISTEN_ADDR="$2"; shift 2 ;;
             --tls-auto-generate)
