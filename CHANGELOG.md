@@ -36,6 +36,7 @@
 * Harden ordered RUM index scans against an emptied leftmost posting-tree leaf and set the recheck flag on the correct bound. *[Bugfix]*
 * Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
 * Fix a one-byte heap overflow when parsing a `bsonsequence` from JSON. *[Bugfix]*
+* Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
 
 ### documentdb v0.117-0 (September 10, 2026) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
