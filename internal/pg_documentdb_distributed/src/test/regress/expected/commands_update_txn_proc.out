@@ -1899,3 +1899,176 @@ select document from documentdb_api.collection('db1', 'subtransupdate');
 (1 row)
 
 RESET client_min_messages;
+-- Single update pushed whole to the update worker, with the worker side
+-- sub-transaction skipped. 'db' has native colocation off, so the collection is
+-- unsharded and treated as remote and the batch is pushed to update_worker.
+SELECT documentdb_api.insert('db', '{"insert":"nosubtxn", "documents":[{"_id":1, "b":1}]}');
+NOTICE:  creating collection
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""1"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+SET documentdb.enable_update_worker_single_write_no_sub_transaction TO on;
+SET client_min_messages TO 'DEBUG1';
+-- Single update without a transaction id: the worker runs it without a
+-- sub-transaction, so no "Using single update with subtransaction" is reported.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false}]}');
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9913 WHERE shard_key_value = 9913" via SPI
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+-- A transaction id still requires the retryable write path, so the worker keeps
+-- using a sub-transaction.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false}]}', NULL, 'nosubtxn-test');
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9913 WHERE shard_key_value = 9913" via SPI
+DEBUG:  Using single update with subtransaction
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+-- More than one update is not eligible, so the worker keeps handling errors itself.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false},{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false}]}');
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9913 WHERE shard_key_value = 9913" via SPI
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "2" }, "n" : { "$numberInt" : "2" } } | t
+(1 row)
+
+RESET client_min_messages;
+-- A failing single update must still be reported as a write error rather than
+-- raising out of the procedure, and must not apply.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1}, "u":{"_id":999, "a":1}}]}');
+                                                                                                                                    p_result                                                                                                                                    | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "0" }, "n" : { "$numberInt" : "0" }, "writeErrors" : [ { "index" : { "$numberInt" : "0" }, "code" : { "$numberInt" : "486539293" }, "errmsg" : "Cannot modify '_id' field as part of the operation" } ] } | f
+(1 row)
+
+-- The failed update rolled back, the successful ones did not.
+select document from documentdb_api.collection('db', 'nosubtxn');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "5" } }
+(1 row)
+
+-- Writes still work after the rolled back update.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false}]}');
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+select document from documentdb_api.collection('db', 'nosubtxn');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "6" } }
+(1 row)
+
+-- An ordered multi update where only the second fails still reports the right index.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxn", "updates":[{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false},{"q":{"_id":1},"u":{"_id":999,"a":1}}]}');
+                                                                                                                                    p_result                                                                                                                                    | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" }, "writeErrors" : [ { "index" : { "$numberInt" : "1" }, "code" : { "$numberInt" : "486539293" }, "errmsg" : "Cannot modify '_id' field as part of the operation" } ] } | f
+(1 row)
+
+select document from documentdb_api.collection('db', 'nosubtxn');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "7" } }
+(1 row)
+
+RESET documentdb.enable_update_worker_single_write_no_sub_transaction;
+-- The same single update optimization, but with the updates supplied through the
+-- procedure's bsonsequence argument instead of inside the command document. This
+-- is the shape wire-protocol requests use, and it takes the updateSequence branch
+-- of the batch size check.
+SELECT documentdb_api.insert('db', '{"insert":"nosubtxnseq", "documents":[{"_id":1, "b":1}]}');
+NOTICE:  creating collection
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""1"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+SET documentdb.enable_update_worker_single_write_no_sub_transaction TO on;
+SET client_min_messages TO 'DEBUG1';
+-- A sequence holding exactly one update is eligible, so no sub-transaction is
+-- reported.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false} ] }'::documentdb_core.bsonsequence);
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9914 WHERE shard_key_value = 9914" via SPI
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+-- A sequence holding two updates is not eligible, so the worker keeps handling
+-- errors itself.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false},{"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false} ] }'::documentdb_core.bsonsequence);
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9914 WHERE shard_key_value = 9914" via SPI
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "2" }, "n" : { "$numberInt" : "2" } } | t
+(1 row)
+
+-- A single update sequence with a transaction id still takes the retryable write
+-- path, so the worker keeps using a sub-transaction.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false} ] }'::documentdb_core.bsonsequence, 'nosubtxnseq-test');
+DEBUG:  executing " SELECT documentdb_api_internal.update_worker($1, $2, $3, $4::documentdb_core.bson, $5::documentdb_core.bsonsequence, $6) FROM documentdb_data.documents_9914 WHERE shard_key_value = 9914" via SPI
+DEBUG:  Using single update with subtransaction
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+RESET client_min_messages;
+-- All four updates applied.
+select document from documentdb_api.collection('db', 'nosubtxnseq');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "5" } }
+(1 row)
+
+-- A failing single update sequence is reported as a write error at index 0 and
+-- must not apply.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"_id":999,"a":1}} ] }'::documentdb_core.bsonsequence);
+                                                                                                                                    p_result                                                                                                                                    | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "0" }, "n" : { "$numberInt" : "0" }, "writeErrors" : [ { "index" : { "$numberInt" : "0" }, "code" : { "$numberInt" : "486539293" }, "errmsg" : "Cannot modify '_id' field as part of the operation" } ] } | f
+(1 row)
+
+select document from documentdb_api.collection('db', 'nosubtxnseq');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "5" } }
+(1 row)
+
+-- Writes still work after the rolled back update.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false} ] }'::documentdb_core.bsonsequence);
+                                                  p_result                                                  | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" } } | t
+(1 row)
+
+select document from documentdb_api.collection('db', 'nosubtxnseq');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "6" } }
+(1 row)
+
+-- A two update sequence where only the second fails still reports index 1 and
+-- keeps the first update, proving the fallback path is unchanged.
+CALL documentdb_api.update_txn_proc('db', '{"update":"nosubtxnseq"}', '{ "": [ {"q":{"_id":1},"u":{"$inc":{"b":1}},"multi":false},{"q":{"_id":1},"u":{"_id":999,"a":1}} ] }'::documentdb_core.bsonsequence);
+                                                                                                                                    p_result                                                                                                                                    | p_success 
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "nModified" : { "$numberInt" : "1" }, "n" : { "$numberInt" : "1" }, "writeErrors" : [ { "index" : { "$numberInt" : "1" }, "code" : { "$numberInt" : "486539293" }, "errmsg" : "Cannot modify '_id' field as part of the operation" } ] } | f
+(1 row)
+
+select document from documentdb_api.collection('db', 'nosubtxnseq');
+                             document                             
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "b" : { "$numberInt" : "7" } }
+(1 row)
+
+RESET documentdb.enable_update_worker_single_write_no_sub_transaction;

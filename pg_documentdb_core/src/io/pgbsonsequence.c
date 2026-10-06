@@ -260,6 +260,36 @@ PgbsonSequenceGetDocumentBsonValues(const pgbsonsequence * bsonSequence)
 
 
 /*
+ * Checks whether the bsonsequence holds exactly one document. Reading stops as
+ * soon as the answer is known, so large sequences are not walked in full.
+ */
+pgbson_require_alignment() bool
+PgbsonSequenceHasSingleDocument(const pgbsonsequence *bsonSequence)
+{
+	const uint8_t *data = (const uint8_t *) VARDATA_ANY(bsonSequence);
+	uint32_t dataSize = VARSIZE_ANY_EXHDR(bsonSequence);
+
+	bson_reader_t *reader = bson_reader_new_from_data(data, dataSize);
+
+	int documentCount = 0;
+	while (documentCount < 2)
+	{
+		bool reachedEOF = false;
+		const bson_t *document = bson_reader_read(reader, &reachedEOF);
+		if (document == NULL || reachedEOF)
+		{
+			break;
+		}
+
+		documentCount++;
+	}
+
+	bson_reader_destroy(reader);
+	return documentCount == 1;
+}
+
+
+/*
  * Checks whether the string representation of the bson sequence
  * is hex encoded or not.
  */
