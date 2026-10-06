@@ -133,6 +133,10 @@ PG_PORT=""
 PG_PORT_EXPLICIT=false
 GATEWAY_PORT="${DEFAULT_GATEWAY_PORT}"
 GATEWAY_PORT_EXPLICIT=false
+# Gateway port the previous run recorded for this major, before this run changes it.
+PERSISTED_GATEWAY_PORT=""
+# Host part of the gateway bind address ("" = all interfaces), kept across re-runs.
+GATEWAY_LISTEN_HOST=""
 DATA_DIR=""
 DATA_DIR_EXPLICIT=false
 NO_ENABLE=false
@@ -267,7 +271,8 @@ Options:
                           side effects.
   --status                Report the current per-major installation state
                           (PG service active, gateway service active, ports
-                          listening, admin user exists), and exit.
+                          listening, gateway bind address, extension
+                          versions, admin user exists), and exit.
   --no-enable             Do not start the gateway after setup
   --load-sample-data      Load built-in sample data after setup (requires mongosh)
   --skip-init-data        Skip the post-setup sample-data ingest step (the default
@@ -1063,6 +1068,21 @@ validate_live_cluster_paths() {
 # STATE_MANAGED_KEYS_RE in documentdb-register-gateway.sh.
 readonly GREENFIELD_MANAGED_KEYS_RE='^(DOCUMENTDB_MANAGED_POSTGRES|DOCUMENTDB_MODE|PG_VERSION|PG_PORT|PG_OWNER|DATA_DIR|CONFIG_FILE|HBA_FILE|IDENT_FILE|GATEWAY_PORT)='
 
+# retire_previous_port_gateway — stop the previous port's nohup gateway. Called
+# right before the state file with the new port is moved into place, so a
+# refused or failed run leaves the old gateway serving; after the move nothing
+# records where it runs. --no-enable leaves gateways alone.
+retire_previous_port_gateway() {
+    [[ -n "${PERSISTED_GATEWAY_PORT}" && "${PERSISTED_GATEWAY_PORT}" != "${GATEWAY_PORT}" ]] || return 0
+    if [[ "${NO_ENABLE}" == "true" ]]; then
+        log_warn "--no-enable: a gateway on the previous port ${PERSISTED_GATEWAY_PORT} keeps running; stop it yourself."
+        return 0
+    fi
+    log_info "Gateway port changed from ${PERSISTED_GATEWAY_PORT} to ${GATEWAY_PORT}."
+    stop_recorded_nohup_gateway "${PERSISTED_GATEWAY_PORT}" \
+        || die "The gateway on the previous port ${PERSISTED_GATEWAY_PORT} did not stop; stop it, then re-run."
+}
+
 persist_self_managed_postgres_state() {
     local temp_file=""
 
@@ -1163,6 +1183,7 @@ persist_self_managed_postgres_state() {
             printf 'IDENT_FILE=%s\n' "${LIVE_IDENT_FILE}"
             printf 'GATEWAY_PORT=%s\n' "${GATEWAY_PORT}"
         } > "${per_major_temp}"
+        retire_previous_port_gateway
         mv "${per_major_temp}" "${per_major_conf}"
         chmod 644 "${per_major_conf}"
         log_verbose "Per-major state written to ${per_major_conf}"
@@ -1268,6 +1289,7 @@ persist_brownfield_state() {
         printf 'ADOPTED_PG_SERVICE_UNIT=%s\n' "${adopted_pg_unit}"
         printf 'GATEWAY_PORT=%s\n' "${GATEWAY_PORT}"
     } > "${tmp}"
+    retire_previous_port_gateway
     mv "${tmp}" "${brownfield_conf}"
     chmod 600 "${brownfield_conf}"
     log_verbose "Per-major brownfield state written to ${brownfield_conf}"
@@ -2238,24 +2260,68 @@ ensure_socket_dir_writable() {
 # flags explicitly, default them from what the previous run persisted
 # (GATEWAY_PORT in the per-major state file; TLS keys in the per-major
 # gateway.env managed fragment).
+# persisted_listen_addr <major> — the DOCUMENTDB_LISTEN_ADDR the gateway gets
+# from the major's gateway.env. Parsed as documentdb-gateway-wrapper.sh does
+# (optional export, one layer of quotes); the last assignment wins.
+persisted_listen_addr() {
+    local _env="/etc/documentdb/local/$1/gateway.env" _line _val=""
+    [[ -r "${_env}" ]] || return 0
+    while IFS= read -r _line || [[ -n "${_line}" ]]; do
+        [[ "${_line}" =~ ^[[:space:]]*(export[[:space:]]+)?DOCUMENTDB_LISTEN_ADDR[[:space:]]*=[[:space:]]*(.*[^[:space:]])?[[:space:]]*$ ]] || continue
+        _val="${BASH_REMATCH[2]}"
+        if [[ "${_val}" =~ ^\"(.*)\"$ || "${_val}" =~ ^\'(.*)\'$ ]]; then
+            _val="${BASH_REMATCH[1]}"
+        fi
+        # The gateway trims the value it is given, quoted or not.
+        [[ "${_val}" =~ ^[[:space:]]*(.*[^[:space:]])?[[:space:]]*$ ]] && _val="${BASH_REMATCH[1]}"
+    done < "${_env}"
+    printf '%s' "${_val}"
+}
+
+# persisted_gateway_port <major> — the GATEWAY_PORT a previous run recorded in
+# the major's setup.conf or brownfield.conf, or nothing.
+persisted_gateway_port() {
+    local _state _port=""
+    for _state in "/etc/documentdb/local/$1/setup.conf" "/etc/documentdb/local/$1/brownfield.conf"; do
+        [[ -r "${_state}" ]] || continue
+        _port="$(grep -E '^GATEWAY_PORT=' "${_state}" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+        [[ -n "${_port}" ]] && break
+    done
+    [[ "${_port}" =~ ^[0-9]+$ ]] && printf '%s' "${_port}"
+    return 0
+}
+
 default_gateway_settings_from_persisted_state() {
     [[ -n "${PG_VERSION}" && "${PG_VERSION}" =~ ^[0-9]+$ ]] || return 0
     local per_major_dir="/etc/documentdb/local/${PG_VERSION}"
 
+    # First call only: later calls may run after this run rewrote setup.conf.
+    [[ -n "${PERSISTED_GATEWAY_PORT}" ]] || PERSISTED_GATEWAY_PORT="$(persisted_gateway_port "${PG_VERSION}")"
+
     if [[ "${GATEWAY_PORT_EXPLICIT}" != "true" ]]; then
-        local _state _persisted_port=""
-        for _state in "${per_major_dir}/setup.conf" "${per_major_dir}/brownfield.conf"; do
-            [[ -r "${_state}" ]] || continue
-            _persisted_port="$(grep -E '^GATEWAY_PORT=' "${_state}" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-            [[ -n "${_persisted_port}" ]] && break
-        done
-        if [[ -n "${_persisted_port}" && "${_persisted_port}" =~ ^[0-9]+$ \
-                && "${_persisted_port}" != "${GATEWAY_PORT}" ]]; then
+        local _persisted_port="${PERSISTED_GATEWAY_PORT}"
+        if [[ -n "${_persisted_port}" && "${_persisted_port}" != "${GATEWAY_PORT}" ]]; then
             local _keep_prefix=""
             [[ "${DRY_RUN}" == "true" ]] && _keep_prefix="[dry-run] "
             log_info "${_keep_prefix}Keeping gateway listen port ${_persisted_port} from the previous run (pass --listen-port to change it)."
             GATEWAY_PORT="${_persisted_port}"
         fi
+    fi
+
+    # A loopback bind is kept even when the port changes: setup has no flag for
+    # the host, so dropping it would silently widen the gateway to all
+    # interfaces. Other hosts are ones the gateway refuses, so they are dropped.
+    local _addr="" _host=""
+    _addr="$(persisted_listen_addr "${PG_VERSION}")"
+    if [[ "${_addr}" =~ ^(\[[^]]*\])(:[0-9]+)?$ || "${_addr}" =~ ^(.*):[0-9]+$ ]]; then
+        _host="${BASH_REMATCH[1]}"
+    fi
+    case "${_host}" in 127.0.0.1|localhost|::1|"[::1]") ;; *) _host="" ;; esac
+    if [[ -n "${_host}" && "${_host}" != "${GATEWAY_LISTEN_HOST}" ]]; then
+        local _keep_addr_prefix=""
+        [[ "${DRY_RUN}" == "true" ]] && _keep_addr_prefix="[dry-run] "
+        log_info "${_keep_addr_prefix}Keeping gateway bind address ${_host} from the previous run (set DOCUMENTDB_LISTEN_ADDR=:<port> in /etc/documentdb/local/${PG_VERSION}/gateway.env to listen on all interfaces)."
+        GATEWAY_LISTEN_HOST="${_host}"
     fi
 
     # TLS: only when the operator passed nothing at all this run.
@@ -2361,7 +2427,7 @@ ensure_pg_ident_map() {
     # load SetupConfiguration.json. So the operator's --listen-port has to
     # land in the per-major env file. Thread it through register-gateway.
     if [[ -n "${GATEWAY_PORT}" ]]; then
-        rg_args+=(--listen-addr ":${GATEWAY_PORT}")
+        rg_args+=(--listen-addr "${GATEWAY_LISTEN_HOST}:${GATEWAY_PORT}")
     fi
     # Standalone defaults to TLS auto-gen per design §4.3 — UNLESS the
     # operator explicitly passed --tls-cert/--tls-key (in which case
@@ -3075,7 +3141,9 @@ start_or_restart_postgres() {
         if run_as_user documentdb-local "${PG_CTL}" -D "${DATA_DIR}" status >/dev/null 2>&1; then
             if [[ "${PG_CONFIG_CHANGED}" == "true" ]]; then
                 log_info "Configuration changed; restarting PostgreSQL to apply new settings."
-                run_as_user documentdb-local "${PG_CTL}" -D "${DATA_DIR}" -w restart
+                # -l as on start: without it the new postmaster inherits our
+                # stdout and a piped caller (| tee, $(...)) never sees EOF.
+                run_as_user documentdb-local "${PG_CTL}" -D "${DATA_DIR}" -l "${DATA_DIR}/pglog.log" -w restart
             elif [[ "${PG_RELOAD_CHANGED}" == "true" ]]; then
                 log_info "Authentication mapping changed; reloading PostgreSQL configuration."
                 run_as_user documentdb-local "${PG_CTL}" -D "${DATA_DIR}" reload
@@ -3348,6 +3416,19 @@ stop_gateway_process() {
     fi
 }
 
+# stop_recorded_nohup_gateway <port> — stop the gateway the nohup fallback
+# recorded for <port>, if that record still names a live gateway on the port,
+# and drop the record. Returns 1 only when a recorded gateway would not stop.
+stop_recorded_nohup_gateway() {
+    local port="$1" pid=""
+    pid="$(nohup_gateway_pid_for_port "${port}" || true)"
+    if [[ -n "${pid}" ]]; then
+        log_info "Stopping the non-systemd gateway on port ${port} (pid ${pid})."
+        stop_gateway_process "${pid}" "${port}" || return 1
+    fi
+    rm -f "$(nohup_gateway_pidfile "${port}")" 2>/dev/null || true
+}
+
 verify_gateway_unit_active() {
     # After a systemd start/restart, confirm the unit actually activated.
     # A unit whose ConditionPathExists gate is unmet (e.g. the per-major
@@ -3618,8 +3699,15 @@ start_gateway() {
     # always-readable boot_id would land in the STARTTIME slot and the record
     # would be the malformed "PID BOOT_ID". Result is exactly one of "PID",
     # "PID STARTTIME", or "PID STARTTIME BOOT_ID"; the reader honours all three.
+    # setsid puts the daemon in its own session so a Ctrl-C or CI timeout
+    # aimed at the wizard's process group does not take the gateway down too.
+    # With job control off (an inherited SHELLOPTS can turn it on) the
+    # backgrounded child is never a group leader, so setsid execs in place and
+    # $! stays the daemon's PID.
+    local setsid_clause=""
+    command_exists setsid && setsid_clause="set +m; setsid "
     run_as_user_shell documentdb-gateway \
-        "cd /var/lib/documentdb-gateway && ${env_source_clause}{ nohup ${escaped_binary} ${escaped_config} > /var/lib/documentdb-gateway/gateway.log 2>&1 & { _gwp=\$!; _gws=\$(awk '{n=split(\$0,a,\")\"); split(a[n],f); print f[20]}' /proc/\$_gwp/stat 2>/dev/null | tr -dc '0-9'); _gwb=\$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null); printf '%s' \"\$_gwp\${_gws:+ \$_gws\${_gwb:+ \$_gwb}}\" > ${escaped_pidfile}; } 2>/dev/null || true; }"
+        "cd /var/lib/documentdb-gateway && ${env_source_clause}{ ${setsid_clause}nohup ${escaped_binary} ${escaped_config} > /var/lib/documentdb-gateway/gateway.log 2>&1 & { _gwp=\$!; _gws=\$(awk '{n=split(\$0,a,\")\"); split(a[n],f); print f[20]}' /proc/\$_gwp/stat 2>/dev/null | tr -dc '0-9'); _gwb=\$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null); printf '%s' \"\$_gwp\${_gws:+ \$_gws\${_gwb:+ \$_gwb}}\" > ${escaped_pidfile}; } 2>/dev/null || true; }"
     GW_STARTED_VIA="nohup"
     # nohup path has no systemd unit; empty argument switches the hint
     # to the log file path instead of journalctl.
@@ -3959,8 +4047,10 @@ parse_arguments() {
                 shift 2
                 ;;
             --data-dir)
-                [[ $# -ge 2 ]] || die "--data-dir requires a value."
-                DATA_DIR="$2"
+                [[ $# -ge 2 && -n "$2" ]] || die "--data-dir requires a value."
+                # Absolute and normalized as pg_ctl does, so the persisted path
+                # names this cluster from any cwd and matches the postmaster's -D.
+                DATA_DIR="$(realpath -m -s -- "$2")"
                 DATA_DIR_EXPLICIT=true
                 shift 2
                 ;;
@@ -4178,6 +4268,35 @@ REPORT
 # does not modify anything, does not call register-gateway, does not
 # initdb. Exit 0 if a healthy install is found, non-zero otherwise so
 # scripts can gate on it.
+# status_extension_versions <major> <pg-url file> — "name version" for each
+# DocumentDB extension in the database the gateway serves, flagging any that
+# lag the installed package. Queried as the gateway's own role.
+status_extension_versions() {
+    local major="$1" url_file="$2" psql_bin="" bindir url="" rows=""
+    if [[ "$(id -u)" -ne 0 ]]; then
+        printf '<run as root to query>'
+        return 0
+    fi
+    while IFS= read -r bindir; do
+        [[ -x "${bindir}/psql" ]] && { psql_bin="${bindir}/psql"; break; }
+    done < <(documentdb_pg_bindir_candidates "${major}")
+    [[ -n "${psql_bin}" && -r "${url_file}" ]] && url="$(head -n 1 "${url_file}")"
+    if [[ -n "${url}" ]]; then
+        # -w and env: never prompt for a password, and keep the timeouts across a sudo fallback.
+        rows="$(run_as_user documentdb-gateway env PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=5000' \
+            "${psql_bin}" -X -w -A -t -q -F ' ' -d "${url}" -c \
+            "SELECT name, coalesce(installed_version, '-'), default_version FROM pg_available_extensions WHERE name IN ('documentdb_core', 'documentdb', 'documentdb_extended_rum') ORDER BY name = 'documentdb_extended_rum', name <> 'documentdb_core', name" \
+            2>/dev/null || true)"
+    fi
+    if [[ -z "${rows}" ]]; then
+        printf '<unavailable: could not query PostgreSQL>'
+        return 0
+    fi
+    awk '$2 == "-" { next }
+         { out = out sep $1 " " $2 (($2 != $3) ? " (package has " $3 "; re-run documentdb-setup)" : ""); sep = ", " }
+         END { print (out == "" ? "<none created>" : out) }' <<< "${rows}"
+}
+
 status_only() {
     local v="${PG_VERSION:-}"
     if [[ -z "${v}" ]]; then
@@ -4262,11 +4381,17 @@ EOF
         listening_port="<unable to probe listeners (install iproute2)>"
     fi
 
-    # If listener is up but systemctl said inactive, the wizard most
-    # likely fell back to nohup mode (no systemd). Reflect that
-    # accurately instead of a false "inactive".
+    # Listener up but no active unit: the wizard may have fallen back to nohup.
+    # Only the recorded, live gateway PID proves the listener is ours; any
+    # other process on the port must not read as a healthy install.
     if [[ "${listening_port}" == "${effective_gateway_port}" && "${gw_active}" == "inactive" ]]; then
-        gw_active="active (nohup; no systemd)"
+        if nohup_gateway_pid_for_port "${effective_gateway_port}" >/dev/null 2>&1; then
+            gw_active="active (nohup; no systemd)"
+        elif [[ "$(id -u)" -ne 0 ]]; then
+            gw_active="unknown (port ${effective_gateway_port} is in use; run as root to check it is this install's gateway)"
+        else
+            gw_active="inactive (port ${effective_gateway_port} is held by a process that is not this install's recorded gateway)"
+        fi
     fi
     if [[ "${listening_port}" == "${effective_gateway_port}" && "${pg_active}" == "inactive" && "${has_systemd}" == "0" ]]; then
         # Probe PG socket as a proxy when systemd is absent.
@@ -4283,6 +4408,20 @@ EOF
         fi
     fi
 
+    local bind_addr="" ext_versions=""
+    if [[ -r "/etc/documentdb/local/${v}/gateway.env" ]]; then
+        bind_addr="$(persisted_listen_addr "${v}")"
+        bind_addr="${bind_addr:-:${effective_gateway_port}}"
+        [[ "${bind_addr}" =~ ^:[0-9]+$ ]] && bind_addr+=" (all interfaces)"
+    elif [[ -e "/etc/documentdb/local/${v}/gateway.env" ]]; then
+        bind_addr="<run as root to read /etc/documentdb/local/${v}/gateway.env>"
+    else
+        bind_addr="<not configured>"
+    fi
+    if [[ "${mode}" != "<not configured>" ]]; then
+        ext_versions="$(status_extension_versions "${v}" "${connection_file}")"
+    fi
+
     cat <<EOF
 documentdb-setup status (PG ${v}):
 
@@ -4293,7 +4432,9 @@ connection URL file:           ${connection_file}
 ${pg_unit}: ${pg_active}
 ${gw_unit}: ${gw_active}
 gateway listener:              ${listening_port}
+gateway bind address:          ${bind_addr}
 EOF
+    [[ -z "${ext_versions}" ]] || printf 'extensions:                    %s\n' "${ext_versions}"
 
     # The design doc (§5 line 284)
     # promises "--status … exit 0 if a healthy install is found", and
@@ -4520,7 +4661,7 @@ main() {
         # `documentdb-setup --restore` as the way to detach the install
         # just created — on a multi-major host the unscoped sweep would
         # also strip, stop, and de-state every OTHER major's install.
-        local restore_scope=""
+        local restore_scope="" scoped_gateway_port=""
         if [[ "${PG_VERSION_EXPLICIT}" == "true" ]]; then
             # The scope is expanded into globs and unit names below; a
             # non-numeric value ('*', '17 18') would silently widen the
@@ -4529,6 +4670,9 @@ main() {
                 || die "--restore --pg-version requires a single numeric PostgreSQL major (got '${PG_VERSION}')."
             restore_scope="${PG_VERSION}"
             log_info "Restoring: removing documentdb-setup managed configuration for PostgreSQL major ${restore_scope}."
+            # Read before the state files go: it is the only key to this
+            # major's nohup gateway record.
+            scoped_gateway_port="$(persisted_gateway_port "${restore_scope}")"
         else
             log_info "Restoring: removing all documentdb-setup managed configuration."
             # Enumerate affected majors and confirm before an unscoped
@@ -4554,6 +4698,20 @@ main() {
                     die "Refusing an unscoped multi-major restore without confirmation (no TTY). Re-run with --pg-version N to scope to one major, or --yes to proceed against all majors."
                 fi
             fi
+        fi
+
+        # The unscoped sweep below needs pgrep; refuse before changing anything.
+        if [[ -z "${restore_scope}" ]] && ! command_exists pgrep; then
+            die "pgrep is required to stop gateways started without systemd. Install procps (procps-ng on RHEL), then re-run --restore."
+        fi
+
+        # Stop this major's own nohup gateway before any state goes, so a
+        # failure leaves the install intact for a retry.
+        if [[ -n "${scoped_gateway_port}" && "${DRY_RUN}" == "true" ]]; then
+            log_info "[dry-run] Would stop the non-systemd gateway recorded for port ${scoped_gateway_port}"
+        elif [[ -n "${scoped_gateway_port}" ]]; then
+            stop_recorded_nohup_gateway "${scoped_gateway_port}" \
+                || die "The gateway on port ${scoped_gateway_port} did not stop. Nothing was removed; stop it, then re-run."
         fi
 
         # The legacy env file predates per-major state; it records the
@@ -4845,8 +5003,11 @@ main() {
         # the same as a stand-alone gateway, so cwd cannot distinguish them)
         # while never killing a running systemd-managed gateway.
         _kill_nohup_gateway_orphans() {
-            local _signal="$1" _pid _cg _hit=1
-            for _pid in $(pgrep -f /usr/lib/documentdb-gateway/documentdb-gateway-daemon 2>/dev/null); do
+            local _signal="$1" _pid _cg _hit=1 _pids="" _rc=0
+            # pgrep exits 1 for "no match"; anything else means the sweep saw nothing.
+            _pids="$(pgrep -f /usr/lib/documentdb-gateway/documentdb-gateway-daemon)" || _rc=$?
+            (( _rc <= 1 )) || die "Could not search for non-systemd gateway processes (pgrep exit ${_rc}). Install procps (procps-ng on RHEL), then re-run --restore."
+            for _pid in ${_pids}; do
                 _cg="$(cat "/proc/${_pid}/cgroup" 2>/dev/null || true)"
                 case "${_cg}" in
                     *documentdb-gateway.service*|*documentdb-gateway-local@*) continue ;;
