@@ -628,3 +628,74 @@ SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_update_duplicate_i
 SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_update_unsharded_d');
 SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_update_worker_one_d');
 SELECT documentdb_api.drop_collection('coll_q_dist_db', 'single_field_d');
+
+-- ======================================================================
+-- findAndModify with collation
+-- ======================================================================
+
+-- Unsharded execution preserves collation for matching, sorting, and projection.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_d',
+  '{"_id": 1, "group": "pet", "name": "Zulu", "state": "old"}');
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_d',
+  '{"_id": 2, "group": "PET", "name": "alpha", "state": "old"}');
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_d", "query": {"group": "PeT"}, "sort": {"name": 1}, "update": {"$set": {"state": "updated"}}, "new": true, "fields": {"_id": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+-- A numeric shard-key equality routes to one worker with the command collation.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d',
+  '{"_id": 1, "tenant": 1, "name": "cat", "state": "old"}');
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d',
+  '{"_id": 2, "tenant": 1, "name": "dog", "state": "old"}');
+SELECT documentdb_api.shard_collection(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d', '{"tenant":"hashed"}', false);
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_sharded_d", "query": {"tenant": 1, "name": "CAT"}, "update": {"$set": {"state": "updated"}}, "new": true, "fields": {"_id": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_sharded_d", "query": {"tenant": 1, "name": "DOG"}, "remove": true, "fields": {"_id": 1, "name": 1}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+-- A non-simple collation cannot route through a string shard-key hash.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_string_shard_d',
+  '{"_id": 1, "tenant": "alpha", "state": "old"}');
+SELECT documentdb_api.shard_collection(
+  'coll_q_dist_db', 'coll_find_modify_string_shard_d', '{"tenant":"hashed"}', false);
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "ALPHA"}, "update": {"$set": {"state": "updated"}}, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "ALPHA"}, "remove": true, "collation": {"locale": "en", "strength": 1}}');
+ROLLBACK;
+
+-- Explicit simple collation retains exact string shard-key routing.
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "alpha"}, "update": {"$set": {"state": "simple"}}, "new": true, "fields": {"_id": 1, "tenant": 1, "state": 1}, "collation": {"locale": "simple"}}');
+ROLLBACK;
+
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_d');
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_sharded_d');
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_string_shard_d');

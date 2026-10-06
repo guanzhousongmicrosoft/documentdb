@@ -2,9 +2,8 @@
 -- Licensed under the MIT License.
 -- SPDX-License-Identifier: MIT
 
--- Tests for updateMany worker pushdown in a true multi-node environment.
--- Validates that update_worker calls are correctly routed to remote
--- worker nodes and results are aggregated back on the coordinator.
+-- Collation write tests in a true multi-node environment.
+-- Covers updateMany worker pushdown and remote findAndModify execution.
 
 SET citus.next_shard_id TO 198480000;
 SET documentdb.next_collection_id TO 198480;
@@ -141,3 +140,52 @@ SELECT documentdb_api.drop_collection('umw_mn', 'coll1');
 SELECT documentdb_api.drop_collection('umw_mn', 'collation_effects');
 
 RESET documentdb.enable_update_many_worker_pushdown;
+
+-- ================================================================
+-- 11. findAndModify collation on a remote node
+-- ================================================================
+SET documentdb_core.enableCollation TO on;
+SET documentdb.useLocalExecutionShardQueries TO off;
+SET citus.enable_local_execution TO off;
+SET citus.propagate_set_commands TO 'local';
+
+SELECT documentdb_api.insert_one(
+    'find_modify_collation_mn', 'remote',
+    '{ "_id": 1, "group": "pet", "name": "Zulu", "state": "old", "tags": ["cat"], "items": [{ "label": "cat" }] }');
+SELECT documentdb_api.insert_one(
+    'find_modify_collation_mn', 'remote',
+    '{ "_id": 2, "group": "PET", "name": "alpha", "state": "old", "tags": ["dog"], "items": [{ "label": "dog" }, { "label": "bird" }] }');
+
+CALL documentdb_distributed_test_helpers.place_collection_on_node(
+    'find_modify_collation_mn', 'remote', 1);
+
+SELECT shard_key IS NULL AS is_unsharded
+FROM documentdb_api_catalog.collections
+WHERE database_name = 'find_modify_collation_mn' AND collection_name = 'remote';
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+
+-- Remote update preserves collation for matching, sorting, update effects, and projection.
+SELECT documentdb_api.find_and_modify(
+    'find_modify_collation_mn',
+    '{ "findAndModify": "remote", "query": { "group": "PeT" }, "sort": { "name": 1 }, "update": { "$set": { "state": "updated" }, "$addToSet": { "tags": "DOG" } }, "new": true, "fields": { "_id": 1, "name": 1, "state": 1, "tags": 1, "items": { "$elemMatch": { "label": "DOG" } } }, "collation": { "locale": "en", "strength": 1 } }');
+
+ROLLBACK;
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+
+-- Remote remove preserves collation for matching, sorting, and projection.
+SELECT documentdb_api.find_and_modify(
+    'find_modify_collation_mn',
+    '{ "findAndModify": "remote", "query": { "group": "PeT" }, "sort": { "name": -1 }, "remove": true, "fields": { "_id": 1, "name": 1, "items": { "$elemMatch": { "label": "CAT" } } }, "collation": { "locale": "en", "strength": 1 } }');
+
+ROLLBACK;
+
+SELECT documentdb_api.drop_collection('find_modify_collation_mn', 'remote');
+
+RESET citus.enable_local_execution;
+RESET citus.propagate_set_commands;
+RESET documentdb.useLocalExecutionShardQueries;
+RESET documentdb_core.enableCollation;

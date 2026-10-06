@@ -78,7 +78,15 @@ SELECT 1 FROM insert_one(
         1
 (1 row)
 
-ANALYZE;
+SELECT documentdb_api.compact(
+    '{ "compact": "sharded_default",
+       "$db": "sharded_find_collation_db",
+       "mode": "updateStats" }');
+                                    compact                                     
+---------------------------------------------------------------------
+ { "ok" : { "$numberDouble" : "1.0" }, "bytesFreed" : { "$numberLong" : "0" } }
+(1 row)
+
 SELECT count(DISTINCT s.shardid) > 1 AS spans_shards
 FROM documentdb_api_catalog.collections c
 JOIN pg_dist_shard s

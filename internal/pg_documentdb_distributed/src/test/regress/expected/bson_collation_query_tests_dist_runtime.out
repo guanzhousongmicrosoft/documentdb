@@ -1449,3 +1449,143 @@ SELECT documentdb_api.drop_collection('coll_q_dist_db', 'single_field_d');
  t
 (1 row)
 
+-- ======================================================================
+-- findAndModify with collation
+-- ======================================================================
+-- Unsharded execution preserves collation for matching, sorting, and projection.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_d',
+  '{"_id": 1, "group": "pet", "name": "Zulu", "state": "old"}');
+psql:sql/bson_collation_query_tests_dist_core.sql:639: NOTICE:  creating collection
+                              insert_one
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "1" }, "ok" : { "$numberDouble" : "1.0" } }
+(1 row)
+
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_d',
+  '{"_id": 2, "group": "PET", "name": "alpha", "state": "old"}');
+                              insert_one
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "1" }, "ok" : { "$numberDouble" : "1.0" } }
+(1 row)
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_d", "query": {"group": "PeT"}, "sort": {"name": 1}, "update": {"$set": {"state": "updated"}}, "new": true, "fields": {"_id": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+                                                                                                                  find_and_modify
+---------------------------------------------------------------------
+ ("{ ""lastErrorObject"" : { ""n"" : { ""$numberInt"" : ""1"" }, ""updatedExisting"" : true }, ""value"" : { ""_id"" : { ""$numberInt"" : ""2"" }, ""name"" : ""alpha"", ""state"" : ""updated"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+ROLLBACK;
+-- A numeric shard-key equality routes to one worker with the command collation.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d',
+  '{"_id": 1, "tenant": 1, "name": "cat", "state": "old"}');
+psql:sql/bson_collation_query_tests_dist_core.sql:653: NOTICE:  creating collection
+                              insert_one
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "1" }, "ok" : { "$numberDouble" : "1.0" } }
+(1 row)
+
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d',
+  '{"_id": 2, "tenant": 1, "name": "dog", "state": "old"}');
+                              insert_one
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "1" }, "ok" : { "$numberDouble" : "1.0" } }
+(1 row)
+
+SELECT documentdb_api.shard_collection(
+  'coll_q_dist_db', 'coll_find_modify_sharded_d', '{"tenant":"hashed"}', false);
+ shard_collection
+---------------------------------------------------------------------
+
+(1 row)
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_sharded_d", "query": {"tenant": 1, "name": "CAT"}, "update": {"$set": {"state": "updated"}}, "new": true, "fields": {"_id": 1, "name": 1, "state": 1}, "collation": {"locale": "en", "strength": 1}}');
+                                                                                                                 find_and_modify
+---------------------------------------------------------------------
+ ("{ ""lastErrorObject"" : { ""n"" : { ""$numberInt"" : ""1"" }, ""updatedExisting"" : true }, ""value"" : { ""_id"" : { ""$numberInt"" : ""1"" }, ""name"" : ""cat"", ""state"" : ""updated"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_sharded_d", "query": {"tenant": 1, "name": "DOG"}, "remove": true, "fields": {"_id": 1, "name": 1}, "collation": {"locale": "en", "strength": 1}}');
+                                                                                      find_and_modify
+---------------------------------------------------------------------
+ ("{ ""lastErrorObject"" : { ""n"" : { ""$numberInt"" : ""1"" } }, ""value"" : { ""_id"" : { ""$numberInt"" : ""2"" }, ""name"" : ""dog"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+ROLLBACK;
+-- A non-simple collation cannot route through a string shard-key hash.
+SELECT documentdb_api.insert_one(
+  'coll_q_dist_db', 'coll_find_modify_string_shard_d',
+  '{"_id": 1, "tenant": "alpha", "state": "old"}');
+psql:sql/bson_collation_query_tests_dist_core.sql:675: NOTICE:  creating collection
+                              insert_one
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "1" }, "ok" : { "$numberDouble" : "1.0" } }
+(1 row)
+
+SELECT documentdb_api.shard_collection(
+  'coll_q_dist_db', 'coll_find_modify_string_shard_d', '{"tenant":"hashed"}', false);
+ shard_collection
+---------------------------------------------------------------------
+
+(1 row)
+
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "ALPHA"}, "update": {"$set": {"state": "updated"}}, "collation": {"locale": "en", "strength": 1}}');
+psql:sql/bson_collation_query_tests_dist_core.sql:682: ERROR:  findAndModify on a sharded collection cannot be routed to a single shard when the shard key value is collation-sensitive (string type).
+ROLLBACK;
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "ALPHA"}, "remove": true, "collation": {"locale": "en", "strength": 1}}');
+psql:sql/bson_collation_query_tests_dist_core.sql:688: ERROR:  findAndModify on a sharded collection cannot be routed to a single shard when the shard key value is collation-sensitive (string type).
+ROLLBACK;
+-- Explicit simple collation retains exact string shard-key routing.
+BEGIN;
+SET LOCAL documentdb_core.enableCollation TO on;
+SELECT documentdb_api.find_and_modify(
+  'coll_q_dist_db',
+  '{"findAndModify": "coll_find_modify_string_shard_d", "query": {"tenant": "alpha"}, "update": {"$set": {"state": "simple"}}, "new": true, "fields": {"_id": 1, "tenant": 1, "state": 1}, "collation": {"locale": "simple"}}');
+                                                                                                                  find_and_modify
+---------------------------------------------------------------------
+ ("{ ""lastErrorObject"" : { ""n"" : { ""$numberInt"" : ""1"" }, ""updatedExisting"" : true }, ""value"" : { ""_id"" : { ""$numberInt"" : ""1"" }, ""tenant"" : ""alpha"", ""state"" : ""simple"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+ROLLBACK;
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_d');
+ drop_collection
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_sharded_d');
+ drop_collection
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.drop_collection('coll_q_dist_db', 'coll_find_modify_string_shard_d');
+ drop_collection
+---------------------------------------------------------------------
+ t
+(1 row)
+
