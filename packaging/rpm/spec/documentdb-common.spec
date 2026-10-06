@@ -30,6 +30,8 @@ URL:            https://github.com/documentdb/documentdb
 Requires:       documentdb-gateway >= %{version}
 Requires:       documentdb-postgresql-tools >= %{version}
 Requires:       jq
+# documentdb-setup finds and stops nohup gateways with pgrep/ps.
+Requires:       procps-ng
 
 # The %pre scriptlet creates the documentdb-local system user via
 # sysusers_create_compat (RHEL/Fedora builders, where systemd-rpm-macros

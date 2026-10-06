@@ -1214,12 +1214,9 @@ nohup_gateway_record_pid() {
     # instead of returning 1.
     local recordfile="$1" first="" pid=""
     [[ -r "${recordfile}" ]] || return 1
-    # 2>/dev/null BEFORE the input redirection: redirections apply left-to-right,
-    # so if the file was unlinked since the -r test (a concurrent reset/setup),
-    # the open failure is reported to fd 2 only AFTER it points at /dev/null —
-    # otherwise bash prints a stray "No such file or directory" to the operator's
-    # terminal before the suppression takes effect.
-    IFS= read -r first 2>/dev/null < "${recordfile}" || true
+    # Non-blocking bounded read: the gateway user can fill this directory with FIFOs
+    # or /dev/zero links; a file unlinked since the -r test reads as empty.
+    IFS= read -r first <<< "$(dd if="${recordfile}" bs=256 count=1 iflag=nonblock 2>/dev/null | tr -d '\0')" || true
     pid="${first%%[![:digit:]]*}"      # leading digit run of field 1
     [[ -n "${pid}" ]] || return 1
     (( 10#${pid} > 1 )) 2>/dev/null || return 1
@@ -1283,11 +1280,9 @@ nohup_gateway_pid_for_port() {
     kill -0 "${pid}" 2>/dev/null || return 1
     gateway_exe_matches "${pid}" || return 1
 
-    # Fields 2 (starttime) and 3 (boot_id) of the record, if present. 2>/dev/null
-    # precedes the input redirect so a file unlinked in the TOCTOU window (see
-    # nohup_gateway_record_pid) fails the open silently rather than leaking a
-    # bash error to the operator; rec_start/rec_boot then stay empty (legacy).
-    read -r _ rec_start rec_boot 2>/dev/null < "${pidfile}" || true
+    # Fields 2 (starttime) and 3 (boot_id) of the record, if present, read as in
+    # nohup_gateway_record_pid; empty (legacy) if the file is gone.
+    read -r _ rec_start rec_boot <<< "$(dd if="${pidfile}" bs=256 count=1 iflag=nonblock 2>/dev/null | tr -d '\0')" || true
 
     if [[ -n "${rec_boot}" ]]; then
         cur_boot="$(current_boot_id)"
@@ -1365,6 +1360,117 @@ pid1_is_postgres() {
         comm="$(ps -o comm= -p 1 2>/dev/null | tr -d '[:space:]' || true)"
     fi
     [[ "${comm}" == "postgres" || "${comm}" == "postmaster" ]]
+}
+
+# documentdb_pid_running <pid> — alive and not an unreaped zombie (a container
+# PID 1 may never reap an orphan, and kill -0 succeeds on a zombie).
+documentdb_pid_running() {
+    local stat=""
+    kill -0 "$1" 2>/dev/null || return 1
+    IFS= read -r stat 2>/dev/null < "/proc/$1/stat" || true
+    stat="${stat##*) }"
+    [[ "${stat:0:1}" != "Z" ]]
+}
+
+# documentdb_postmaster_pids <data_dir> [socket_lock] — print the PID of every
+# live postmaster serving <data_dir>, one per line. PIDs come only from this
+# install's own postmaster.pid or socket lock file (the lock outlives a deleted
+# data directory), never a /proc-wide scan that would reach other containers'
+# clusters; one counts only while that process still runs as
+# "postgres -D <data_dir>", so a recycled PID never matches. argv needs no ptrace.
+documentdb_postmaster_pids() {
+    local datadir="$1" lock="${2:-}" norm="$1" f pid i d
+    local -a argv
+    # Canonical, symlinks resolved: pg_ctl normalizes -D, and setup accepts a symlinked spelling.
+    [[ "${datadir}" == /* ]] && norm="$(realpath -m -- "${datadir}")"
+    for f in "${datadir}/postmaster.pid" "${lock}"; do
+        [[ -n "${f}" && -f "${f}" ]] || continue
+        pid=""
+        IFS= read -r pid 2>/dev/null < "${f}" || true
+        pid="${pid#-}"   # a single-user backend records -PID
+        [[ "${pid}" =~ ^[0-9]+$ ]] && (( 10#${pid} > 1 )) || continue
+        mapfile -d '' -t argv 2>/dev/null < "/proc/${pid}/cmdline" || continue
+        case "${argv[0]:-}" in */postgres|postgres|*/postmaster|postmaster) ;; *) continue ;; esac
+        for (( i = 1; i < ${#argv[@]}; i++ )); do
+            case "${argv[i]}" in
+                -D) d="${argv[i+1]:-}" ;;
+                -D?*) d="${argv[i]#-D}" ;;
+                *) continue ;;
+            esac
+            if [[ "${d}" == "${datadir}" || ( "${d}" == /* && "$(realpath -m -- "${d}")" == "${norm}" ) ]]; then
+                documentdb_pid_running "${pid}" && printf '%s\n' "${pid}"
+                break
+            fi
+        done
+    done | sort -u
+    return 0
+}
+
+# documentdb_stop_postmaster <data_dir> [socket_lock] — fast shutdown, then
+# immediate, of every postmaster serving <data_dir>, 30s each. Prints the PIDs
+# still running, if any.
+documentdb_stop_postmaster() {
+    local pids sig pid i
+    pids="$(documentdb_postmaster_pids "$@")"
+    for sig in INT QUIT; do
+        [[ -n "${pids}" ]] || break
+        for pid in ${pids}; do kill "-${sig}" "${pid}" 2>/dev/null || true; done
+        for (( i = 0; i < 150; i++ )); do
+            pids="$(documentdb_postmaster_pids "$@")"
+            [[ -n "${pids}" ]] || break
+            sleep 0.2
+        done
+    done
+    printf '%s' "${pids}"
+}
+
+# documentdb_stop_local_major <major> — stop what documentdb-setup started for
+# <major> when there was no systemd to do it: the nohup gateway recorded for the
+# major's port, then (greenfield only) its postmaster. For the package removal
+# scriptlets, which must not leave either serving from removed files. Returns 1
+# if anything is still running.
+documentdb_stop_local_major() {
+    local major="$1" conf_dir="/etc/documentdb/local/$1" conf port="" pid pids i rc=0
+    local data_dir="" pg_port="" lock managed=""
+    for conf in "${conf_dir}/setup.conf" "${conf_dir}/brownfield.conf"; do
+        [[ -r "${conf}" ]] || continue
+        port="$(grep -E '^GATEWAY_PORT=' "${conf}" 2>/dev/null | head -n 1 | cut -d= -f2- || true)"
+        [[ -n "${port}" ]] && break
+    done
+    if [[ "${port}" =~ ^[0-9]+$ ]]; then
+        pid="$(nohup_gateway_pid_for_port "${port}" || true)"
+        if [[ -n "${pid}" ]]; then
+            echo "Stopping the DocumentDB gateway for PostgreSQL ${major} (pid ${pid})."
+            kill "${pid}" 2>/dev/null || true
+            for (( i = 0; i < 50; i++ )); do documentdb_pid_running "${pid}" || break; sleep 0.2; done
+            documentdb_pid_running "${pid}" && kill -KILL "${pid}" 2>/dev/null && sleep 1
+            if [[ -n "$(nohup_gateway_pid_for_port "${port}" 2>/dev/null || true)" ]]; then
+                echo "The DocumentDB gateway for PostgreSQL ${major} (pid ${pid}) did not stop." >&2
+                rc=1
+            fi
+        fi
+        (( rc )) || rm -f "$(nohup_gateway_pidfile "${port}")" 2>/dev/null || true
+    fi
+
+    # Brownfield PostgreSQL belongs to the operator; only a greenfield cluster is ours.
+    if [[ -r "${conf_dir}/setup.conf" ]]; then
+        managed="$(grep -E '^DOCUMENTDB_MANAGED_POSTGRES=' "${conf_dir}/setup.conf" 2>/dev/null | head -n 1 | cut -d= -f2- || true)"
+        data_dir="$(grep -E '^DATA_DIR=' "${conf_dir}/setup.conf" 2>/dev/null | head -n 1 | cut -d= -f2- || true)"
+        pg_port="$(grep -E '^PG_PORT=' "${conf_dir}/setup.conf" 2>/dev/null | head -n 1 | cut -d= -f2- || true)"
+    fi
+    if [[ "${managed}" == "true" && -n "${data_dir}" ]]; then
+        lock="/run/documentdb-local/${major}/postgresql/.s.PGSQL.${pg_port:-0}.lock"
+        pids="$(documentdb_postmaster_pids "${data_dir}" "${lock}")"
+        if [[ -n "${pids}" ]]; then
+            echo "Stopping PostgreSQL ${major} (pid ${pids//$'\n'/ })."
+            pids="$(documentdb_stop_postmaster "${data_dir}" "${lock}")"
+            if [[ -n "${pids}" ]]; then
+                echo "PostgreSQL ${major} (pid ${pids//$'\n'/ }) did not stop." >&2
+                rc=1
+            fi
+        fi
+    fi
+    return "${rc}"
 }
 
 # resolve_uid_check_target <listener-pid> <port>
