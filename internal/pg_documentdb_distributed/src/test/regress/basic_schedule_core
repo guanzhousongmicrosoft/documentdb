@@ -163,7 +163,7 @@ test: command_shard_commands
 test: bson_query_operator_pfe_index_pushdown bson_regex_object_id_pushdown_tests
 
 # Adhoc Query optimization tests
-test: bson_query_operator_in_opt
+test: bson_query_operator_in_opt dynamic_cursor_sharded_skip_limit_tests
 
 # Test is not great with concurrency with the way connections are managed and shard queries
 test: cursors_seqscan_sharded
