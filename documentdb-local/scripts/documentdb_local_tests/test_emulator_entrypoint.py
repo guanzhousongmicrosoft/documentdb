@@ -3375,6 +3375,35 @@ raise SystemExit('Unsupported jq expression: ' + expr)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("uses reserved prefix 'documentdb'", result.stdout + result.stderr)
 
+    def test_reserved_role_names_are_rejected(self):
+        # PostgreSQL refuses public/none only after the container has
+        # initialized. Exact match: "Public" is a valid role.
+        for username in ("public", "none"):
+            with self.subTest(username=username):
+                result = self._run(username, config=self.config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is reserved by PostgreSQL",
+                              result.stdout + result.stderr)
+
+    def test_username_over_63_bytes_is_rejected(self):
+        # PostgreSQL truncates the role, so the full name never logs in.
+        for username in ("a" * 64, "\u00e9" * 32):
+            with self.subTest(length=len(username)):
+                result = self._run(username, config=self.config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is 64 bytes", result.stdout + result.stderr)
+
+    def test_existing_usernames_outside_the_cli_charset_still_start(self):
+        # The packaged CLIs restrict new names to [A-Za-z0-9_-]; this check
+        # runs on every container start, so it must not lock out a name an
+        # existing data directory already uses.
+        for username in ("first.last", "app@corp", "-ops", "a" * 63,
+                         "public_admin", "Public", "None"):
+            with self.subTest(username=username):
+                result = self._run(username, config=self.config)
+                self.assertEqual(result.returncode, 0,
+                                 msg=result.stdout + result.stderr)
+
     def test_missing_config_is_rejected(self):
         result = self._run("docdb_admin", config=self.root / "absent.json")
         self.assertNotEqual(result.returncode, 0)
