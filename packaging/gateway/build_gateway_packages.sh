@@ -210,7 +210,8 @@ elif [[ "$PACKAGE_TYPE" == "rpm" ]]; then
     esac
 fi
 
-TAG=documentdb-build-packages-$OS-pg$PG:latest
+# Its own name: the extension build tags documentdb-build-packages-*.
+TAG=documentdb-build-gateway-packages-$OS-pg$PG:latest
 
 abs_output_dir="$script_dir/$OUTPUT_DIR"
 

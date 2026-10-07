@@ -199,8 +199,11 @@ Required:
 Authentication (one of the following; interactive prompt is the default):
   --admin-password-file <FILE>  Read the admin password from a file
                          (also: --password-file; for non-interactive/CI use).
-                         File should be mode 0600.
-  --admin-password-stdin Read the admin password from stdin (single line).
+                         File should be mode 0600. It must hold one line of
+                         printable ASCII; one trailing newline (LF or CRLF)
+                         is removed.
+  --admin-password-stdin Read the admin password from stdin (same rules as
+                         --admin-password-file).
                          Best practice for piping a secret without
                          touching disk:
                            printf '%s' "\$PW" | sudo documentdb-setup ... \\
@@ -393,7 +396,8 @@ resolve_password() {
         if [[ -n "${file_perms}" && "${file_perms}" != "600" && "${file_perms}" != "400" ]]; then
             log_warn "Password file ${PASSWORD_FILE} has permissions ${file_perms} (recommended: 0600). Other users on this system may be able to read it."
         fi
-        PASSWORD="$(< "${PASSWORD_FILE}")"
+        documentdb_read_password PASSWORD "Password file ${PASSWORD_FILE}" < "${PASSWORD_FILE}" \
+            || die "Cannot use --admin-password-file ${PASSWORD_FILE} (see above)."
     elif [[ "${PASSWORD_FROM_STDIN}" == "true" ]]; then
         # Read a single line (strip trailing newline) from stdin. Best
         # practice for "pipe a secret without touching disk" — see
@@ -405,10 +409,9 @@ resolve_password() {
         if [[ -t 0 ]]; then
             die "--admin-password-stdin requires the password on stdin (e.g. 'printf %s \"\$PW\" | sudo documentdb-setup ... --admin-password-stdin'). Stdin is a TTY; omit the flag to use the interactive prompt."
         fi
-        # `IFS= read -r` reads one line preserving leading/trailing
-        # whitespace except the trailing newline. Allow non-zero exit
-        # from `read` when there's no trailing newline on the pipe.
-        IFS= read -r PASSWORD || true
+        # Same one-line contract as a password file.
+        documentdb_read_password PASSWORD "The password on stdin" \
+            || die "Cannot use the password from --admin-password-stdin (see above)."
     elif [[ -n "${DOCUMENTDB_PASSWORD:-}" ]]; then
         # Deprecation warning for the env-var path is printed earlier
         # in main so it surfaces even in --dry-run / --print-config /
@@ -426,20 +429,26 @@ resolve_password() {
         local pw_confirm=""
         local pw_attempts=0
         while true; do
-            read -r -s -p "[documentdb-setup] Enter admin password: " PASSWORD
+            IFS= read -r -s -p "[documentdb-setup] Enter admin password: " PASSWORD
             echo ""
-            read -r -s -p "[documentdb-setup] Confirm admin password: " pw_confirm
+            IFS= read -r -s -p "[documentdb-setup] Confirm admin password: " pw_confirm
             echo ""
-            [[ "${PASSWORD}" == "${pw_confirm}" ]] && break
+            if [[ "${PASSWORD}" != "${pw_confirm}" ]]; then
+                echo "[documentdb-setup] Passwords do not match; please try again." >&2
+            elif documentdb_check_password "${PASSWORD}" "The admin password"; then
+                break
+            fi
             pw_attempts=$((pw_attempts + 1))
             if (( pw_attempts >= 3 )); then
-                die "Passwords did not match after ${pw_attempts} attempts."
+                die "No usable password after ${pw_attempts} attempts."
             fi
-            echo "[documentdb-setup] Passwords do not match; please try again." >&2
         done
     fi
 
     [[ -n "${PASSWORD}" ]] || die "A password is required. Use --admin-password-file, --admin-password-stdin, set DOCUMENTDB_PASSWORD (deprecated), or run interactively to be prompted."
+    # File, stdin and the prompt were checked already; this covers the environment.
+    documentdb_check_password "${PASSWORD}" "The admin password" \
+        || die "Cannot use this admin password (see above)."
 }
 
 create_documentdb_user() {
@@ -1927,20 +1936,27 @@ require_root() {
     fi
 }
 
+# refuse_home_tls_path <file> <hint> — the gateway units run with
+# ProtectHome=yes, so a file there stays invisible however it is owned.
+refuse_home_tls_path() {
+    local resolved
+    # Without systemd the gateway runs under nohup, outside that sandbox.
+    has_working_systemd || return 0
+    # The gateway opens the path as given, so both it and its target must be outside.
+    for resolved in "$(realpath -ms -- "$1" 2>/dev/null || printf '%s' "$1")" \
+        "$(realpath -m -- "$1" 2>/dev/null || printf '%s' "$1")"; do
+        case "${resolved}" in
+            /root|/root/*|/home|/home/*|/run/user|/run/user/*)
+                die "TLS file $1 is under /root, /home or /run/user, which the gateway service cannot read (ProtectHome=yes). $2"
+                ;;
+        esac
+    done
+}
+
 validate_required_arguments() {
     [[ -n "${USERNAME}" ]] || die "--username is required."
-
-    # Reject an admin name the GATEWAY will refuse at authentication. Without
-    # this the wizard ran to completion on e.g. --admin-user pgadmin, printed
-    # "SUCCESS: DocumentDB is ready" plus a connect command, and left an
-    # install whose only admin failed every login with "Username is invalid"
-    # (the gateway blocks the documentdb / citus / pg / internal_role
-    # prefixes). Validate here, in argument validation, so nothing is mutated
-    # before the operator is told.
-    if declare -F documentdb_validate_gateway_username >/dev/null 2>&1; then
-        documentdb_validate_gateway_username "${USERNAME}" \
-            || die "Admin username '${USERNAME}' is rejected by the gateway's reserved-prefix policy (see above). Re-run with a different --admin-user."
-    fi
+    # Before the TLS ownership repair below, so a refused password changes nothing.
+    resolve_password
 
     # TLS triple: --tls-cert / --tls-key must come together; combining
     # either with --tls-auto-generate true is a contradiction (the
@@ -1954,6 +1970,8 @@ validate_required_arguments() {
         [[ -n "${TLS_KEY_FILE}"  ]] || die "--tls-cert requires --tls-key to also be set."
         [[ -r "${TLS_CERT_FILE}" ]] || die "--tls-cert ${TLS_CERT_FILE} is not readable."
         [[ -r "${TLS_KEY_FILE}"  ]] || die "--tls-key  ${TLS_KEY_FILE} is not readable."
+        refuse_home_tls_path "${TLS_CERT_FILE}" "Copy it to a directory such as /etc/documentdb/tls and pass that path."
+        refuse_home_tls_path "${TLS_KEY_FILE}" "Copy it to a directory such as /etc/documentdb/tls and pass that path."
         if [[ "${TLS_AUTO_GENERATE}" == "true" ]]; then
             die "--tls-auto-generate=true cannot be combined with --tls-cert / --tls-key; pick one TLS source."
         fi
@@ -2004,8 +2022,6 @@ validate_required_arguments() {
             fi
         fi
     fi
-
-    resolve_password
 
     if [[ "${NO_ENABLE}" == "true" && "${LOAD_SAMPLE_DATA}" == "true" ]]; then
         die "--load-sample-data requires a running gateway and cannot be combined with --no-enable."
@@ -2333,6 +2349,9 @@ default_gateway_settings_from_persisted_state() {
             _p_cert="$(grep -E '^DOCUMENTDB_TLS_CERT_FILE=' "${_env_file}" 2>/dev/null | head -1 | cut -d= -f2- || true)"
             _p_key="$(grep -E '^DOCUMENTDB_TLS_KEY_FILE=' "${_env_file}" 2>/dev/null | head -1 | cut -d= -f2- || true)"
             if [[ -n "${_p_cert}" && -n "${_p_key}" ]]; then
+                local _reuse_hint="A previous run recorded it; re-run with --tls-cert/--tls-key naming copies outside those directories, or with --tls-auto-generate true."
+                refuse_home_tls_path "${_p_cert}" "${_reuse_hint}"
+                refuse_home_tls_path "${_p_key}" "${_reuse_hint}"
                 local _keep_tls_prefix=""
                 [[ "${DRY_RUN}" == "true" ]] && _keep_tls_prefix="[dry-run] "
                 log_info "${_keep_tls_prefix}Keeping the operator TLS certificate from the previous run: ${_p_cert} (pass --tls-cert/--tls-key or --tls-auto-generate true to change it)."
@@ -2999,7 +3018,7 @@ build_rerun_env_prefix() {
 
 build_rerun_suffix() {
     local suffix=""
-    [[ -n "${USERNAME}" ]] && suffix+=" --admin-user ${USERNAME}"
+    [[ -n "${USERNAME}" ]] && suffix+=" --admin-user $(printf '%q' "${USERNAME}")"
     if [[ -n "${PASSWORD_FILE}" ]]; then
         suffix+=" --admin-password-file ${PASSWORD_FILE}"
     elif [[ "${PASSWORD_FROM_STDIN}" == "true" ]]; then
@@ -3198,10 +3217,25 @@ SQL
         # path (it dies otherwise), so no "leave credentials unchanged"
         # branch exists: a re-run always offers the password reset (gated
         # by confirm_or_apply / --yes like every other invasive step).
-        log_info "User ${USERNAME} already exists; resetting password via documentdb_api.update_user()."
+        log_warn "Admin user '${USERNAME}' already exists: its password is replaced with the one given to this run, and the old password stops working."
         confirm_or_apply "Reset password for existing admin user '${USERNAME}'" \
             reset_documentdb_user_password "${PG_OWNER}" "${PG_PORT}" "${USERNAME}" "${PASSWORD}"
         return 0
+    fi
+
+    # A different --admin-user on a rerun adds an admin; it never replaces one.
+    local other_admins=""
+    other_admins="$(run_as_user "${PG_OWNER}" "${PSQL}" -h "${PG_SOCKET_DIR}" -p "${PG_PORT}" -d postgres -X -tA -v role_name="${USERNAME}" 2>/dev/null <<'SQL' | paste -sd ' ' - || true
+SELECT r.rolname FROM pg_roles r
+JOIN pg_auth_members m ON m.member = r.oid
+JOIN pg_roles g ON g.oid = m.roleid
+WHERE g.rolname = 'documentdb_admin_role' AND r.rolcanlogin
+  AND r.rolname <> :'role_name' AND r.rolname !~* '^(documentdb|citus|pg|internal_role)'
+ORDER BY 1;
+SQL
+    )"
+    if [[ -n "${other_admins}" ]]; then
+        log_warn "Adding admin user '${USERNAME}' alongside the existing DocumentDB admin(s): ${other_admins}. They keep full access; remove one with: sudo documentdb-gateway-admin drop-user --username <name>"
     fi
 
     confirm_or_apply "Bootstrap first admin user '${USERNAME}' via documentdb_api.create_user()" \
@@ -3829,8 +3863,12 @@ print_completion_message() {
     # newbie running `db.coll.insertOne(...)` operated on the default `test`
     # DB silently. Make the example explicit by including /test in the path
     # and pointing out how to switch DBs.
+    # URI-encode, and encode ' too (jq 1.6's @uri keeps it) so nothing can
+    # close the single quotes.
+    local encoded_user
+    encoded_user="$(jq -rn --arg u "${USERNAME}" '$u | @uri' | sed "s/'/%27/g")"
     connect_uri="mongosh 'mongodb://"
-    connect_uri+="${USERNAME}:<your-password>@${connect_host}/mydb?${connect_opts}'"
+    connect_uri+="${encoded_user}:<your-password>@${connect_host}/mydb?${connect_opts}'"
     log_success "DocumentDB is ready."
     echo "Connect with:"
     echo "  ${connect_uri}"
@@ -3994,6 +4032,9 @@ parse_arguments() {
         case "$1" in
             --username|--admin-user)
                 [[ $# -ge 2 ]] || die "--admin-user requires a value."
+                # `--admin-user --yes` would otherwise take --yes as the name
+                # and silently drop the flag.
+                [[ "$2" != -* ]] || die "--admin-user requires a value, but got the option '$2'."
                 USERNAME="$2"
                 shift 2
                 ;;
@@ -4030,6 +4071,7 @@ parse_arguments() {
                 ;;
             --pg-version)
                 [[ $# -ge 2 ]] || die "--pg-version requires a value."
+                [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--pg-version requires a single numeric PostgreSQL major such as 17 (got '$2')."
                 PG_VERSION="$2"
                 PG_VERSION_EXPLICIT=true
                 shift 2
@@ -4452,6 +4494,12 @@ EOF
     if [[ "${mode}" == "<not configured>" ]]; then
         return 1
     fi
+    # Active units are not proof: PostgreSQL must answer the gateway's own
+    # connection, and an admin the gateway can authenticate must still exist.
+    local db_check
+    db_check="$(status_database_check "${v}" "${connection_file}")"
+    printf 'database:                      %s\n' "${db_check}"
+    [[ "${db_check}" == ok* || "${db_check}" == unknown* ]] || return 1
     if [[ "${gw_active}" != "active" && "${gw_active}" != active* ]]; then
         return 1
     fi
@@ -4462,6 +4510,38 @@ EOF
         return 1
     fi
     return 0
+}
+
+# status_database_check <major> <pg-url file> — "ok (...)" when PostgreSQL
+# answers as the gateway's role and a DocumentDB admin login role exists,
+# "unknown (...)" when not run as root, otherwise what is wrong.
+status_database_check() {
+    local major="$1" url_file="$2" psql_bin="" bindir url="" admins=""
+    if [[ "$(id -u)" -ne 0 ]]; then
+        printf 'unknown (run as root to query PostgreSQL)'
+        return 0
+    fi
+    while IFS= read -r bindir; do
+        [[ -x "${bindir}/psql" ]] && { psql_bin="${bindir}/psql"; break; }
+    done < <(documentdb_pg_bindir_candidates "${major}")
+    [[ -r "${url_file}" ]] && url="$(head -n 1 "${url_file}")"
+    if [[ -z "${psql_bin}" || -z "${url}" ]]; then
+        printf 'cannot connect (no psql for PostgreSQL %s or no %s)' "${major}" "${url_file}"
+        return 0
+    fi
+    # -w and the timeouts: a status probe must never prompt or hang.
+    if ! admins="$(run_as_user documentdb-gateway env PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=5000' \
+            "${psql_bin}" -X -w -A -t -q -d "${url}" -c \
+            "SELECT coalesce(string_agg(r.rolname, ' ' ORDER BY r.rolname), '') FROM pg_roles r JOIN pg_auth_members m ON m.member = r.oid JOIN pg_roles g ON g.oid = m.roleid WHERE g.rolname = 'documentdb_admin_role' AND r.rolcanlogin AND r.rolname !~* '^(documentdb|citus|pg|internal_role)'" \
+            2>/dev/null)"; then
+        printf 'not answering (PostgreSQL refused or did not answer the gateway connection in %s)' "${url_file}"
+        return 0
+    fi
+    if [[ -z "${admins}" ]]; then
+        printf 'no DocumentDB admin user (create one with: sudo documentdb-gateway-admin create-user --username <name> --password-file <file>)'
+        return 0
+    fi
+    printf 'ok (admin users: %s)' "${admins}"
 }
 
 # Probe whether the documentdb extension is available for PostgreSQL major $1
@@ -4610,17 +4690,18 @@ main() {
             if ! [[ "${USERNAME}" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
                 die "Admin username '${USERNAME}' is invalid. Use letters, digits, '_' or '-' (must start with a letter or '_')."
             fi
-            # Same gateway reserved-prefix policy as the flag path above:
-            # catch it at the prompt rather than after a full install.
-            if declare -F documentdb_validate_gateway_username >/dev/null 2>&1; then
-                documentdb_validate_gateway_username "${USERNAME}" \
-                    || die "Admin username '${USERNAME}' is rejected by the gateway's reserved-prefix policy (see above). Re-run and choose another name."
-            fi
         else
             echo "error: --admin-user is required for non-interactive setup (running without a usable TTY, or with --yes/--print-config/--status, so the wizard cannot prompt for it). Pass --admin-user NAME." >&2
             usage
             exit 1
         fi
+    fi
+
+    # Before the dry-run preview and any mutation: a name PostgreSQL or the
+    # gateway refuses used to install fully and leave an admin that can't log in.
+    if [[ "${RESTORE}" != "true" ]]; then
+        documentdb_validate_username "${USERNAME}" \
+            || die "Admin username '${USERNAME}' is not allowed (see above). Choose a different --admin-user."
     fi
 
     # Handle --restore early: strip all managed blocks, remove state, exit.

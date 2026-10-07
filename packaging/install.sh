@@ -25,11 +25,25 @@ DEFAULT_PG_MAJOR="18"
 DEFAULT_ADMIN_USER="admin"
 DEFAULT_LISTEN_PORT="10260"
 BLOCKED_ADMIN_PREFIXES="documentdb citus pg internal_role"
+# Kept identical to DOCUMENTDB_RESERVED_USER_NAMES in documentdb-tools-lib.sh.
+RESERVED_ADMIN_NAMES="public none
+    __system autoCompact backup backupAndRestore
+    clusterAdmin clusterManager clusterMonitor dbAdmin dbAdminAnyDatabase
+    dbOwner directShardOperations enableSharding killOpSession
+    manageShardBalancer MongodbAutomationAgentUserRole read readAnyDatabase
+    readWrite readWriteAnyDatabase restore root searchCoordinator userAdmin
+    userAdminAnyDatabase"
 INSTALL_LOCK_DIR="/run/lock/documentdb-installer.lock"
 STATE_ROOT="/etc/documentdb/local"
 DATA_ROOT="/var/lib/documentdb-local"
 RC_STATE_FILE="/etc/documentdb/installer-release-candidate"
+CREATECLUSTER_DROPIN="/etc/postgresql-common/createcluster.d/documentdb-installer.conf"
+CREATECLUSTER_DROPIN_WRITTEN="false"
+PACKAGED_COMMANDS="documentdb-setup documentdb-local-reset documentdb-tune
+    documentdb-createcluster documentdb-register-gateway
+    documentdb-gateway-admin documentdb-gateway"
 
+PGDG_KEYRING="/usr/share/keyrings/postgresql.gpg"
 PGDG_APT_KEY_URL="https://www.postgresql.org/media/keys/ACCC4CF8.asc"
 PGDG_APT_KEY_FINGERPRINT="B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
 PGDG_RPM_X86_64_KEY_URL="https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL"
@@ -92,6 +106,7 @@ RHEL_CRB_REPO=""
 
 SELECTED_PACKAGE_INSTALLED="false"
 SETUP_CONFIGURED="false"
+RELEASE_PACKAGE_FILES=""
 
 usage() {
     cat <<'EOF'
@@ -112,7 +127,9 @@ Options:
   --admin-user <USER>         Initial DocumentDB administrator (default: admin)
   --admin-password-file <FILE>
                               Read the initial administrator password from
-                              FILE. Required with --yes.
+                              FILE: one line of printable ASCII, and one
+                              trailing newline (LF or CRLF) is removed.
+                              Required with --yes.
   --listen-port <PORT>        Gateway port, 1024-65535 (default: 10260)
   --packages-only             Configure repositories and install packages
                               without running documentdb-setup.
@@ -171,6 +188,13 @@ cleanup() {
         fi
         LOCK_HELD="false"
     fi
+    if [ "${CREATECLUSTER_DROPIN_WRITTEN}" = "true" ] && [ "${DRY_RUN}" = "false" ]; then
+        if [ "${IS_ROOT}" = "true" ]; then
+            rm -f "$(system_path "${CREATECLUSTER_DROPIN}")" 2>/dev/null || true
+        else
+            sudo -n rm -f "$(system_path "${CREATECLUSTER_DROPIN}")" 2>/dev/null || true
+        fi
+    fi
     if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
         rm -rf "${TMP_DIR}"
     fi
@@ -197,7 +221,8 @@ strip_outer_quotes() {
 }
 
 # PostgreSQL role names: letters, digits, '_' and '-', starting with a letter
-# or '_', at most NAMEDATALEN-1 bytes, and never inside a reserved prefix.
+# or '_', at most NAMEDATALEN-1 bytes, never a reserved name and never inside
+# a reserved prefix.
 validate_admin_user() {
     admin_value="$1"
     admin_label="$2"
@@ -212,6 +237,10 @@ validate_admin_user() {
         die "${admin_label} must be at most 63 bytes."
 
     admin_value_lower="$(lowercase "${admin_value}")"
+    for reserved_name in ${RESERVED_ADMIN_NAMES}; do
+        [ "${admin_value}" != "${reserved_name}" ] ||
+            die "${admin_label} '${admin_value}' is reserved by PostgreSQL or DocumentDB."
+    done
     for blocked_prefix in ${BLOCKED_ADMIN_PREFIXES}; do
         case "${admin_value_lower}" in
             "${blocked_prefix}"*)
@@ -323,6 +352,23 @@ validate_arguments() {
         die "Password file '${ADMIN_PASSWORD_FILE}' is not readable."
 }
 
+# The password-file contract documentdb-setup enforces, checked here so a bad
+# file fails before any package is installed. Clients prepare SCRAM passwords
+# with SASLprep, which rejects control characters and some non-ASCII, so such
+# a password would install fine and never log in. The ASCII-only rule is a
+# stopgap until the backend rejects SASLprep failures (documentdb/documentdb#765).
+PASSWORD_RULE="must hold one non-empty line of printable ASCII; one trailing newline (LF or CRLF) is allowed."
+password_file_ok() {
+    pw_file="$1"
+    pw_size="$(wc -c < "${pw_file}")"
+    case "$(tail -c 2 "${pw_file}" | od -An -v -tx1 | tr -d ' \n')" in
+        0d0a) pw_size=$((pw_size - 2)) ;;
+        *0a) pw_size=$((pw_size - 1)) ;;
+    esac
+    [ "${pw_size}" -gt 0 ] &&
+        [ -z "$(head -c "${pw_size}" "${pw_file}" | LC_ALL=C tr -d '\040-\176' | od -An)" ]
+}
+
 # The password never reaches argv, the environment, or the transcript: it is
 # copied into an owner-only file inside the installer's 0700 temporary
 # directory and only that path is passed to documentdb-setup.
@@ -351,8 +397,9 @@ stage_supplied_password_file() {
     staged_password_file="${TMP_DIR}/admin-password"
     cp "${ADMIN_PASSWORD_FILE}" "${staged_password_file}"
     chmod 0600 "${staged_password_file}"
-    [ -s "${staged_password_file}" ] ||
-        die "Password file '${ADMIN_PASSWORD_FILE}' is empty."
+    # A configured host only reports status and never reads the password.
+    [ "${SETUP_CONFIGURED}" = "true" ] || password_file_ok "${staged_password_file}" ||
+        die "Password file '${ADMIN_PASSWORD_FILE}' ${PASSWORD_RULE}"
     ADMIN_PASSWORD_FILE="${staged_password_file}"
 }
 
@@ -614,6 +661,12 @@ detect_installation_state() {
 
     if [ -e "$(system_path "${RC_STATE_FILE}")" ] ||
         [ -L "$(system_path "${RC_STATE_FILE}")" ]; then
+        # Every rerun stops here, so this is the only chance to remove a killed RC run's drop-in.
+        if [ "${DRY_RUN}" = "false" ] && [ "${LOCK_HELD}" = "false" ] &&
+            [ -e "$(system_path "${CREATECLUSTER_DROPIN}")" ]; then
+            acquire_privileges
+            acquire_install_lock
+        fi
         die "A release-candidate installation was started on this host. Use a fresh host; rerunning this installer, including stable mode, cannot upgrade or adopt an RC."
     fi
     installed_packages="$(list_documentdb_packages)"
@@ -627,15 +680,6 @@ detect_installation_state() {
             die "Release candidates require a clean host with no DocumentDB packages, configuration, or data. Upgrades into, between, or out of RCs are not supported."
         fi
     fi
-    other_majors="$(
-        printf '%s\n' "${installed_packages}" |
-            sed -n -E 's/^documentdb-([0-9]+)([-.].*)?$/\1/p' |
-            sort -u | grep -v "^${PG_MAJOR}$" || true
-    )"
-    if [ -n "${other_majors}" ]; then
-        printf '%s\n' "${installed_packages}" | sed 's/^/  - /' >&2
-        die "DocumentDB stand-alone packages for PostgreSQL $(printf '%s' "${other_majors}" | tr '\n' ' ') are installed. Rerun with a matching --pg-major, or remove those packages first."
-    fi
     if printf '%s\n' "${installed_packages}" |
         grep -Eq "^documentdb-${PG_MAJOR}([-.]|$)"; then
         SELECTED_PACKAGE_INSTALLED="true"
@@ -647,14 +691,26 @@ detect_installation_state() {
         die "PostgreSQL ${PG_MAJOR} already hosts a DocumentDB instance that was configured against an existing PostgreSQL server. Manage it with documentdb-setup and documentdb-gateway-admin; this bootstrap only creates new private instances."
     fi
 
+    # Checked before other majors: their packages do not make this one unhealthy.
     setup_state="$(system_path "${STATE_ROOT}/${PG_MAJOR}/setup.conf")"
     if [ -e "${setup_state}" ] || [ -L "${setup_state}" ]; then
         validate_trust_file "${setup_state}" "instance state" "644"
-        [ "${SELECTED_PACKAGE_INSTALLED}" = "true" ] ||
-            die "${setup_state} describes a configured instance, but documentdb-${PG_MAJOR} is not installed. Reinstall the package or remove that configuration with documentdb-setup before rerunning."
+        require_complete_packages "${setup_state} describes a configured instance, but its packages are not all installed."
         SETUP_CONFIGURED="true"
         return 0
     fi
+
+    other_majors="$(
+        printf '%s\n' "${installed_packages}" |
+            sed -n -E 's/^documentdb-([0-9]+)([-.].*)?$/\1/p' |
+            sort -u | grep -v "^${PG_MAJOR}$" || true
+    )"
+    if [ -n "${other_majors}" ]; then
+        printf '%s\n' "${installed_packages}" | sed 's/^/  - /' >&2
+        die "DocumentDB stand-alone packages for PostgreSQL $(printf '%s' "${other_majors}" | tr '\n' ' ') are installed. Rerun with a matching --pg-major, or remove those packages first."
+    fi
+    [ "${SELECTED_PACKAGE_INSTALLED}" = "false" ] ||
+        require_complete_packages "documentdb-${PG_MAJOR} is installed, but not all of its packages are."
 
     for other_state in "$(system_path "${STATE_ROOT}")"/*/setup.conf \
         "$(system_path "${STATE_ROOT}")"/*/brownfield.conf; do
@@ -664,6 +720,52 @@ detect_installation_state() {
     if directory_has_entries "$(system_path "${DATA_ROOT}/${PG_MAJOR}")"; then
         die "Residual data exists under ${DATA_ROOT}/${PG_MAJOR} without a configured instance. Reconcile or remove it with documentdb-setup before installing."
     fi
+    refuse_command_collisions
+}
+
+# Everything documentdb-<major> runs on. The repair command comes from the
+# package manager because documentdb-setup may be what is missing.
+require_complete_packages() {
+    if [ "${PACKAGE_FAMILY}" = "apt" ]; then
+        extension_package="postgresql-${PG_MAJOR}-documentdb"
+        repair_command="sudo apt-get install --reinstall"
+    else
+        extension_package="postgresql${PG_MAJOR}-documentdb"
+        repair_command="sudo dnf install"
+    fi
+    missing_packages=""
+    for required_package in "documentdb-${PG_MAJOR}" documentdb-common \
+        documentdb-postgresql-tools documentdb-gateway "${extension_package}"; do
+        printf '%s\n' "${installed_packages}" | grep -qxF "${required_package}" ||
+            missing_packages="${missing_packages} ${required_package}"
+    done
+    [ -n "${missing_packages}" ] || return 0
+    die "$1 Missing or not fully installed:${missing_packages}. Repair with '${repair_command}${missing_packages}', then rerun this installer."
+}
+
+# PATH is pinned to system directories, so a command in /usr/local would go
+# unseen here and later shadow the packaged one in an administrator's shell.
+# Only file tests: nothing found is executed.
+refuse_command_collisions() {
+    collision_dirs="/usr/local/sbin /usr/local/bin"
+    # With no DocumentDB package on the host, these are someone else's files.
+    [ -n "$(list_documentdb_packages '^.[^n]')" ] ||
+        collision_dirs="${collision_dirs} /usr/sbin /usr/bin /sbin /bin"
+    collisions=""
+    for collision_dir in ${collision_dirs}; do
+        # /bin and /sbin are links to /usr on merged-/usr hosts.
+        case "${collision_dir}" in
+            /bin|/sbin) [ ! -L "$(system_path "${collision_dir}")" ] || continue ;;
+        esac
+        for packaged_command in ${PACKAGED_COMMANDS}; do
+            collision_path="$(system_path "${collision_dir}/${packaged_command}")"
+            if [ -e "${collision_path}" ] || [ -L "${collision_path}" ]; then
+                collisions="${collisions} ${collision_dir}/${packaged_command}"
+            fi
+        done
+    done
+    [ -z "${collisions}" ] ||
+        die "Existing commands would shadow or be replaced by the DocumentDB commands:${collisions}. Remove or rename them, then rerun."
 }
 
 file_contains() {
@@ -675,9 +777,31 @@ file_matches_content() {
     [ "$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e 's/[[:space:]]*$//' "$1")" = "$2" ]
 }
 
-# Repository definitions are reused only when they are byte-for-byte the
-# definitions this script would write; anything else fails closed instead of
-# silently installing from an unexpected source.
+# The key postgresql-common's apt.postgresql.org.sh signs its pgdg.sources
+# with, when the file is that helper's default output. Older releases write
+# no Architectures line and use the .asc key.
+helper_pgdg_keyring() {
+    [ "$1" = "${sources_dir}/pgdg.sources" ] || return 1
+    helper_source="$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e 's/[[:space:]]*$//' \
+        -e "/^Architectures: ${APT_ARCH}\$/d" "$1")"
+    for helper_types in "deb" "deb deb-src"; do
+        for helper_keyring in /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg \
+            /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; do
+            [ "${helper_source}" = "Types: ${helper_types}
+URIs: https://apt.postgresql.org/pub/repos/apt
+Suites: noble-pgdg
+Components: main
+Signed-By: ${helper_keyring}" ] || continue
+            printf '%s\n' "${helper_keyring}"
+            return 0
+        done
+    done
+    return 1
+}
+
+# Repository definitions are reused only when they are the definitions this
+# script would write, or for PGDG the helper's; anything else fails closed
+# instead of silently installing from an unexpected source.
 preflight_apt_repositories() {
     sources_dir="$(system_path /etc/apt/sources.list.d)"
     managed_pgdg="${sources_dir}/pgdg.list"
@@ -695,10 +819,14 @@ preflight_apt_repositories() {
         "${sources_dir}"/*.list "${sources_dir}"/*.sources; do
         [ -f "${file}" ] || continue
         if file_contains "${file}" 'apt\.postgresql\.org/pub/repos/apt'; then
-            { [ "${file}" = "${managed_pgdg}" ] &&
-                file_matches_content "${file}" "${DESIRED_PGDG_SOURCE}"; } ||
-                die "Conflicting PGDG repository configuration found in ${file}. The installer only reuses its exact HTTPS noble-pgdg source definition."
+            pgdg_keyring="${PGDG_KEYRING}"
+            [ "${PGDG_REPO_PRESENT}" = "false" ] &&
+                { { [ "${file}" = "${managed_pgdg}" ] &&
+                    file_matches_content "${file}" "${DESIRED_PGDG_SOURCE}"; } ||
+                    pgdg_keyring="$(helper_pgdg_keyring "${file}")"; } ||
+                die "Conflicting PGDG repository configuration found in ${file}. The installer only reuses its exact HTTPS noble-pgdg source definition, or the pgdg.sources that postgresql-common's apt.postgresql.org.sh writes."
             validate_trust_file "${file}" "PGDG APT source" "644"
+            PGDG_KEYRING="${pgdg_keyring}"
             PGDG_REPO_PRESENT="true"
         fi
         if file_contains "${file}" 'documentdb\.io/deb'; then
@@ -714,6 +842,21 @@ preflight_apt_repositories() {
         die "Refusing to overwrite unrelated repository file ${managed_pgdg}."
     [ ! -e "${managed_docdb}" ] || [ "${DOCUMENTDB_REPO_PRESENT}" = "true" ] ||
         die "Refusing to overwrite unrelated repository file ${managed_docdb}."
+
+    # A reused source's key is read by the first apt-get update, which runs
+    # before the installer can fetch keys, so it must already be present.
+    if [ "${PGDG_REPO_PRESENT}" = "true" ]; then
+        [ -f "$(system_path "${PGDG_KEYRING}")" ] ||
+            die "The PGDG APT source is signed by ${PGDG_KEYRING}, which is missing. Restore that key (postgresql-common ships its own), or remove the source so the installer adds one, then rerun."
+        require_apt_keyring_encoding "$(system_path "${PGDG_KEYRING}")" "PGDG"
+    fi
+    docdb_keyring="/usr/share/keyrings/documentdb-archive-keyring.gpg"
+    # An RC refuses this source right after preflight, so only stable needs its key.
+    if [ "${DOCUMENTDB_REPO_PRESENT}" = "true" ] && [ "${RELEASE_VERSION}" = "stable" ]; then
+        [ -f "$(system_path "${docdb_keyring}")" ] ||
+            die "The DocumentDB APT source is signed by ${docdb_keyring}, which is missing. Restore that key, or remove the source so the installer adds one, then rerun."
+        require_apt_keyring_encoding "$(system_path "${docdb_keyring}")" "DocumentDB"
+    fi
 }
 
 preflight_rpm_repositories() {
@@ -921,6 +1064,19 @@ download_key() {
     verify_key_fingerprint "$2" "$3" "$4"
 }
 
+# gpg reads either encoding, but APT reads a .gpg keyring only as binary and
+# reports an armored one as NO_PUBKEY at the next apt-get update.
+require_apt_keyring_encoding() {
+    case "$1" in
+        *.gpg) ;;
+        *) return 0 ;;
+    esac
+    case "$(od -An -tx1 -N1 "$1" | tr -d ' \n')" in
+        [89a-f]?) ;;
+        *) die "$2 APT key $1 is not a binary OpenPGP keyring, which APT requires for a .gpg file (an ASCII-armored key needs 'gpg --dearmor'). Replace it with the binary form, or remove it so the installer downloads it, then rerun." ;;
+    esac
+}
+
 ensure_apt_keyring() {
     keyring_destination="$1"
     keyring_url="$2"
@@ -933,6 +1089,7 @@ ensure_apt_keyring() {
     fi
     if [ -f "${keyring_destination}" ]; then
         validate_trust_file "${keyring_destination}" "${keyring_label} APT key" "644"
+        require_apt_keyring_encoding "${keyring_destination}" "${keyring_label}"
         require_command gpg
         verify_key_fingerprint "${keyring_destination}" \
             "${keyring_fingerprint}" "${keyring_label}"
@@ -1032,9 +1189,13 @@ acquire_install_lock() {
     else
         lock_error="$("${SUDO}" -n mkdir "${LOCK_PATH}" 2>&1)" && LOCK_HELD="true"
     fi
-    [ "${LOCK_HELD}" = "false" ] || return 0
+    if [ "${LOCK_HELD}" = "true" ]; then
+        # A killed run can leave its drop-in behind; with the lock held, no install needs it.
+        [ ! -e "$(system_path "${CREATECLUSTER_DROPIN}")" ] || restore_default_cluster
+        return 0
+    fi
     [ ! -d "${LOCK_PATH}" ] ||
-        die "Another DocumentDB installer is already running (lock ${LOCK_PATH}). If no installer is running, remove that directory as root and retry."
+        die "Another DocumentDB installer is already running (lock ${LOCK_PATH}). If no installer is running, remove the stale lock with 'sudo rmdir ${LOCK_PATH}' and retry."
     die "Cannot create the installer lock ${LOCK_PATH}: ${lock_error}"
 }
 
@@ -1076,21 +1237,24 @@ prompt_password_file() {
         IFS= read -r confirmation < "${TTY_PATH}" || true
         restore_tty
 
+        retry_hint="Passwords were empty or did not match; try again."
         if [ -n "${password}" ] && [ "${password}" = "${confirmation}" ]; then
             printf '%s' "${password}" > "${password_copy}"
             chmod 0600 "${password_copy}"
-            password=""
-            confirmation=""
-            ADMIN_PASSWORD_FILE="${password_copy}"
-            return 0
+            if password_file_ok "${password_copy}"; then
+                password=""
+                confirmation=""
+                ADMIN_PASSWORD_FILE="${password_copy}"
+                return 0
+            fi
+            retry_hint="The password ${PASSWORD_RULE}"
         fi
         password=""
         confirmation=""
         attempts=$((attempts + 1))
-        [ "${attempts}" -ge 3 ] ||
-            warn "Passwords were empty or did not match; try again."
+        [ "${attempts}" -ge 3 ] || warn "${retry_hint}"
     done
-    die "Passwords did not match after three attempts."
+    die "No usable password after three attempts."
 }
 
 validate_required_setup_inputs() {
@@ -1140,8 +1304,9 @@ print_plan() {
 install_ubuntu() {
     apt_get update
     apt_get install -y --no-install-recommends ca-certificates curl gnupg
+    [ "${RELEASE_VERSION}" = "stable" ] || fetch_release_packages
 
-    ensure_apt_keyring "$(system_path /usr/share/keyrings/postgresql.gpg)" \
+    ensure_apt_keyring "$(system_path "${PGDG_KEYRING}")" \
         "${PGDG_APT_KEY_URL}" "${PGDG_APT_KEY_FINGERPRINT}" "PGDG"
     if [ "${PGDG_REPO_PRESENT}" = "true" ]; then
         log "Reusing the existing PGDG APT repository configuration."
@@ -1163,11 +1328,28 @@ install_ubuntu() {
     fi
 
     apt_get update
+    suppress_default_cluster
     if [ "${RELEASE_VERSION}" = "stable" ]; then
         apt_get install -y "documentdb-${PG_MAJOR}"
     else
         install_release_packages
     fi
+    restore_default_cluster
+}
+
+# Ubuntu's server package creates and starts a PG_MAJOR/main cluster on 5432
+# beside setup's private instance. The drop-in lasts only for this install,
+# so later PostgreSQL installs keep the host default; existing clusters are
+# never touched.
+suppress_default_cluster() {
+    write_root_file "$(system_path "${CREATECLUSTER_DROPIN}")" 0644 \
+        "create_main_cluster = false"
+    CREATECLUSTER_DROPIN_WRITTEN="true"
+}
+
+restore_default_cluster() {
+    run_root rm -f "$(system_path "${CREATECLUSTER_DROPIN}")"
+    CREATECLUSTER_DROPIN_WRITTEN="false"
 }
 
 rpm_package_installed() {
@@ -1222,6 +1404,7 @@ install_rhel_family() {
         pgdg_key_fingerprint="${PGDG_RPM_X86_64_KEY_FINGERPRINT}"
     fi
 
+    [ "${RELEASE_VERSION}" = "stable" ] || fetch_release_packages
     # A reused repo with an unpublished minor would break the first dnf call.
     if [ "${PGDG_REPO_PRESENT}" = "true" ]; then
         use_pgdg_major_path_if_minor_unpublished
@@ -1304,18 +1487,19 @@ release_package_patterns() {
     fi
 }
 
-install_release_packages() {
+# Runs before any repository is configured, so a release that cannot be
+# downloaded leaves no repository or key behind.
+fetch_release_packages() {
     # Users type 1.0-rc2; the GitHub release tag is v1.0-RC2.
     release_url="https://github.com/documentdb/documentdb/releases/download/v$(printf '%s' "${RELEASE_VERSION}" | tr 'rc' 'RC')"
     if [ "${DRY_RUN}" = "true" ]; then
         log "Would download ${release_url}/SHA256SUMS, select this host's five packages from it, and verify each."
-        set -- "<packages-listed-in-SHA256SUMS>"
+        RELEASE_PACKAGE_FILES="<packages-listed-in-SHA256SUMS>"
     else
         release_dir="${TMP_DIR}/release"
         mkdir -m 0700 "${release_dir}"
         strict_curl "${release_url}/SHA256SUMS" "${release_dir}/SHA256SUMS" ||
             die "Cannot download ${RELEASE_VERSION} checksums; no stable fallback."
-        set --
         while read -r release_pattern; do
             release_match="$(awk -v pattern="^${release_pattern}\$" '$2 ~ pattern { print $1 "/" $2 }' "${release_dir}/SHA256SUMS")"
             case "${release_match}" in
@@ -1334,12 +1518,21 @@ install_release_packages() {
                 cd "${release_dir}"
                 printf '%s  %s\n' "${release_checksum}" "${release_package}" | sha256sum --check --status
             ) || die "Checksum verification failed for ${release_package}."
-            set -- "$@" "${release_dir}/${release_package}"
+            RELEASE_PACKAGE_FILES="${RELEASE_PACKAGE_FILES}${release_dir}/${release_package}
+"
         done <<EOF
 $(release_package_patterns)
 EOF
     fi
+}
 
+install_release_packages() {
+    set --
+    while IFS= read -r release_file; do
+        [ -z "${release_file}" ] || set -- "$@" "${release_file}"
+    done <<EOF
+${RELEASE_PACKAGE_FILES}
+EOF
     write_root_file "$(system_path "${RC_STATE_FILE}")" 0644 "${RELEASE_VERSION}"
     if [ "${PACKAGE_FAMILY}" = "apt" ]; then
         apt_get install -y "$@"
@@ -1386,7 +1579,7 @@ print_success() {
     if [ "${NO_ENABLE}" = "true" ]; then
         printf '  Start it: sudo systemctl enable --now documentdb-local@%s.target\n' "${PG_MAJOR}"
     else
-        printf '  Gateway:  127.0.0.1:%s (TLS, self-signed certificate)\n' "${LISTEN_PORT}"
+        printf '  Gateway:  port %s on all interfaces (TLS, self-signed certificate)\n' "${LISTEN_PORT}"
         printf '  User:     %s\n' "${ADMIN_USER}"
     fi
     printf '  Status:   sudo documentdb-setup --status --pg-version %s\n' "${PG_MAJOR}"
@@ -1433,8 +1626,8 @@ main() {
     validate_native_environment
     determine_privilege_mode
     create_temp_dir
-    stage_supplied_password_file
     detect_installation_state
+    stage_supplied_password_file
 
     if [ "${TESTING}" = "true" ] && [ "${TEST_VALIDATION_ONLY}" = "true" ]; then
         validate_required_setup_inputs
