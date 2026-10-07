@@ -604,6 +604,11 @@ bool EnableUpdateWorkerPlanCache =
 bool EnableUpdateWorkerSingleWriteNoSubTransaction =
 	DEFAULT_ENABLE_UPDATE_WORKER_SINGLE_WRITE_NO_SUB_TRANSACTION;
 
+/* Added in v1.2, pending stabilization, enable in v1.3 */
+#define DEFAULT_ENABLE_ARRAY_BSON_STATS_WITH_PLANNER_STATISTICS false
+bool EnableArrayBsonStatsWithPlannerStatistics =
+	DEFAULT_ENABLE_ARRAY_BSON_STATS_WITH_PLANNER_STATISTICS;
+
 
 /*
  * SECTION: Changestream feature flags
@@ -1430,6 +1435,16 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to enable per-collection planner statistics."),
 		NULL, &EnablePerCollectionPlannerStatistics,
 		DEFAULT_ENABLE_PER_COLLECTION_PLANNER_STATISTICS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_array_bson_stats_with_planner_statistics", newGucPrefix),
+		gettext_noop(
+			"Whether ANALYZE collects per-collection planner statistics over the "
+			"elements of array values. Applies only when planner statistics are "
+			"enabled for new collections."),
+		NULL, &EnableArrayBsonStatsWithPlannerStatistics,
+		DEFAULT_ENABLE_ARRAY_BSON_STATS_WITH_PLANNER_STATISTICS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
