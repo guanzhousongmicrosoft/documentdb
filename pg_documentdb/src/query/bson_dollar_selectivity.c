@@ -35,11 +35,14 @@
 #include "utils/docdb_make_funcs.h"
 #include "utils/version_utils.h"
 #include "io/bson_traversal.h"
+#include "api_hooks.h"
 
 extern bool EnablePerCollectionPlannerStatistics;
 extern bool EnableCompositeIndexPlanner;
 extern bool EnableIndexCorrelationFromStatistics;
 extern bool EnableLookupJoinSelectivityFromStats;
+extern bool EnableArrayBsonStatsWithPlannerStatistics;
+extern bool BsonStatsEnableArrayValueUnpack;
 
 /* CODESYNC with system_configs.c */
 #define ARRAY_STATISTICS_MAX_SAMPLE_COUNT 128
@@ -79,6 +82,8 @@ static void StatsHandleIntermediateArrayPathNotFound(void *state, int32_t arrayI
 													 const
 													 StringView *remainingPath);
 
+static bool ShouldEnableBsonStatsArrayValueUnpack(void);
+
 PG_FUNCTION_INFO_V1(bson_dollar_selectivity);
 PG_FUNCTION_INFO_V1(bson_stats_project);
 PG_FUNCTION_INFO_V1(test_bson_stats_project_with_memcheck);
@@ -105,6 +110,31 @@ IsLookupExtractFuncExpr(Node *expr)
 	FuncExpr *funcExpr = (FuncExpr *) expr;
 	return funcExpr->funcid ==
 		   DocumentDBApiInternalBsonLookupExtractFilterExpressionFunctionOid();
+}
+
+
+/*
+ * Registers the hooks that control how bson statistics are collected.
+ */
+void
+RegisterBsonStatisticsHooks(void)
+{
+	should_enable_bson_stats_array_value_unpack_hook =
+		ShouldEnableBsonStatsArrayValueUnpack;
+}
+
+
+/*
+ * Array value unpacking during ANALYZE is enabled either by the core GUC, or
+ * when planner statistics for new collections and the feature flag are both
+ * enabled.
+ */
+static bool
+ShouldEnableBsonStatsArrayValueUnpack(void)
+{
+	return BsonStatsEnableArrayValueUnpack ||
+		   (ShouldEnablePlannerStatisticsNewCollections() &&
+			EnableArrayBsonStatsWithPlannerStatistics);
 }
 
 
