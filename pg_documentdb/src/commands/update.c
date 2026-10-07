@@ -4537,10 +4537,17 @@ UpdateDocumentByTID(uint64 collectionId, const char *shardTableName,
 						 ApiDataSchemaName, collectionId);
 	}
 
-	appendStringInfo(&updateQuery,
-					 " SET document = $3::%s"
-					 " WHERE ctid = $2 AND shard_key_value = $1",
-					 FullBsonTypeName);
+	bool compressDocument = IsDocumentCompressionEligible(shardTableName);
+	if (compressDocument)
+	{
+		appendStringInfoString(&updateQuery, " SET document = $3");
+	}
+	else
+	{
+		appendStringInfo(&updateQuery, " SET document = $3::%s", FullBsonTypeName);
+	}
+
+	appendStringInfoString(&updateQuery, " WHERE ctid = $2 AND shard_key_value = $1");
 
 	argTypes[0] = INT8OID;
 	argValues[0] = Int64GetDatum(shardKeyHash);
@@ -4549,17 +4556,28 @@ UpdateDocumentByTID(uint64 collectionId, const char *shardTableName,
 	argValues[1] = ItemPointerGetDatum(tid);
 
 	/* we use bytea because bson may not have the same OID on all nodes */
-	argTypes[2] = BYTEAOID;
+	argTypes[2] = compressDocument ? BsonTypeId() : BYTEAOID;
 	argValues[2] = PointerGetDatum(CastPgbsonToBytea(updatedDocument));
 
 	bool readOnly = false;
 	long maxTupleCount = 0;
 
 	SPIPlanPtr plan = GetSPIQueryPlanWithLocalShard(collectionId, shardTableName,
+													compressDocument ?
+													QUERY_ID_UPDATE_BY_TID_COMPRESSED :
 													QUERY_ID_UPDATE_BY_TID,
 													updateQuery.data, argTypes, argCount);
 
-	SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
+	if (compressDocument)
+	{
+		ExecuteSPIPlanWithCompressedDocument(plan, argValues, argTypes, argCount, 2,
+											 readOnly, maxTupleCount);
+	}
+	else
+	{
+		SPI_execute_plan(plan, argValues, argNulls, readOnly, maxTupleCount);
+	}
+
 	Assert(SPI_processed == 1);
 
 	SPI_finish();
