@@ -187,3 +187,5 @@ test: bson_distributed_mem_vtable_palloc_test
 
 test: command_bulk_write
 test: retryable_writes_local_table
+# Creates a test function and changes execution settings for the session.
+test: bson_document_size_tests_dist

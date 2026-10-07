@@ -221,6 +221,10 @@ bool EnableCursorsOnAggregationQueryRewrite =
 #define DEFAULT_ARRAY_STATISTICS_MAX_SAMPLE_COUNT 10
 int ArrayStatisticsMaxSampleCount = DEFAULT_ARRAY_STATISTICS_MAX_SAMPLE_COUNT;
 
+/* -1 leaves the PostgreSQL default toast compression threshold in place */
+#define DEFAULT_DOCUMENT_TOAST_COMPRESSION_THRESHOLD -1
+int32_t DocumentToastCompressionThreshold = DEFAULT_DOCUMENT_TOAST_COMPRESSION_THRESHOLD;
+
 static struct config_enum_entry rum_load_options[4] = {
 	{ "none", RumLibraryLoadOption_None, false },
 	{ "prefer_documentdb_extended_rum", RumLibraryLoadOption_PreferDocumentDBRum, false },
@@ -609,6 +613,15 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 		NULL, &ArrayStatisticsMaxSampleCount,
 		DEFAULT_ARRAY_STATISTICS_MAX_SAMPLE_COUNT,
 		1, ARRAY_STATISTICS_MAX_SAMPLE_COUNT, PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		psprintf("%s.document_toast_compression_threshold", newGucPrefix),
+		gettext_noop(
+			"The document size in bytes above which documents are compressed when toasted."),
+		gettext_noop("A value of -1 uses the PostgreSQL default threshold."),
+		&DocumentToastCompressionThreshold,
+		DEFAULT_DOCUMENT_TOAST_COMPRESSION_THRESHOLD,
+		-1, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
 		psprintf("%s.enableCursorsOnAggregationQueryRewrite", newGucPrefix),
