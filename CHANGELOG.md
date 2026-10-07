@@ -1,4 +1,5 @@
 ### documentdb v1.1-0 (Unreleased) ###
+* Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
 * Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
 * Preserve `admin.system.users` system-catalog permission checks while filtering memberships to catalog-backed custom roles. *[Bugfix]*
 * Return custom-role metadata from `admin.system.roles` in `rolesInfo` and from `admin.system.users` in `usersInfo` and `connectionStatus`. Admin- and root-role users can list or inspect every catalog role, while other users can list or inspect roles they inherit directly or transitively; built-in roles remain excluded. *[Bugfix]*
