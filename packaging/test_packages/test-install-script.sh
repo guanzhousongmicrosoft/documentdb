@@ -21,6 +21,8 @@ PASS=0
 FAIL=0
 LAST_OUTPUT=""
 INSTALLER_ENV=()
+PACKAGES_18=$'documentdb-18\ndocumentdb-common\ndocumentdb-postgresql-tools\ndocumentdb-gateway\npostgresql-18-documentdb'
+DESIRED_PGDG='deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main'
 
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -122,6 +124,16 @@ assert_lacks() {
         return 0
     fi
     bad "$1 (unexpected: $2)" "${LAST_OUTPUT}"
+    return 1
+}
+
+assert_before() {
+    local head="${LAST_OUTPUT%%"$3"*}"
+    if [[ "${LAST_OUTPUT}" == *"$3"* && "${head}" == *"$2"* ]]; then
+        ok
+        return 0
+    fi
+    bad "$1 (expected '$2' before '$3')" "${LAST_OUTPUT}"
     return 1
 }
 
@@ -323,7 +335,13 @@ ARGS
 admin user|must use letters, digits
 admin;drop|must use letters, digits
 -admin|must use letters, digits
+café|must use letters, digits
+foo.bar|must use letters, digits
 $(printf 'a%.0s' {1..64})|must be at most 63 bytes
+public|is reserved by PostgreSQL or DocumentDB
+none|is reserved by PostgreSQL or DocumentDB
+root|is reserved by PostgreSQL or DocumentDB
+readWrite|is reserved by PostgreSQL or DocumentDB
 documentdb_admin|reserved prefix 'documentdb'
 CitusAdmin|reserved prefix 'citus'
 PGuser|reserved prefix 'pg'
@@ -357,6 +375,11 @@ PORTS
     done
     expect_success "63-byte --admin-user" run_installer "${root}" \
         --admin-user "$(printf 'a%.0s' {1..63})"
+    # Reserved names match exactly, not as prefixes.
+    for value in public_admin nonea current_user PUBLIC Root rooter _admin a-b; do
+        expect_success "--admin-user ${value}" \
+            run_installer "${root}" --admin-user "${value}"
+    done
 }
 
 test_release_selection() {
@@ -386,6 +409,14 @@ test_release_selection() {
                 assert_lacks "RC does not request stable package" "install -y documentdb-${pg}"
                 assert_has "RC runs setup" "documentdb-setup --yes --pg-version ${pg}"
                 assert_no_mutation "RC dry run"
+                # A release that cannot be downloaded must leave no repository behind.
+                if [[ "${id}" == ubuntu ]]; then
+                    assert_before "RC is fetched before PGDG is configured" \
+                        "SHA256SUMS" "/usr/share/keyrings/postgresql.gpg"
+                else
+                    assert_before "RC is fetched before repositories are configured" \
+                        "SHA256SUMS" "dnf install -y ca-certificates"
+                fi
                 if [[ "${id}" == centos ]]; then
                     assert_has "Stream RC uses the PGDG major path" \
                         "Would switch PGDG to its rhel-9 repository path for CentOS Stream."
@@ -523,6 +554,7 @@ run_root_no_stdin() {
 write_root_file() {
     printf 'RC-MARKER %s %s %s\n' "$1" "$2" "$3"
 }
+fetch_release_packages
 install_release_packages
 RUNNER
     expect_success "verified selected packages" sh "${runner}" "${library}" "${fixture}" good
@@ -616,7 +648,7 @@ test_derived_state() {
         "documentdb-18 (to install)"
 
     root="$(new_root ubuntu 24.04)"
-    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES=$'documentdb-18\ndocumentdb-common'
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="${PACKAGES_18}"
     expect_success "package installed without setup state" run_installer "${root}"
     assert_lacks "installed package is not reinstalled" "${package_call}"
     assert_has "installed package still runs setup" "${setup_call}"
@@ -638,13 +670,41 @@ test_derived_state() {
     root="$(new_root ubuntu 24.04)"
     write_state_file "${root}" 18 setup.conf
     expect_failure "setup state without its package" \
-        "describes a configured instance, but documentdb-18 is not installed" \
+        "Missing or not fully installed: documentdb-18 documentdb-common" \
+        run_installer "${root}"
+
+    # A missing package is named with a package-manager repair, never with a
+    # command that package would have provided.
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="$(
+        printf '%s\n' "${PACKAGES_18}" | grep -vx documentdb-postgresql-tools)"
+    expect_failure "configured instance missing a package" \
+        "Missing or not fully installed: documentdb-postgresql-tools." \
+        run_installer "${root}"
+    assert_has "missing package has a repair command" \
+        "Repair with 'sudo apt-get install --reinstall documentdb-postgresql-tools'"
+    assert_lacks "missing package skips the health check" "documentdb-setup"
+    rm -f "${root}/etc/documentdb/local/18/setup.conf"
+    expect_failure "installed package missing a dependency" \
+        "documentdb-18 is installed, but not all of its packages are" \
+        run_installer "${root}"
+    root="$(new_root rocky 9.4)"
+    write_state_file "${root}" 18 setup.conf
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES=$'documentdb-18\ndocumentdb-common\ndocumentdb-postgresql-tools\ndocumentdb-gateway'
+    expect_failure "rpm instance missing its extension" \
+        "Repair with 'sudo dnf install postgresql18-documentdb'" \
         run_installer "${root}"
 
     root="$(new_root ubuntu 24.04)"
     installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES=documentdb-17
     expect_failure "other stand-alone major installed" \
         "packages for PostgreSQL 17 are installed" run_installer "${root}"
+
+    # Another major's packages do not make the configured one unhealthy.
+    write_state_file "${root}" 18 setup.conf
+    write_state_file "${root}" 17 setup.conf
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="${PACKAGES_18}"$'\ndocumentdb-17\npostgresql-17-documentdb'
+    expect_success "configured major beside another major" run_installer "${root}"
+    assert_has "configured major beside another major reports status" "${status_call}"
     installer_env
 
     # RPM inventory must request package names rather than full NVRA strings.
@@ -687,6 +747,44 @@ test_derived_state() {
     expect_failure "residual data without configuration" \
         "Residual data exists under /var/lib/documentdb-local/18" \
         run_installer "${root}"
+
+    # Commands outside the installer's PATH still shadow the packaged ones.
+    root="$(new_root ubuntu 24.04)"
+    mkdir -p "${root}/usr/local/bin" "${root}/usr/bin"
+    printf '#!/bin/sh\ntouch "%s/executed"\n' "${root}" > "${root}/usr/local/bin/documentdb-setup"
+    chmod 0755 "${root}/usr/local/bin/documentdb-setup"
+    expect_failure "command in /usr/local/bin" \
+        "would shadow or be replaced by the DocumentDB commands: /usr/local/bin/documentdb-setup." \
+        run_installer "${root}" --packages-only
+    assert_no_mutation "command collision"
+    if [[ -e "${root}/executed" ]]; then
+        bad "collision check executed the command" ""
+    else
+        ok
+    fi
+    rm "${root}/usr/local/bin/documentdb-setup"
+    touch "${root}/usr/bin/documentdb-gateway-admin"
+    expect_failure "unpackaged command in /usr/bin" \
+        "DocumentDB commands: /usr/bin/documentdb-gateway-admin." \
+        run_installer "${root}" --packages-only
+    # Once the packages are installed, /usr/bin is theirs; /usr/local is not.
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="${PACKAGES_18}"
+    expect_success "packaged command in /usr/bin" run_installer "${root}" --packages-only
+    mkdir -p "${root}/usr/local/sbin"
+    ln -s /usr/bin/documentdb-tune "${root}/usr/local/sbin/documentdb-tune"
+    expect_failure "link in /usr/local/sbin beside installed packages" \
+        "DocumentDB commands: /usr/local/sbin/documentdb-tune." \
+        run_installer "${root}" --packages-only
+    installer_env
+
+    # Only /bin and /sbin are skipped as merged-/usr links.
+    root="$(new_root ubuntu 24.04)"
+    mkdir -p "${root}/opt/admin-bin" "${root}/usr/local"
+    touch "${root}/opt/admin-bin/documentdb-setup"
+    ln -s ../../opt/admin-bin "${root}/usr/local/bin"
+    expect_failure "command in a linked /usr/local/bin" \
+        "DocumentDB commands: /usr/local/bin/documentdb-setup." \
+        run_installer "${root}" --packages-only
 }
 
 test_brownfield_refusal() {
@@ -725,7 +823,7 @@ test_mode_flags() {
         run_installer "${root}" --packages-only
     installer_env
 
-    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES=documentdb-18
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="${PACKAGES_18}"
     write_state_file "${root}" 18 setup.conf
     expect_success "--packages-only with a configured instance" \
         run_installer "${root}" --packages-only
@@ -753,6 +851,63 @@ test_mode_flags() {
 }
 
 # --------------------------------------------------------------------------
+# Ubuntu's server package must not start a second, default cluster.
+# --------------------------------------------------------------------------
+test_default_cluster() {
+    section "default cluster"
+    local root dropin="etc/postgresql-common/createcluster.d/documentdb-installer.conf"
+    local install_line="apt-get -o DPkg::Lock::Timeout=120 install -y documentdb-18"
+    root="$(new_root ubuntu 24.04)"
+    expect_success "clean Ubuntu host" run_installer "${root}" --packages-only
+    assert_has "default cluster is suppressed only around the install" \
+        "Would write ${root}/${dropin} (mode 0644):"$'\n'"    create_main_cluster = false"$'\n'"  + sudo env DEBIAN_FRONTEND=noninteractive ${install_line}"$'\n'"  + sudo rm -f ${root}/${dropin}"
+
+    root="$(new_root rocky 9.4)"
+    expect_success "rpm host" run_installer "${root}" --packages-only
+    assert_lacks "rpm hosts have no default cluster to suppress" "createcluster"
+
+    # A failed install must not leave the host's default changed.
+    local library="${WORK_DIR}/cluster-library.sh"
+    root="$(new_root ubuntu 24.04)"
+    sed '/^# BEGIN EXECUTION BARRIER$/,$d' "${INSTALLER}" > "${library}"
+    sh -c '. "$1"; SYSTEM_ROOT="$2"; IS_ROOT=true; DRY_RUN=false
+        TMP_DIR="$(mktemp -d)"; suppress_default_cluster
+        [ -f "${SYSTEM_ROOT}/${CREATECLUSTER_DROPIN}" ] && exit 3; exit 1' \
+        sh "${library}" "${root}"
+    if [[ $? -eq 3 && ! -e "${root}/${dropin}" ]]; then
+        ok
+    else
+        bad "a failed install left ${dropin} behind" "$(ls -R "${root}/etc" 2>&1)"
+    fi
+
+    # A killed run skips cleanup; the next run removes the drop-in once it holds the lock.
+    root="$(new_root ubuntu 24.04)"
+    mkdir -p "${root}/$(dirname "${dropin}")" "${root}/run/lock"
+    printf 'create_main_cluster = false\n' > "${root}/${dropin}"
+    sh -c '. "$1"; SYSTEM_ROOT="$2"; IS_ROOT=true; DRY_RUN=false; acquire_install_lock' \
+        sh "${library}" "${root}" > /dev/null 2>&1
+    if [[ ! -e "${root}/${dropin}" ]]; then
+        ok
+    else
+        bad "a killed run's ${dropin} survived the next run" ""
+    fi
+
+    # A killed RC run also leaves its marker, which refuses every rerun before the lock.
+    root="$(new_root ubuntu 24.04)"
+    mkdir -p "${root}/$(dirname "${dropin}")" "${root}/run/lock" "${root}/etc/documentdb"
+    printf 'create_main_cluster = false\n' > "${root}/${dropin}"
+    printf '1.0-rc2\n' > "${root}/etc/documentdb/installer-release-candidate"
+    LAST_OUTPUT="$(sh -c '. "$1"; SYSTEM_ROOT="$2"; IS_ROOT=true; DRY_RUN=false
+        detect_installation_state' sh "${library}" "${root}" 2>&1)"
+    if [[ ! -e "${root}/${dropin}" && ! -e "${root}/run/lock/documentdb-installer.lock" ]]; then
+        ok
+    else
+        bad "a killed RC run's ${dropin} survived the next run" "${LAST_OUTPUT}"
+    fi
+    assert_has "the RC marker is still refused" "A release-candidate installation was started"
+}
+
+# --------------------------------------------------------------------------
 # Repository configuration is reused only when it is exactly ours.
 # --------------------------------------------------------------------------
 test_repositories() {
@@ -767,6 +922,9 @@ test_repositories() {
     done <<'REPOS'
 foreign PGDG apt source|ubuntu|24.04|etc/apt/sources.list|deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main|Conflicting PGDG repository configuration
 rewritten pgdg.list|ubuntu|24.04|etc/apt/sources.list.d/pgdg.list|deb https://apt.postgresql.org/pub/repos/apt jammy-pgdg main|Conflicting PGDG repository configuration
+deb822 PGDG with another key|ubuntu|24.04|etc/apt/sources.list.d/pgdg.sources|Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: noble-pgdg\nComponents: main\nSigned-By: /etc/apt/keyrings/other.gpg|Conflicting PGDG repository configuration
+helper PGDG source under another name|ubuntu|24.04|etc/apt/sources.list.d/postgresql.sources|Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: noble-pgdg\nComponents: main\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg|Conflicting PGDG repository configuration
+deb822 PGDG for another architecture|ubuntu|24.04|etc/apt/sources.list.d/pgdg.sources|Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: noble-pgdg\nComponents: main\nArchitectures: arm64\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg|Conflicting PGDG repository configuration
 foreign DocumentDB apt source|ubuntu|24.04|etc/apt/sources.list.d/extra.sources|URIs: https://documentdb.io/deb|Conflicting DocumentDB repository configuration
 unrelated documentdb.list|ubuntu|24.04|etc/apt/sources.list.d/documentdb.list|deb https://example.invalid/deb stable main|Refusing to overwrite unrelated repository file
 PGDG rpm outside its package file|rocky|9.4|etc/yum.repos.d/custom.repo|[pgdg]\nbaseurl=https://download.postgresql.org/pub/repos/yum/18/redhat/rhel-9-x86_64|canonical pgdg-redhat-all.repo
@@ -780,12 +938,45 @@ REPOS
         > "${root}/etc/apt/sources.list.d/pgdg.list"
     printf '# managed by the installer\ndeb [arch=amd64 signed-by=/usr/share/keyrings/documentdb-archive-keyring.gpg] https://documentdb.io/deb stable ubuntu24\n' \
         > "${root}/etc/apt/sources.list.d/documentdb.list"
+    # The first apt-get update reads a reused source's key before the
+    # installer can fetch one, so a missing key stops the run up front.
+    mkdir -p "${root}/usr/share/keyrings"
+    expect_failure "reused PGDG source without its key" \
+        "signed by /usr/share/keyrings/postgresql.gpg, which is missing" run_installer "${root}"
+    printf '\x99\x02' > "${root}/usr/share/keyrings/postgresql.gpg"
+    expect_failure "reused DocumentDB source without its key" \
+        "signed by /usr/share/keyrings/documentdb-archive-keyring.gpg, which is missing" \
+        run_installer "${root}"
+    printf '\x99\x02' > "${root}/usr/share/keyrings/documentdb-archive-keyring.gpg"
     expect_success "exact apt sources are reused" run_installer "${root}"
     assert_has "exact PGDG source is reused" \
         "Reusing the existing PGDG APT repository configuration"
     assert_has "exact DocumentDB source is reused" \
         "Reusing the existing DocumentDB APT repository configuration"
     assert_lacks "reused sources are not rewritten" "Would write ${root}/etc/apt"
+
+    # postgresql-common's apt.postgresql.org.sh writes this pgdg.sources.
+    local helper_key="usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg"
+    local helper_source=$'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: noble-pgdg\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg'
+    root="$(new_root ubuntu 24.04)"
+    printf '%s\n' "${helper_source}" > "${root}/etc/apt/sources.list.d/pgdg.sources"
+    expect_failure "deb822 PGDG without its key" \
+        "signed by /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg, which is missing" \
+        run_installer "${root}"
+    mkdir -p "$(dirname "${root}/${helper_key}")"
+    printf '\x99\x02' > "${root}/${helper_key}"
+    expect_success "official deb822 PGDG source is reused" run_installer "${root}"
+    assert_has "deb822 PGDG source is reported as reused" \
+        "Reusing the existing PGDG APT repository configuration"
+    assert_has "deb822 PGDG key is the one verified" \
+        "Would install or verify ${root}/${helper_key} from"
+    assert_lacks "deb822 PGDG source gets no second definition" \
+        "Would write ${root}/etc/apt/sources.list.d/pgdg.list"
+    printf '%s\n' "${helper_source/Types: deb/Types: deb deb-src}" > "${root}/etc/apt/sources.list.d/pgdg.sources"
+    expect_success "deb822 PGDG source with deb-src is reused" run_installer "${root}"
+    printf '%s\n' "${DESIRED_PGDG}" > "${root}/etc/apt/sources.list.d/pgdg.list"
+    expect_failure "two PGDG definitions" "Conflicting PGDG repository configuration" \
+        run_installer "${root}"
 
     root="$(new_root rocky 9.4)"
     printf '[pgdg-common]\nbaseurl=https://download.postgresql.org/pub/repos/yum/common/redhat/rhel-9-x86_64\n' \
@@ -832,6 +1023,38 @@ REPOS
     assert_has "DocumentDB source uses HTTPS" "https://documentdb.io/deb"
     assert_lacks "no plain HTTP repository is configured" "http://"
 
+    # A reused source's key is read by the first apt-get update, so a key APT
+    # cannot read must stop the run before then.
+    root="$(new_root ubuntu 24.04)"
+    printf '%s\n' "${DESIRED_PGDG}" > "${root}/etc/apt/sources.list.d/pgdg.list"
+    mkdir -p "${root}/usr/share/keyrings"
+    printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n' > "${root}/usr/share/keyrings/postgresql.gpg"
+    expect_failure "armored key at a .gpg path" \
+        "PGDG APT key ${root}/usr/share/keyrings/postgresql.gpg is not a binary OpenPGP keyring" \
+        run_installer "${root}"
+    assert_has "armored key error says how to convert it" "gpg --dearmor"
+    assert_no_mutation "armored key refusal"
+    printf '\x99\x02' > "${root}/usr/share/keyrings/postgresql.gpg"
+    expect_success "binary key at a .gpg path" run_installer "${root}"
+    root="$(new_root ubuntu 24.04)"
+    printf '%s\n' 'Types: deb' 'URIs: https://apt.postgresql.org/pub/repos/apt' \
+        'Suites: noble-pgdg' 'Components: main' \
+        'Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc' \
+        > "${root}/etc/apt/sources.list.d/pgdg.sources"
+    mkdir -p "${root}/usr/share/postgresql-common/pgdg"
+    printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n' \
+        > "${root}/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+    expect_success "armored key at a .asc path" run_installer "${root}"
+
+    # The same rule applies when the installer verifies a key it did not write.
+    local key_library="${WORK_DIR}/key-library.sh" key_file="${WORK_DIR}/existing.gpg"
+    sed '/^# BEGIN EXECUTION BARRIER$/,$d' "${INSTALLER}" > "${key_library}"
+    printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n' > "${key_file}"
+    expect_failure "installer refuses an armored key it would reuse" \
+        "is not a binary OpenPGP keyring" \
+        sh -c '. "$1"; TESTING=true; DRY_RUN=false; ensure_apt_keyring "$2" https://example.invalid/key 0 PGDG' \
+        sh "${key_library}" "${key_file}"
+
     root="$(new_root rocky 9.4)"
     expect_success "rpm host trusts published keys" run_installer "${root}"
     assert_has "EPEL key is fingerprint checked" \
@@ -859,6 +1082,8 @@ REPOS
         "0123456789ABCDEF0123456789ABCDEF01234567"
     printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/documentdb-archive-keyring.gpg] https://127.0.0.1:8443/deb stable ubuntu24\n' \
         > "${root}/etc/apt/sources.list.d/documentdb.list"
+    mkdir -p "${root}/usr/share/keyrings"
+    printf '\x99\x02' > "${root}/usr/share/keyrings/documentdb-archive-keyring.gpg"
     expect_success "test apt repository is reusable" run_installer "${root}"
     assert_has "test apt repository reuse is reported" \
         "Reusing the existing DocumentDB APT repository configuration"
@@ -935,6 +1160,28 @@ test_password_metadata() {
     chmod 0600 "${secrets}/linked"
     ln "${secrets}/linked" "${secrets}/linked-alias"
     ln -s "${secrets}/good" "${secrets}/symlink"
+    # documentdb-setup's password-file contract, checked before any package
+    # is installed: one line of printable ASCII, one trailing LF or CRLF.
+    local file content
+    while IFS='|' read -r file content; do
+        printf "${content}" > "${secrets}/${file}"
+        chmod 0600 "${secrets}/${file}"
+    done <<'CONTENTS'
+no-newline|sup3r-secret
+crlf|sup3r-secret\r\n
+spaces| sup3r secret |
+lf-only|\n
+crlf-only|\r\n
+multiline|sup3r-secret\nsecond
+double-lf|sup3r-secret\n\n
+bare-cr|sup3r-secret\r
+cr-cr-lf|sup3r-secret\r\r\n
+tab|sup3r\tsecret
+escape|sup3r\033secret
+nul|sup3r\000secret
+emoji|Valid\360\237\247\252Pass123!
+latin1|p\303\244ssword
+CONTENTS
 
     validation_run() {
         env PATH="${MOCK_BIN}:${PATH}" TMPDIR="${WORK_DIR}" \
@@ -942,6 +1189,7 @@ test_password_metadata() {
             DOCUMENTDB_INSTALLER_TESTING=true \
             DOCUMENTDB_INSTALLER_TEST_VALIDATION_ONLY=true \
             DOCUMENTDB_INSTALLER_TEST_ROOT="${root}" \
+            ${INSTALLER_ENV[@]+"${INSTALLER_ENV[@]}"} \
             sh "${INSTALLER}" --yes --accept-external-listen \
             --admin-password-file "$1" 2>&1
     }
@@ -949,6 +1197,9 @@ test_password_metadata() {
     expect_success "owner-only password file" validation_run "${secrets}/good"
     assert_lacks "password contents never reach the output" "sup3r-secret"
     assert_no_mutation "password validation"
+    for file in no-newline crlf spaces; do
+        expect_success "password file '${file}'" validation_run "${secrets}/${file}"
+    done
 
     local name file expected
     while IFS='|' read -r name file expected; do
@@ -956,11 +1207,32 @@ test_password_metadata() {
         expect_failure "${name}" "${expected}" validation_run "${secrets}/${file}"
     done <<'PASSWORDS'
 group-readable password file|group-readable|must not be readable or writable by group or others
-empty password file|empty|is empty
+empty password file|empty|one non-empty line
 hard-linked password file|linked|must have exactly one hard link
 symlinked password file|symlink|must not be a symbolic link
 missing password file|absent|is not a regular file
+LF-only password file|lf-only|one non-empty line
+CRLF-only password file|crlf-only|one non-empty line
+multi-line password file|multiline|one non-empty line
+password file with two trailing LFs|double-lf|one non-empty line
+password file ending in a bare CR|bare-cr|one non-empty line
+password file ending in CR CR LF|cr-cr-lf|one non-empty line
+password with a tab|tab|one non-empty line
+password with an escape|escape|one non-empty line
+password with a NUL byte|nul|one non-empty line
+password with an emoji|emoji|one non-empty line
+password with a non-ASCII letter|latin1|one non-empty line
 PASSWORDS
+
+    # A configured host only reports status and never reads the password.
+    local fresh_root="${root}"
+    root="$(new_root ubuntu 24.04)"
+    write_state_file "${root}" 18 setup.conf
+    installer_env DOCUMENTDB_INSTALLER_TEST_EXISTING_PACKAGES="${PACKAGES_18}"
+    expect_success "configured host skips the password content rule" \
+        validation_run "${secrets}/latin1"
+    installer_env
+    root="${fresh_root}"
 
     # The staged copy lives in the installer's private directory and is removed.
     if compgen -G "${WORK_DIR}/documentdb-install.*" > /dev/null; then
@@ -982,6 +1254,28 @@ run_prefix() {
             DOCUMENTDB_INSTALLER_TEST_ROOT="${root}" \
             sh -s -- --dry-run --yes --accept-external-listen \
             --admin-password-file /dev/null 2>&1
+}
+
+# --------------------------------------------------------------------------
+# What the installer reports must match what it did.
+# --------------------------------------------------------------------------
+test_reported_state() {
+    section "reported state"
+    local library="${WORK_DIR}/message-library.sh" root
+    sed '/^# BEGIN EXECUTION BARRIER$/,$d' "${INSTALLER}" > "${library}"
+
+    # Setup binds the gateway on 0.0.0.0 and [::], not loopback.
+    expect_success "success summary" \
+        sh -c '. "$1"; DRY_RUN=false; LISTEN_PORT=27019; print_success' sh "${library}"
+    assert_has "success names every interface" "port 27019 on all interfaces"
+    assert_lacks "success does not claim loopback" "127.0.0.1"
+
+    root="$(mktemp -d "${WORK_DIR}/lock.XXXXXX")"
+    mkdir -p "${root}/run/lock/documentdb-installer.lock"
+    expect_failure "stale installer lock" \
+        "remove the stale lock with 'sudo rmdir ${root}/run/lock/documentdb-installer.lock'" \
+        sh -c '. "$1"; SYSTEM_ROOT="$2"; IS_ROOT=true; acquire_install_lock' \
+        sh "${library}" "${root}"
 }
 
 test_execution_barrier() {
@@ -1048,9 +1342,11 @@ test_release_checksums
 test_derived_state
 test_brownfield_refusal
 test_mode_flags
+test_default_cluster
 test_repositories
 test_dry_run_is_inert
 test_password_metadata
+test_reported_state
 test_execution_barrier
 
 printf '\nResults: %d passed, %d failed\n' "${PASS}" "${FAIL}"

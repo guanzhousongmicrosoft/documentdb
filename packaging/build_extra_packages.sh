@@ -151,6 +151,11 @@ done
 [[ -n "${PACKAGE_TYPE}" ]] || die "--type is required"
 [[ -n "${PG_VERSION}" && "${PG_VERSION}" =~ ^[0-9]+$ ]] || die "--pg must be a number (e.g., 18)"
 [[ -n "${DOCUMENTDB_VERSION}" ]] || die "--version is required"
+# shellcheck source=documentdb-version.sh
+source "${SCRIPT_DIR}/documentdb-version.sh"
+# Same version as the extension and gateway builds: a literal 1.0-rc2 would
+# sort above their 1.0~rc2 and leave our gateway dependency unsatisfiable.
+DOCUMENTDB_VERSION="$(documentdb_package_version "${DOCUMENTDB_VERSION}")"
 # The meta package (built when PG_VERSION == DEFAULT_PG_MAJOR) pins the
 # paved-road default major to documentdb-<major>, which wraps the gateway and
 # requires PostgreSQL 16+. Reject a PG<16 paved-road default up front so the

@@ -1,4 +1,5 @@
 import re
+import secrets
 import shutil
 import shlex
 import signal
@@ -6,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import urllib.parse
 import os
 from pathlib import Path
 
@@ -16,6 +18,7 @@ TUNE_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-tune.sh"
 GATEWAY_SETUP_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-register-gateway.sh"
 GATEWAY_ADMIN_SCRIPT = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-gateway-admin.sh"
 TOOLS_LIB = OSS_ROOT / "documentdb-local" / "scripts" / "documentdb-tools-lib.sh"
+PASSWORD_RULE = b"one non-empty line of printable ASCII"
 PRELOAD_LIB = OSS_ROOT / "scripts" / "preload_libraries.sh"
 
 
@@ -97,35 +100,27 @@ class DocumentDBSetupTests(unittest.TestCase):
         # install whose only admin failed every login with "Username is
         # invalid" — the gateway blocks the documentdb/citus/pg/
         # internal_role prefixes. Both the flag path and the interactive
-        # prompt must consult the gateway's own policy, in argument
-        # validation, before anything is mutated.
-        lib = (OSS_ROOT / "documentdb-local" / "scripts"
-               / "documentdb-tools-lib.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            "documentdb_validate_gateway_username()",
-            lib,
-            "the shared library must provide the gateway username validator",
-        )
+        # prompt now go through one shared policy, before the dry-run
+        # preview and before anything is mutated.
+        lib = TOOLS_LIB.read_text(encoding="utf-8")
+        self.assertIn("documentdb_validate_gateway_username()", lib)
         self.assertIn("BlockedRolePrefixes", lib)
+        policy = re.search(
+            r"^documentdb_validate_username\(\)\s*\{(?P<body>.*?)^\}",
+            lib,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(policy, "the shared username policy is missing")
+        self.assertIn("documentdb_validate_gateway_username", policy.group("body"),
+                      "the shared policy must keep the gateway's prefix check")
 
         script = SETUP_SCRIPT.read_text(encoding="utf-8")
-        self.assertGreaterEqual(
-            script.count("documentdb_validate_gateway_username"), 2,
-            "both the --admin-user flag path and the interactive prompt "
-            "must validate the username",
-        )
-        match = re.search(
-            r"validate_required_arguments\(\)\s*\{(?P<body>.*?)\n\}",
-            script,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        self.assertIn(
-            "documentdb_validate_gateway_username",
-            match.group("body"),
-            "validation must happen in validate_required_arguments, before "
-            "any host mutation",
-        )
+        main = re.search(r"^main\(\)\s*\{(?P<body>.*?)^\}", script,
+                         flags=re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(main)
+        body = main.group("body")
+        self.assertEqual(body.count('documentdb_validate_username "${USERNAME}"'), 1,
+                         "one call covers both the flag and the prompt")
 
         admin = GATEWAY_ADMIN_SCRIPT.read_text(encoding="utf-8")
         create = re.search(
@@ -135,11 +130,11 @@ class DocumentDBSetupTests(unittest.TestCase):
         )
         self.assertIsNotNone(create)
         body = create.group("body")
-        self.assertIn("documentdb_validate_gateway_username", body)
+        self.assertIn("documentdb_validate_username", body)
         # The check must precede the dry-run early return so a preview
         # reports the same refusal an apply would.
         self.assertLess(
-            body.index("documentdb_validate_gateway_username"),
+            body.index("documentdb_validate_username"),
             body.index('"${DRY_RUN}" == "true"'),
             "create-user must validate before the dry-run branch",
         )
@@ -544,6 +539,290 @@ class DocumentDBSetupTests(unittest.TestCase):
             "preflight must reject brownfield adoption when the delegated "
             "tools are missing",
         )
+
+
+class InputValidationContractTests(unittest.TestCase):
+    """One username policy and one password-file contract for every entry
+    point (documentdb/documentdb#731): a name PostgreSQL truncates or
+    reserves, or a password a SCRAM client cannot SASLprep, used to install
+    successfully and leave an admin no client could log in as."""
+
+    REJECTED_USERNAMES = [
+        ("", "is empty or looks like an option"),
+        ("-rf", "is empty or looks like an option"),
+        ("--yes", "is empty or looks like an option"),
+        ("a,b", "contains ',' or '='"),
+        ("a=b", "contains ',' or '='"),
+        ("a" * 64, "is 64 bytes"),
+        ("public", "is reserved by PostgreSQL or DocumentDB"),
+        ("none", "is reserved by PostgreSQL or DocumentDB"),
+        ("root", "is reserved by PostgreSQL or DocumentDB"),
+        ("readWrite", "is reserved by PostgreSQL or DocumentDB"),
+        ("__system", "is reserved by PostgreSQL or DocumentDB"),
+        ("pgadmin", "reserved prefix 'pg'"),
+        ("DocumentDB_x", "reserved prefix 'documentdb'"),
+    ]
+    ACCEPTED_USERNAMES = ["admin", "_admin", "a-b", "Admin_2", "a" * 63,
+                          "public_admin", "nonesuch", "current_user", "Root",
+                          "PUBLIC", "None", "rooter"]
+    # Only setup's interactive prompt refuses these; the backend quotes names.
+    PROMPT_ONLY_REJECTED = ["1admin", "foo.bar", "alice@corp.com", "weird name",
+                            "ad'min", "caf\u00e9"]
+
+    ACCEPTED_PASSWORDS = [
+        (b"ValidPass123!", "ValidPass123!"),
+        (b"ValidPass123!\n", "ValidPass123!"),
+        (b"ValidPass123!\r\n", "ValidPass123!"),
+        (b" sp ace ", " sp ace "),
+        (b"aB3$ :x/'\"\\|@%&*;!Z\n", "aB3$ :x/'\"\\|@%&*;!Z"),
+    ]
+    REJECTED_PASSWORDS = [
+        b"",
+        b"\n",
+        b"\r\n",
+        b"ValidPass123!\nsecond",
+        b"ValidPass123!\n\n",
+        b"ValidPass123!\r",
+        b"ValidPass123!\r\r\n",
+        b"Valid\tPass",
+        b"Valid\x1bPass",
+        b"Valid\x7fPass",
+        b"Valid\x00Pass",
+        "Valid\U0001f9eaPass123!".encode(),
+        "p\u00e4sswort".encode(),
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "SetupConfiguration.json"
+        self.config.write_text(
+            '{"BlockedRolePrefixes": ["documentdb", "citus", "pg", "internal_role"]}',
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _bash(self, script, stdin=b"", env=None):
+        return subprocess.run(["bash", "-c", script], input=stdin,
+                              capture_output=True, timeout=30, env=env)
+
+    def _function(self, path, name):
+        match = re.search(rf"^{name}\(\)\s*\{{.*?^\}}", path.read_text(encoding="utf-8"),
+                          flags=re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(match, f"{name} not found in {path.name}")
+        return match.group(0)
+
+    def test_shared_username_policy(self):
+        def validate(function, username):
+            return subprocess.run(
+                ["bash", "-c", f"source {shlex.quote(str(TOOLS_LIB))}; "
+                 f'{function} "$1" "$2"',
+                 "_", username, str(self.config)],
+                capture_output=True, text=True, timeout=30)
+
+        for username, expected in self.REJECTED_USERNAMES:
+            if "prefix" in expected and not shutil.which("jq"):
+                continue
+            with self.subTest(username=username):
+                r = validate("documentdb_validate_username", username)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn(expected, r.stderr)
+        for username in self.ACCEPTED_USERNAMES + self.PROMPT_ONLY_REJECTED:
+            with self.subTest(username=username):
+                r = validate("documentdb_validate_username", username)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_entry_points_use_the_username_policy(self):
+        # The full matrix runs once in test_shared_username_policy; this proves
+        # each entry point calls it before its dry-run preview.
+        entry_points = {
+            "setup": ([str(SETUP_SCRIPT), "--admin-user"], "is not allowed"),
+            "create-user": ([str(GATEWAY_ADMIN_SCRIPT), "create-user", "--username"],
+                            "Refusing to create user"),
+        }
+        for name, (argv, refusal) in entry_points.items():
+            def run(username):
+                return subprocess.run(["bash", *argv, username, "--dry-run"],
+                                      stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=30)
+
+            with self.subTest(entry_point=name):
+                r = run("public")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("is reserved by PostgreSQL or DocumentDB", r.stderr)
+                self.assertIn(refusal, r.stderr)
+                self.assertNotIn("[dry-run]", r.stdout + r.stderr)
+                # Only setup's prompt limits the character set.
+                self.assertNotIn(refusal, run("first.last").stderr)
+
+    def test_printed_commands_quote_the_admin_name(self):
+        # --admin-user takes names like first.last, so any shell or URI
+        # character must stay inert in the commands setup prints.
+        name = "x'; touch pwned; echo 'a@b,c"
+        script = (
+            f"{self._function(SETUP_SCRIPT, 'build_rerun_suffix')}\n"
+            'USERNAME="$1"; PASSWORD_FILE=""; PASSWORD_FROM_STDIN=false\n'
+            'eval "set -- $(build_rerun_suffix)"; printf "%s" "$2"\n'
+        )
+        r = subprocess.run(["bash", "-c", script, "_", name], cwd=self.root,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout, name, r.stderr)
+        self.assertFalse((self.root / "pwned").exists())
+
+        body = self._function(SETUP_SCRIPT, "print_completion_message")
+        encode = re.search(r'encoded_user="\$\((?P<cmd>jq [^\n]*)\)"', body)
+        self.assertIsNotNone(encode, "the connect URI must encode the user name")
+        r = subprocess.run(["bash", "-c", f'USERNAME="$1"; {encode.group("cmd")}', "_", name],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), urllib.parse.quote(name, safe="-_.~"))
+
+    def test_setup_option_values_are_checked_at_parse_time(self):
+        cases = [
+            (["--admin-user", "--yes"], "--admin-user requires a value, but got the option '--yes'"),
+            (["--username", "-x"], "--admin-user requires a value, but got the option '-x'"),
+            (["--pg-version", "abc"], "--pg-version requires a single numeric PostgreSQL major"),
+            (["--pg-version", "17.2"], "--pg-version requires a single numeric PostgreSQL major"),
+            (["--pg-version", "018"], "--pg-version requires a single numeric PostgreSQL major"),
+            (["--pg-version", "--yes"], "--pg-version requires a single numeric PostgreSQL major"),
+        ]
+        for args, expected in cases:
+            with self.subTest(args=args):
+                r = subprocess.run(["bash", str(SETUP_SCRIPT), *args, "--dry-run"],
+                                   stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, timeout=30)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(expected, r.stderr)
+
+    def _setup_password(self, source, data):
+        """Run documentdb-setup's resolve_password against one source."""
+        pw_file = self.root / "pw"
+        pw_file.write_bytes(data)
+        pw_file.chmod(0o600)
+        env = {k: v for k, v in os.environ.items() if k != "DOCUMENTDB_PASSWORD"}
+        file_arg, from_stdin = "", "false"
+        if source == "file":
+            file_arg = str(pw_file)
+        elif source == "stdin":
+            from_stdin = "true"
+        else:
+            env["DOCUMENTDB_PASSWORD"] = data.decode("utf-8", "surrogateescape")
+        script = (
+            f"source {shlex.quote(str(TOOLS_LIB))}\n"
+            'die() { echo "DIE: $*" >&2; exit 1; }\n'
+            "log_warn() { :; }\n"
+            f"{self._function(SETUP_SCRIPT, 'resolve_password')}\n"
+            f"PASSWORD_FILE={shlex.quote(file_arg)}; PASSWORD_FROM_STDIN={from_stdin}\n"
+            'YES=true; PASSWORD=""\n'
+            "resolve_password\n"
+            "printf '%s' \"$PASSWORD\"\n"
+        )
+        return self._bash(script, stdin=data if source == "stdin" else b"", env=env)
+
+    def test_password_contract(self):
+        def read(data):
+            return self._bash(f"source {shlex.quote(str(TOOLS_LIB))}\n"
+                              'documentdb_read_password PW "The password" || exit 1\n'
+                              "printf '%s' \"$PW\"\n", stdin=data)
+
+        for data, expected in self.ACCEPTED_PASSWORDS:
+            with self.subTest(data=data):
+                r = read(data)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.decode(), expected)
+        for data in self.REJECTED_PASSWORDS:
+            with self.subTest(data=data):
+                r = read(data)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(PASSWORD_RULE, r.stderr)
+
+    def _check_wiring(self, run, sources):
+        # The full matrix runs once in test_password_contract; this proves
+        # each source goes through it.
+        for source in sources:
+            with self.subTest(source=source):
+                r = run(source, b"ValidPass123!\r\n" if source != "env" else b"ValidPass123!")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, b"ValidPass123!")
+                r = run(source, "p\u00e4sswort".encode())
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(PASSWORD_RULE, r.stderr)
+
+    def test_setup_password_sources_use_the_contract(self):
+        self._check_wiring(self._setup_password, ("file", "stdin", "env"))
+
+    def test_setup_refuses_password_before_tls_repair(self):
+        # validate_required_arguments repairs TLS file ownership; a refused
+        # password must stop setup before that touches the operator's files.
+        for name in ("cert", "key"):
+            (self.root / name).write_text("x", encoding="utf-8")
+        (self.root / "pw").write_bytes(b"Valid\tPass\n")
+        script = (
+            f"source {shlex.quote(str(TOOLS_LIB))}\n"
+            'die() { echo "DIE: $*" >&2; exit 1; }\n'
+            "log_warn() { :; }; log_info() { :; }\n"
+            'id() { [[ "$*" == "-u documentdb-gateway" ]] || echo 0; }\n'
+            "sudo() { return 1; }; run_as_user() { return 1; }\n"
+            "chown() { touch repaired; }; chmod() { touch repaired; }\n"
+            f"{self._function(SETUP_SCRIPT, 'resolve_password')}\n"
+            f"{self._function(SETUP_SCRIPT, 'validate_required_arguments')}\n"
+            "USERNAME=admin TLS_CERT_FILE=cert TLS_KEY_FILE=key TLS_AUTO_GENERATE=\n"
+            "PASSWORD_FILE=pw PASSWORD_FROM_STDIN=false YES=true PASSWORD=\n"
+            "validate_required_arguments\n"
+        )
+        r = subprocess.run(["bash", "-c", script], cwd=self.root, capture_output=True,
+                           timeout=30, env={k: v for k, v in os.environ.items()
+                                            if k != "DOCUMENTDB_PASSWORD"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(PASSWORD_RULE, r.stderr)
+        self.assertFalse((self.root / "repaired").exists(), r.stderr)
+
+    def _admin_password(self, source, data):
+        """Run documentdb-gateway-admin's resolve_password_to_file."""
+        pw_file = self.root / "pw"
+        pw_file.write_bytes(data)
+        pw_file.chmod(0o600)
+        file_arg = str(pw_file) if source == "file" else ""
+        from_stdin = "true" if source == "stdin" else "false"
+        script = (
+            f"source {shlex.quote(str(TOOLS_LIB))}\n"
+            'die() { echo "DIE: $*" >&2; exit 1; }\n'
+            "log() { :; }\n"
+            f"{self._function(GATEWAY_ADMIN_SCRIPT, 'resolve_password_to_file')}\n"
+            f"PASSWORD_FILE={shlex.quote(file_arg)}; PASSWORD_FROM_STDIN={from_stdin}\n"
+            '_TEMP_FILES=(); PG_OWNER=""\n'
+            "resolve_password_to_file\n"
+            'cat "$RESOLVED_PASSWORD_FILE"; rm -f "$RESOLVED_PASSWORD_FILE"\n'
+        )
+        return self._bash(script, stdin=data if source == "stdin" else b"")
+
+    def test_gateway_admin_password_sources_use_the_contract(self):
+        self._check_wiring(self._admin_password, ("file", "stdin"))
+
+    def test_reserved_role_names_match_across_entry_points(self):
+        # install.sh runs before the tools package exists, so it carries a copy.
+        def names(path, var):
+            m = re.search(rf'^\s*{var}="(?P<v>[^"]*)"', path.read_text(encoding="utf-8"),
+                          flags=re.MULTILINE)
+            self.assertIsNotNone(m, f"{var} not found in {path.name}")
+            return m.group("v").split()
+
+        lib = names(TOOLS_LIB, "DOCUMENTDB_RESERVED_USER_NAMES")
+        self.assertEqual(lib, names(OSS_ROOT / "packaging" / "install.sh",
+                                    "RESERVED_ADMIN_NAMES"))
+
+        # PostgreSQL's two plus the backend's built-in roles, from the header.
+        header = (OSS_ROOT / "pg_documentdb" / "include" / "utils"
+                  / "role_utils.h").read_text(encoding="utf-8")
+        macro = re.search(r"#define IS_NATIVE_BUILTIN_ROLE\(roleName\)(?P<body>.*?)\n\n",
+                          header, flags=re.DOTALL)
+        self.assertIsNotNone(macro, "IS_NATIVE_BUILTIN_ROLE not found")
+        backend = sorted(re.findall(r'strcmp\(\(roleName\), "([^"]+)"\)',
+                                    macro.group("body")))
+        self.assertIn("root", backend)
+        self.assertEqual(lib[:2], ["public", "none"])
+        self.assertEqual(sorted(lib[2:]), backend)
 
 
 class DocumentDBTuneTests(unittest.TestCase):
@@ -2514,6 +2793,39 @@ class PackagingPgMajorBoundaryTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, "build_extra_packages.sh must reject --default-pg-major 15")
         self.assertIn("16", r.stdout + r.stderr)
 
+    def test_build_extra_packages_normalizes_rc_version(self):
+        # documentdb-N depends on documentdb-gateway (>= version); the gateway
+        # builds as 1.0~rc2, and 1.0-rc2 would sort above it.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pkg = root / "packaging"
+            (pkg / "postgresql-tools").mkdir(parents=True)
+            (pkg / "standalone").mkdir()
+            shutil.copy2(BUILD_EXTRA_PACKAGES, pkg / "build_extra_packages.sh")
+            shutil.copy2(OSS_ROOT / "packaging" / "documentdb-version.sh", pkg)
+            log = root / "calls.log"
+            stub = f'#!/bin/bash\necho "$(basename "$0") $*" >> "{log}"\n'
+            for rel in ("postgresql-tools/build-postgresql-tools-deb.sh",
+                        "standalone/build-standalone-deb.sh",
+                        "standalone/build-common-deb.sh",
+                        "standalone/build-meta-deb.sh"):
+                (pkg / rel).write_text(stub, encoding="utf-8")
+                (pkg / rel).chmod(0o755)
+            bindir = root / "bin"
+            bindir.mkdir()
+            (bindir / "dpkg-deb").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bindir / "dpkg-deb").chmod(0o755)
+            env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+            r = subprocess.run(
+                ["bash", str(pkg / "build_extra_packages.sh"), "--type", "deb", "--pg", "18",
+                 "--version", "1.0-rc2", "--output-dir", str(root / "out")],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, env=env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 4, calls)
+        for call in calls:
+            self.assertIn("--version 1.0~rc2 ", call + " ")
+
     def test_public_alias_major_agrees_with_meta_build_defaults(self):
         # documentdb-setup.sh hardcodes the paved-road default major
         # (PUBLIC_ALIAS_PG_MAJOR) that gates enabling the public
@@ -2657,6 +2969,17 @@ class ExtraPackagesBuildDepsPreflightTests(unittest.TestCase):
             for ln in producers:
                 with self.subTest(script=name, line=ln.strip()[:60]):
                     self.assertIn("--env SOURCE_DATE_EPOCH ", ln)
+
+    def test_package_builders_use_distinct_image_tags(self):
+        # A shared tag lets one builder's image overwrite the other's for the
+        # same OS/PG. Source text only.
+        tags = []
+        for name in ("build_packages.sh", "gateway/build_gateway_packages.sh"):
+            text = (OSS_ROOT / "packaging" / name).read_text(encoding="utf-8")
+            found = re.findall(r"^TAG=(\S+)$", text, flags=re.M)
+            self.assertEqual(len(found), 1, f"{name}: expected one TAG=")
+            tags.append(found[0])
+        self.assertNotEqual(tags[0], tags[1])
 
     def test_check_build_deps_only_deb_succeeds_when_dpkg_deb_present(self):
         # Behavioral happy-path for the new deb preflight; skipped where dpkg-deb
@@ -4231,6 +4554,65 @@ class GatewayRpmPosttransRestartsLocalInstancesTests(unittest.TestCase):
             body,
             "RPM %posttrans must restart enumerated instances",
         )
+
+
+class UpgradeBannerTests(unittest.TestCase):
+    """The tools and gateway packages say "installed" and print first-run
+    guidance only on a first install, not on every upgrade."""
+
+    def _stub_path(self, td):
+        bindir = Path(td) / "bin"
+        bindir.mkdir()
+        for name in ("systemd-sysusers", "systemd-tmpfiles", "install", "dpkg-query"):
+            (bindir / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bindir / name).chmod(0o755)
+        (bindir / "systemctl").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (bindir / "systemctl").chmod(0o755)
+        return dict(os.environ, PATH=f"{bindir}:/usr/bin:/bin")
+
+    def _assert_banners(self, run, product):
+        first = run(True)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(f"{product} installed.", first.stdout)
+        upgrade = run(False)
+        self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+        self.assertIn(f"{product} upgraded.", upgrade.stdout)
+        self.assertNotIn("installed", upgrade.stdout)
+
+    def _rpm_post(self, spec_name):
+        text = (OSS_ROOT / "packaging" / "rpm" / "spec" / spec_name).read_text(encoding="utf-8")
+        body = re.search(r"^%post\n(.*?)^%(?:pre|preun|postun|pretrans|posttrans|files|changelog)\b", text, flags=re.M | re.S).group(1)
+        return "\n".join(ln for ln in body.splitlines() if not ln.startswith("%"))
+
+    def test_gateway_deb_postinst(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = self._stub_path(td)
+            self._assert_banners(
+                lambda first: subprocess.run(
+                    ["bash", str(GATEWAY_POSTINST), "configure", "" if first else "0.110.0"],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, env=env),
+                "DocumentDB Gateway")
+
+    def test_tools_deb_postinst(self):
+        builder = (OSS_ROOT / "packaging" / "postgresql-tools"
+                   / "build-postgresql-tools-deb.sh").read_text(encoding="utf-8")
+        postinst = re.search(r"<<'POSTINST'\n(.*?)^POSTINST$", builder, flags=re.M | re.S).group(1)
+        self._assert_banners(
+            lambda first: subprocess.run(
+                ["bash", "-c", postinst, "postinst", "configure", "" if first else "0.110.0"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30),
+            "DocumentDB PostgreSQL administrator tools")
+
+    def test_rpm_post_scriptlets(self):
+        for spec, product in (("documentdb-tools.spec", "DocumentDB PostgreSQL administrator tools"),
+                              ("documentdb-gateway.spec", "DocumentDB Gateway")):
+            with self.subTest(spec=spec):
+                post = self._rpm_post(spec)
+                self._assert_banners(
+                    lambda first: subprocess.run(
+                        ["sh", "-c", post, "post", "1" if first else "2"],
+                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30),
+                    product)
 
 
 class DebianMaintainerBootstrapPathTests(unittest.TestCase):
@@ -6878,6 +7260,151 @@ class StatusOnlyHealthExitCodeTests(unittest.TestCase):
             r'\[\[\s*"\$\{mode\}"\s*!=\s*"<not configured>"\s*\]\]\s*&&\s*return\s*0',
             "status_only must not exit 0 based on state file presence alone",
         )
+
+
+class SetupReportsTrueStateTests(unittest.TestCase):
+    """documentdb-setup must not accept, change or report things silently
+    that leave the operator with a broken or surprising install (#772)."""
+
+    @staticmethod
+    def _shell_function(name):
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+        match = re.search(rf"^{name}\(\)\s*\{{.*?^\}}", text, re.DOTALL | re.MULTILINE)
+        assert match, f"could not locate shell function {name}"
+        return match.group(0)
+
+    def _refuse(self, path, systemd=True):
+        script = (
+            f'has_working_systemd() {{ {"true" if systemd else "false"}; }}\n'
+            'die() { printf "DIE: %s\\n" "$*"; exit 1; }\n'
+            + self._shell_function("refuse_home_tls_path")
+            + '\nrefuse_home_tls_path "$1" "HINT"\necho OK\n'
+        )
+        return subprocess.run(["bash", "-c", script, "bash", path],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_tls_files_under_protected_home_are_refused(self):
+        # The gateway units run with ProtectHome=yes: setup used to chown the
+        # operator's /root files and then time out waiting for a gateway that
+        # still could not see them.
+        for path in ("/root/c.pem", "/home/alice/tls/k.pem", "/run/user/1000/c.pem", "/root"):
+            r = self._refuse(path)
+            self.assertEqual(r.returncode, 1, (path, r.stdout, r.stderr))
+            self.assertIn("ProtectHome=yes", r.stdout)
+            self.assertIn("HINT", r.stdout)
+        for path in ("/etc/documentdb/tls/c.pem", "/etc/ssl/private/k.pem", "/homework/c.pem"):
+            r = self._refuse(path)
+            self.assertEqual(r.returncode, 0, (path, r.stdout, r.stderr))
+            self.assertIn("OK", r.stdout)
+
+    def test_tls_files_under_home_are_allowed_without_systemd(self):
+        # The nohup gateway has no ProtectHome sandbox.
+        r = self._refuse("/home/alice/tls/k.pem", systemd=False)
+        self.assertEqual(r.returncode, 0, (r.stdout, r.stderr))
+        self.assertIn("OK", r.stdout)
+
+    def test_tls_symlink_into_home_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            link = Path(td) / "c.pem"
+            link.symlink_to("/root/c.pem")
+            r = self._refuse(str(link))
+            self.assertEqual(r.returncode, 1, (r.stdout, r.stderr))
+
+    def test_tls_symlink_from_home_is_refused(self):
+        # /root/c.pem -> /etc/documentdb/tls/c.pem: the gateway still opens /root/c.pem.
+        script = (
+            'has_working_systemd() { true; }\n'
+            'realpath() { [ "$1" = -ms ] && printf "%s" "$3" || printf /etc/documentdb/tls/c.pem; }\n'
+            'die() { printf "DIE: %s\\n" "$*"; exit 1; }\n'
+            + self._shell_function("refuse_home_tls_path")
+            + '\nrefuse_home_tls_path /root/c.pem HINT\necho OK\n'
+        )
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1, (r.stdout, r.stderr))
+        self.assertIn("ProtectHome=yes", r.stdout)
+
+    def test_tls_home_refusal_runs_before_chown_and_on_reuse(self):
+        body = self._shell_function("validate_required_arguments")
+        refuse = body.index('refuse_home_tls_path "${TLS_KEY_FILE}"')
+        self.assertLess(refuse, body.index("chown "),
+                        "the refusal must come before setup touches the operator's files")
+        persisted = self._shell_function("default_gateway_settings_from_persisted_state")
+        self.assertIn('refuse_home_tls_path "${_p_cert}"', persisted)
+        self.assertIn('refuse_home_tls_path "${_p_key}"', persisted)
+        self.assertIn("--tls-auto-generate true", persisted)
+
+    def _create_admin(self, exists, others):
+        # Stub psql: answer the existence probe and the other-admins query.
+        script = (
+            'set -euo pipefail\n'
+            'log_info() { echo "INFO: $*"; }\nlog_warn() { echo "WARN: $*"; }\n'
+            'confirm_or_apply() { echo "APPLY: $1"; }\n'
+            'run_as_user() { local sql; sql="$(cat)";\n'
+            '  case "${sql}" in *"SELECT 1 FROM pg_roles"*) [[ "${EXISTS}" == 1 ]] && echo 1; true ;;\n'
+            '  *documentdb_admin_role*) [[ -z "${OTHERS}" ]] || printf "%s\\n" ${OTHERS} ;; esac; }\n'
+            'USERNAME=alice PG_OWNER=documentdb PSQL=psql PG_SOCKET_DIR=/tmp PG_PORT=9718 HAS_EXTENDED_RUM=false\n'
+            + self._shell_function("create_required_extensions_and_users")
+            + '\ncreate_required_extensions_and_users\n'
+        )
+        env = dict(os.environ, EXISTS="1" if exists else "0", OTHERS=others,
+                   PASSWORD=secrets.token_urlsafe(16))
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           timeout=30, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_rerun_warns_before_replacing_the_admin_password(self):
+        out = self._create_admin(exists=True, others="")
+        self.assertRegex(out, r"WARN: .*'alice'.*old password stops working")
+        self.assertIn("APPLY: Reset password for existing admin user 'alice'", out)
+
+    def test_new_admin_name_warns_about_existing_admins(self):
+        out = self._create_admin(exists=False, others="admin ops")
+        self.assertRegex(out, r"WARN: Adding admin user 'alice' alongside .*: admin ops\.")
+        self.assertIn("documentdb-gateway-admin drop-user", out)
+        self.assertIn("APPLY: Bootstrap first admin user 'alice'", out)
+
+    def _database_check(self, mode, uid="0", url=True):
+        with tempfile.TemporaryDirectory() as td:
+            fake_psql = Path(td) / "psql"
+            fake_psql.write_text(
+                '#!/bin/bash\ncase "${FAKE_MODE}" in\n'
+                '  down) exit 2 ;;\n  none) echo ;;\n  ok) echo "admin ops" ;;\nesac\n',
+                encoding="utf-8")
+            fake_psql.chmod(0o755)
+            url_file = Path(td) / "pg-url"
+            if url:
+                url_file.write_text("postgresql://documentdb@/postgres?host=/run&port=9718\n")
+            script = (
+                f'id() {{ echo {uid}; }}\n'
+                f'documentdb_pg_bindir_candidates() {{ echo {shlex.quote(td)}; }}\n'
+                'run_as_user() { shift; "$@"; }\n'
+                + self._shell_function("status_database_check")
+                + f'\nstatus_database_check 18 {shlex.quote(str(url_file))}\n'
+            )
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                               timeout=30, env=dict(os.environ, FAKE_MODE=mode))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+
+    def test_status_database_check_reports_what_clients_would_hit(self):
+        # --status said healthy with the admin user dropped or PostgreSQL
+        # down, because it only asked systemd whether the units were active.
+        self.assertEqual(self._database_check("ok"), "ok (admin users: admin ops)")
+        self.assertTrue(self._database_check("none").startswith("no DocumentDB admin user"))
+        self.assertTrue(self._database_check("down").startswith("not answering"))
+        self.assertTrue(self._database_check("ok", uid="1000").startswith("unknown"))
+        self.assertTrue(self._database_check("ok", url=False).startswith("cannot connect"))
+
+    def test_status_fails_unless_the_database_check_passes(self):
+        body = self._shell_function("status_only")
+        self.assertIn('status_database_check "${v}" "${connection_file}"', body)
+        self.assertIn('[[ "${db_check}" == ok* || "${db_check}" == unknown* ]] || return 1', body)
+
+    def test_first_admin_creates_without_warning(self):
+        out = self._create_admin(exists=False, others="")
+        self.assertNotIn("WARN:", out)
+        self.assertIn("APPLY: Bootstrap first admin user 'alice'", out)
 
 
 class WriteRecoveryMarkerPersistsEnvFileTests(unittest.TestCase):

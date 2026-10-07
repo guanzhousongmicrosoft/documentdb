@@ -121,6 +121,11 @@ chmod 0644 %{buildroot}/etc/documentdb/gateway/SetupConfiguration.json
 # already leads with the recommended documentdb-setup, so the extra
 # Workflow-B block is verbose, not contradictory. See packaging-design.md
 # 11.4 item (t).
+# $1 is the number of installed copies: 2 or more on an upgrade.
+if [ "$1" -gt 1 ]; then
+    echo "DocumentDB Gateway upgraded."
+    exit 0
+fi
 echo "DocumentDB Gateway installed."
 echo ""
 echo "Configuration is taken from the environment first; the systemd unit"
