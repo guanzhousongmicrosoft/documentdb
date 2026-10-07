@@ -1311,9 +1311,10 @@ ParseConnectionStatusSpec(pgbson *connectionStatusSpec)
 
 
 /*
- * This method is mostly copied from pg_be_scram_build_secret in PG. The only substantial change
- * is that we use a default salt length of 28 as opposed to 16 used by PG. This is to ensure
- * compatiblity with drivers that expect a salt length of 28.
+ * This method is mostly copied from pg_be_scram_build_secret in PG. However,
+ * unlike pg_be_scram_build_secret, reject passwords that fail SASLprep so
+ * wire-protocol clients can use the resulting credentials. The default salt
+ * length is 28 rather than 16 for driver compatibility.
  */
 static char *
 PrehashPassword(const char *password)
@@ -1333,15 +1334,31 @@ PrehashPassword(const char *password)
 						errmsg("Salt length value is invalid.")));
 	}
 
-	/*
-	 * Normalize the password with SASLprep.  If that doesn't work, because
-	 * the password isn't valid UTF-8 or contains prohibited characters, just
-	 * proceed with the original password.  (See comments at top of file.)
-	 */
 	rc = pg_saslprep(password, &prep_password);
-	if (rc == SASLPREP_SUCCESS)
+	switch (rc)
 	{
-		password = (const char *) prep_password;
+		case SASLPREP_SUCCESS:
+		{
+			password = (const char *) prep_password;
+			break;
+		}
+
+		case SASLPREP_INVALID_UTF8:
+		case SASLPREP_PROHIBITED:
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Password contains prohibited characters. Use a different password.")));
+			break;
+		}
+
+		case SASLPREP_OOM:
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INTERNALERROR),
+							errmsg(
+								"An unexpected internal error has occurred, please try again.")));
+			break;
+		}
 	}
 
 	/* Generate random salt */

@@ -37,6 +37,7 @@
 * Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
 * Fix a one-byte heap overflow when parsing a `bsonsequence` from JSON. *[Bugfix]*
 * Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
+* Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
 
 ### documentdb v0.117-0 (September 10, 2026) ###
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
