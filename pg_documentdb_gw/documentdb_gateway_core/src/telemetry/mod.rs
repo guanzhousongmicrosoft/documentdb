@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * documentdb_gateway_core/src/telemetry/mod.rs
  *
@@ -18,8 +19,6 @@ pub mod consts;
 pub mod context_propagation;
 pub mod event_id;
 pub mod metrics;
-#[cfg(feature = "postgres-sql-commenter")]
-pub mod sql_commenter;
 pub mod utils;
 
 // Re-export commonly used types
