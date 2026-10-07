@@ -72,6 +72,12 @@ case "$1" in
         fi
         restart_active_services_after_upgrade "${2:-}"
 
+        # $2 is the previously configured version; the setup banners are for a first install.
+        if [ -n "${2:-}" ]; then
+            echo "DocumentDB Gateway upgraded."
+            exit 0
+        fi
+
         # Detect transitive install: if any documentdb-N stand-alone
         # package (or the documentdb meta) is already unpacked /
         # installed / pending-config in this dpkg transaction, our long
