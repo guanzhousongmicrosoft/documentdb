@@ -1097,6 +1097,85 @@ documentdb_validate_gateway_username() {
     return 0
 }
 
+# User names PostgreSQL (public, none) or the backend (its built-in roles,
+# IS_NATIVE_BUILTIN_ROLE in pg_documentdb/include/utils/role_utils.h) refuses,
+# but only once the cluster exists. Matched exactly, as they do. install.sh
+# carries a copy; a unit test keeps both equal to the header.
+DOCUMENTDB_RESERVED_USER_NAMES="public none
+    __system autoCompact backup backupAndRestore
+    clusterAdmin clusterManager clusterMonitor dbAdmin dbAdminAnyDatabase
+    dbOwner directShardOperations enableSharding killOpSession
+    manageShardBalancer MongodbAutomationAgentUserRole read readAnyDatabase
+    readWrite readWriteAnyDatabase restore root searchCoordinator userAdmin
+    userAdminAnyDatabase"
+
+# documentdb_validate_username <username> [setup_configuration_json]
+#
+# Refuse a name that would install fine and then never log in.
+documentdb_validate_username() {
+    local username="$1" bytes reserved
+    bytes=$(LC_ALL=C; echo "${#username}")
+
+    if [[ -z "${username}" || "${username}" == -* ]]; then
+        echo "Error: username '${username}' is empty or looks like an option; check that the option was given a value." >&2
+        return 1
+    fi
+    # Clients send these as SCRAM escapes (=2C, =3D) the gateway doesn't decode.
+    if [[ "${username}" == *[,=]* ]]; then
+        echo "Error: username '${username}' contains ',' or '=', which the gateway cannot match at login." >&2
+        return 1
+    fi
+    if (( bytes > 63 )); then
+        echo "Error: username '${username}' is ${bytes} bytes; PostgreSQL role names are at most 63." >&2
+        return 1
+    fi
+    for reserved in ${DOCUMENTDB_RESERVED_USER_NAMES}; do
+        if [[ "${username}" == "${reserved}" ]]; then
+            echo "Error: username '${username}' is reserved by PostgreSQL or DocumentDB." >&2
+            return 1
+        fi
+    done
+    documentdb_validate_gateway_username "$@"
+}
+
+DOCUMENTDB_PASSWORD_RULE="must be one non-empty line of printable ASCII; one trailing newline (LF or CRLF) is allowed."
+
+# documentdb_check_password <password> <label>
+#
+# Clients SASLprep a password before SCRAM and refuse control characters and
+# some non-ASCII, while the server stores the raw bytes, so such a password
+# never logs in. ASCII-only is a stopgap until the backend refuses SASLprep
+# failures (documentdb/documentdb#765).
+documentdb_check_password() {
+    local LC_ALL=C
+    [[ -n "$1" && "$1" != *[![:print:]]* ]] && return 0
+    echo "Error: $2 ${DOCUMENTDB_PASSWORD_RULE}" >&2
+    return 1
+}
+
+# documentdb_read_password <var> <label>
+#
+# Read a password file or pipe from stdin into <var>, dropping one trailing
+# LF and a CR before it.
+documentdb_read_password() {
+    # Prefixed locals so the nameref never resolves to one of them.
+    local -n _ddb_password_out="$1"
+    local _ddb_raw=""
+
+    # read -d '' succeeds only on a NUL, which would cut the password short.
+    if IFS= read -r -d '' _ddb_raw; then
+        echo "Error: $2 ${DOCUMENTDB_PASSWORD_RULE}" >&2
+        return 1
+    fi
+    if [[ "${_ddb_raw}" == *$'\n' ]]; then
+        _ddb_raw="${_ddb_raw%?}"
+        # Test first: a suffix strip that finds no match is quadratic in bash.
+        [[ "${_ddb_raw}" != *$'\r' ]] || _ddb_raw="${_ddb_raw%?}"
+    fi
+    documentdb_check_password "${_ddb_raw}" "$2" || return 1
+    _ddb_password_out="${_ddb_raw}"
+}
+
 # ─────────────────────────────────────────────────────────────────────────
 # port→PID identity primitives (root-capable, /proc-only)
 # ─────────────────────────────────────────────────────────────────────────
