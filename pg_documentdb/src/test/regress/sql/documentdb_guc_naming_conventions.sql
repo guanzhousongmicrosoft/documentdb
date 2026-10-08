@@ -91,7 +91,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableSchemaValidation'),
     ('documentdb.enableSortPushToAccumulatorWithPrefix'),
     ('documentdb.enableStatementTimeout'),
-    ('documentdb.enableStrictAddToSetModifierValidation'),
     ('documentdb.enableTailableCursorMaxAwaitTime'),
     ('documentdb.enableTTLBatchObservability'),
     ('documentdb.enableTTLDescSort'),

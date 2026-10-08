@@ -470,11 +470,6 @@ bool EnableCompositeSecondaryPathOrderPushdown =
 bool EnableOrderedSaopMultiRangeSkipAdvance =
 	DEFAULT_ENABLE_ORDERED_SAOP_MULTI_RANGE_SKIP_ADVANCE;
 
-/* Added in v0.114, enabled in v0.114, remove after v0.117 */
-#define DEFAULT_ENABLE_STRICT_ADDTOSET_MODIFIER_VALIDATION true
-bool EnableStrictAddToSetModifierValidation =
-	DEFAULT_ENABLE_STRICT_ADDTOSET_MODIFIER_VALIDATION;
-
 /* Added on v1.1, enabled on v1.1, remove after v1.3 */
 #define DEFAULT_ENABLE_SAMPLE_SCAN_PUSHDOWN_FOR_DYNAMIC_CURSOR true
 bool EnableSampleScanPushdownForDynamicCursor =
@@ -1487,14 +1482,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to enable skipping to TID for dynamic index scans for RUM cursors."),
 		NULL, &EnableRumDynamicIndexScansSkipToTid,
 		DEFAULT_ENABLE_RUM_DYNAMIC_INDEX_SCANS_SKIP_TO_TID,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enableStrictAddToSetModifierValidation", newGucPrefix),
-		gettext_noop(
-			"Reject $position/$slice/$sort (or any non-$each sibling) inside $addToSet, matching MongoDB behavior."),
-		NULL, &EnableStrictAddToSetModifierValidation,
-		DEFAULT_ENABLE_STRICT_ADDTOSET_MODIFIER_VALIDATION,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
