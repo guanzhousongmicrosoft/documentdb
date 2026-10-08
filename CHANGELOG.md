@@ -21,11 +21,11 @@
 * Keep ordered RUM scans reading a posting tree past a singleton leaf so visible matches in later leaves are not skipped. *[Bugfix]*
 * Fix a crash or wrong results in the no-sort `$firstN`/`$lastN` accumulators when a value's size is a multiple of 64 bytes. *[Bugfix]*
 * Fix a gateway panic when the system connection budget exceeds the configured maximum connections. *[Bugfix]*
+
+### documentdb v0.117-0 (September 10, 2026) ###
 * Keep let-only single-document update selection stable when a cached candidate plan switches to generic execution. *[Bugfix]*
 * Reject embedded null characters in command namespaces when `documentdb.enable_null_collection_validation` is enabled. *[Bugfix]*
 * Reject NaN `$bucketAuto` group values when `granularity` is specified instead of reporting an internal preferred-number-series error. *[Bugfix]*
-
-### documentdb v0.117-0 (September 10, 2026) ###
 * Estimate `_id` btree range and prefix filters as a merged range instead of multiplying the lower/upper bounds as independent clauses, fixing large mid-range selectivity overestimates. Engages when per-collection planner statistics exist for the relation, or when `enableBsonSelectivityFromBtreeStats` is set, and the required operators are available in the installed schema. *[Bugfix/Perf]*
 * Fix a backend crash when the with-expr `$min`, `$max`, `$first`, and `$last` accumulators ran under a parallel partial-aggregation plan: their transition state embeds pointers only valid in the process that built it, which became dangling when PostgreSQL copied the raw state across a parallel worker boundary. These accumulators are now declared parallel-unsafe, and parallel-safe internal-state variants (`bson*withexprinternal`) were added that transfer their state via serialize/deserialize functions. *[Bugfix]*
 * Ignore null and missing values in `$mergeObjects` accumulators, returning an empty object when a group has no object inputs instead of reporting an internal input-format error or leaking an empty field. *[Bugfix]*
