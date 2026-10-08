@@ -22,12 +22,6 @@
 #include "utils/sort_utils.h"
 #include "collation/collation.h"
 
-/* --------------------------------------------------------- */
-/* Forward declaration */
-/* --------------------------------------------------------- */
-
-extern bool EnableStrictAddToSetModifierValidation;
-
 typedef enum
 {
 	BITWISE_OPERATOR_AND,
@@ -1297,7 +1291,7 @@ ValidateAddToSetWithDollarEach(const bson_value_t *updateValue,
 		}
 	}
 
-	if (EnableStrictAddToSetModifierValidation && *isEach && unexpectedKey != NULL)
+	if (*isEach && unexpectedKey != NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 						errmsg(

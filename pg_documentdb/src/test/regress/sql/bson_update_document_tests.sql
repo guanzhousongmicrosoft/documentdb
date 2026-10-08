@@ -230,11 +230,6 @@ SELECT documentdb_api_internal.update_bson_document('{"_id": 1, "key": [1,2]}', 
 -- $addToSet with no $each: dollar-prefixed key is treated as a literal value to add
 SELECT documentdb_api_internal.update_bson_document('{"_id": 1, "key": [1,2]}', '{ "": { "$addToSet": { "key": { "$position": 1 } } } }', '{}', NULL, NULL, NULL) as update_bson_document;
 
--- GUC off path: lenient mode preserved (no error, modifier silently ignored)
-SET documentdb.enableStrictAddToSetModifierValidation TO off;
-SELECT documentdb_api_internal.update_bson_document('{"_id": 1, "key": [1,2]}', '{ "": { "$addToSet": { "key": { "$each": [3,4], "$position": 1 } } } }', '{}', NULL, NULL, NULL) as update_bson_document;
-RESET documentdb.enableStrictAddToSetModifierValidation;
-
 -- update scenario negative tests: $inc
 SELECT documentdb_api_internal.update_bson_document('{"_id": 5, "a": [1,2] }', '{ "": { "$inc": { "a": 30 } } }', '{}', NULL, NULL, NULL);
 SELECT documentdb_api_internal.update_bson_document('{"_id": 5, "a": {"x":1} }', '{ "": { "$inc": { "a": 30 } } }', '{}', NULL, NULL, NULL);
