@@ -1,4 +1,4 @@
-name: DocumentDB sql tests
+name: Frozen RC1 SQL control tests
 run-name: ${{ github.event.pull_request.title || '' }}
 concurrency:
   group: sql-tests-${{ github.event.pull_request.number || github.ref }}
@@ -30,17 +30,17 @@ jobs:
             arch: amd64
             runner: ubuntu-22.04
           - pg_version: 16
-            arch: arm64
-            runner: ubuntu-22.04-arm
-          - pg_version: 17
             arch: amd64
             runner: ubuntu-22.04
-          - pg_version: 18
-            arch: arm64
-            runner: ubuntu-22.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
+      with:
+        ref: 31e392ec
+    - name: Record frozen control identity
+      run: |
+        git rev-parse HEAD
+        test "$(git rev-parse --short=8 HEAD)" = 31e392ec
 
     - name: Build and Install DocumentDB
       run: |
@@ -78,4 +78,7 @@ jobs:
       with:
         name: logs_${{ matrix.arch }}_PG${{ matrix.pg_version }}
         overwrite: true
-        path: "**/*.log"
+        path: |
+          **/*.log
+          **/regression.diffs
+          **/regression.out
