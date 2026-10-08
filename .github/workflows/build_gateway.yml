@@ -230,8 +230,14 @@ jobs:
           --arg run_id "$GITHUB_RUN_ID" \
           --arg pg_major '${{ matrix.pg_version }}' \
           --arg architecture '${{ matrix.arch }}' \
-          '{source_sha,workflow_sha,version,image,run_id,pg_major,architecture}' \
+          '{source_sha:$source_sha,workflow_sha:$workflow_sha,version:$version,
+            image:$image,run_id:$run_id,pg_major:$pg_major,architecture:$architecture}' \
           > exported-image/provenance.json
+        jq -e --arg source "$RELEASE_SOURCE_SHA" \
+          '.source_sha == $source and .version == "1.0~rc2" and
+           .architecture == "amd64" and (.workflow_sha | length) == 40 and
+           (.image | length) > 0 and (.run_id | length) > 0' \
+          exported-image/provenance.json
         cd exported-image
         sha256sum image.tar.zst image-inspect.json provenance.json > SHA256SUMS
     - name: Upload tested image
