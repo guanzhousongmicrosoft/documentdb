@@ -25,11 +25,19 @@
 * Prevent a backend crash by rejecting `$documents` directly inside a `$facet` sub-pipeline. *[Bugfix]*
 * Enforce `$facet` restrictions on `$collStats`, `$facet`, `$geoNear`, `$indexStats`, and `$planCacheStats` in nested `$lookup` and `$unionWith` pipelines while preserving parent-stage validation and valid collectionless pipelines. *[Bugfix]*
 * Preserve UTF-8 string boundaries in trim expressions and string-to-binData conversions. *[Bugfix]*
-* Derive `$merge` target permissions from its configured actions instead of unconditionally requiring read, insert, and update, and avoid requiring update permission for `$out`'s insert-only query. *[Bugfix]*
+* Require insert and/or update permission on a `$merge` or `$out` target collection according to the stage's configured actions, instead of only read permission, so a read-only user can no longer write through these stages. *[Bugfix/Security]*
 * Limit result string size for `$concat`. *[Bugfix]*
 * Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
 * Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
 * Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
+* Run the permission check for `find` and `aggregate` with `batchSize: 0`, which returned a cursor on collections the caller could not read. *[Bugfix/Security]*
+* Write the same generated `_id` to the document and its stored object ID in `$merge`/`$out`, so inserted documents without `_id` are found by `_id` lookups. Guarded by the default-on `documentdb.enable_merge_generated_id_consistency` setting. *[Bugfix]*
+* Fix a one-byte heap overflow when parsing a `bsonsequence` from JSON. *[Bugfix]*
+* Fix an internal error for `$group` over a `$sort` whose trailing key opposes the composite index direction. Guarded by the default-on `documentdb.enable_skip_setting_order_scan_direction_for_full_scan_expr` setting. *[Bugfix]*
+* Fix ordered scalar-array (`$in`) index scans across multiple unsatisfiable ranges. Guarded by the default-on `documentdb.enable_ordered_saop_multi_range_skip_advance` setting. *[Bugfix]*
+* Harden ordered RUM index scans against an emptied leftmost posting-tree leaf and set the recheck flag on the correct bound. *[Bugfix]*
+* Exit the gateway with an error instead of panicking when PostgreSQL is unreachable at startup, and stop the background-worker gateway instead of leaving it idle. *[Bugfix]*
+* Return retryable or specific error codes from the gateway for backend connection, transport, and pool failures and for malformed legacy wire-protocol requests instead of `InternalError`. *[Bugfix]*
 
 ### documentdb v0.117-0 (September 10, 2026) ###
 * Keep let-only single-document update selection stable when a cached candidate plan switches to generic execution. *[Bugfix]*

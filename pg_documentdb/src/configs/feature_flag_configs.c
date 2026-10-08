@@ -257,7 +257,7 @@ bool EnableScalarAggregateIndexPushdown =
 bool EnableScalarAggregateAccumulatorPathCollection =
 	DEFAULT_ENABLE_SCALAR_AGGREGATE_ACCUMULATOR_PATH_COLLECTION;
 
-/* Added in v1.1, enabled in v1.1, remove after v1.3 */
+/* Added in v1.0, enabled in v1.0, remove after v1.3 */
 #define DEFAULT_ENABLE_SKIP_SETTING_ORDER_SCAN_DIRECTION_FOR_FULL_SCAN_EXPR true
 bool EnableSkipSettingOrderScanDirectionForFullScanExpr =
 	DEFAULT_ENABLE_SKIP_SETTING_ORDER_SCAN_DIRECTION_FOR_FULL_SCAN_EXPR;
@@ -469,7 +469,7 @@ bool EnableCrossIndexBitmapOrSortMerge =
 bool EnableCompositeSecondaryPathOrderPushdown =
 	DEFAULT_ENABLE_COMPOSITE_SECONDARY_PATH_ORDER_PUSHDOWN;
 
-/* Added on v1.1, enabled on v1.1, remove after v1.3 */
+/* Added in v1.0, enabled in v1.0, remove after v1.3 */
 #define DEFAULT_ENABLE_ORDERED_SAOP_MULTI_RANGE_SKIP_ADVANCE true
 bool EnableOrderedSaopMultiRangeSkipAdvance =
 	DEFAULT_ENABLE_ORDERED_SAOP_MULTI_RANGE_SKIP_ADVANCE;
@@ -518,7 +518,7 @@ bool EnableSkipCommentFieldOnUpsert = DEFAULT_ENABLE_SKIP_COMMENT_FIELD_ON_UPSER
 #define DEFAULT_ENABLE_EXISTENTIAL_NULL_ARRAY_MATCH true
 bool EnableExistentialNullArrayMatch = DEFAULT_ENABLE_EXISTENTIAL_NULL_ARRAY_MATCH;
 
-/* Added on v1.1, enabled on v1.1, remove after v1.3 */
+/* Added in v1.0, enabled in v1.0, remove after v1.3 */
 #define DEFAULT_ENABLE_MERGE_GENERATED_ID_CONSISTENCY true
 bool EnableMergeGeneratedIdConsistency = DEFAULT_ENABLE_MERGE_GENERATED_ID_CONSISTENCY;
 
