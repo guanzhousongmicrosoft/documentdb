@@ -36,7 +36,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
-        ref: 31e392ec
+        ref: 31e392ec907e21fcd6a3e1994b847b1b8f1bcf0a
     - name: Record frozen control identity
       run: |
         git rev-parse HEAD
