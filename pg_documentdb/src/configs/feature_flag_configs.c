@@ -433,10 +433,6 @@ bool EnableRumCursorDynamicIndexScans = DEFAULT_ENABLE_RUM_CURSOR_DYNAMIC_INDEX_
 bool EnableRumDynamicIndexScansSkipToTid =
 	DEFAULT_ENABLE_RUM_DYNAMIC_INDEX_SCANS_SKIP_TO_TID;
 
-/* Added in v0.115, enabled in v0.115, remove after v0.117 */
-#define DEFAULT_ENABLE_TAILABLE_CURSOR_MAX_AWAIT_TIME true
-bool EnableTailableCursorMaxAwaitTime = DEFAULT_ENABLE_TAILABLE_CURSOR_MAX_AWAIT_TIME;
-
 /* Added in v0.115, enabled in v1.1, remove after v1.3 */
 #define DEFAULT_ENABLE_PROJECT_PUSHUP_BEFORE_UNWIND_WITH_GROUP true
 bool EnableProjectPushUpBeforeUnwindWithGroup =
@@ -1380,14 +1376,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to schedule index builds via background worker jobs."),
 		NULL, &IndexBuildsScheduledOnBgWorker,
 		DEFAULT_INDEX_BUILDS_SCHEDULED_ON_BGWORKER,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enableTailableCursorMaxAwaitTime", newGucPrefix),
-		gettext_noop(
-			"Kill switch for tailable cursor maxAwaitTimeMS support. When off, the backend ignores the maxAwaitTimeMS getMore field, treats maxTimeMS as a statement timeout for all cursor kinds, and never returns a polling hint to the gateway."),
-		NULL, &EnableTailableCursorMaxAwaitTime,
-		DEFAULT_ENABLE_TAILABLE_CURSOR_MAX_AWAIT_TIME,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

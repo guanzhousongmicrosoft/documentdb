@@ -257,10 +257,6 @@ pub trait DynamicConfiguration: Send + Sync + Debug {
         self.get_i32("tailableCursorAwaitTimeSliceIntervalMs", 100)
     }
 
-    fn enable_tailable_cursor_max_await_time(&self) -> bool {
-        self.get_bool("enableTailableCursorMaxAwaitTime", true)
-    }
-
     /// Returns the parsed `ClusterVersion` of the deployed `documentdb` extension
     /// as reported in the topology, or `None` if the topology has no version entry
     /// or it fails to parse.
