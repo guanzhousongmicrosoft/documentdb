@@ -477,6 +477,11 @@ bool EnableSampleScanPushdownForDynamicCursor =
 bool EnableAddShardKeyOnlyOnPrimaryKeyFilters =
 	DEFAULT_ENABLE_ADD_SHARD_KEY_ONLY_ON_PRIMARY_KEY_FILTERS;
 
+/* Added on v1.1, pending stabilization, enable on v1.3 */
+#define DEFAULT_ENABLE_SUBQUERY_PUSHDOWN_FOR_MATCH_ON_PERSISTED_CURSORS false
+bool EnableSubqueryPushdownForMatchOnPersistedCursors =
+	DEFAULT_ENABLE_SUBQUERY_PUSHDOWN_FOR_MATCH_ON_PERSISTED_CURSORS;
+
 /* Added in v0.114, enabled in v0.114, remove after v0.117 */
 #define DEFAULT_ENABLE_DOLLAR_SAMPLE_RESERVOIR_SCAN true
 bool EnableDollarSampleReservoirScan = DEFAULT_ENABLE_DOLLAR_SAMPLE_RESERVOIR_SCAN;
@@ -1513,6 +1518,19 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableAddShardKeyOnlyOnPrimaryKeyFilters,
 		DEFAULT_ENABLE_ADD_SHARD_KEY_ONLY_ON_PRIMARY_KEY_FILTERS,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_subquery_pushdown_for_match_on_persisted_cursors",
+				 newGucPrefix),
+		gettext_noop(
+			"Whether to enable pushdown of subqueries for match operations when the "
+			"query uses persisted cursors (i.e. dynamic cursors are not enabled)."),
+		NULL,
+		&EnableSubqueryPushdownForMatchOnPersistedCursors,
+		DEFAULT_ENABLE_SUBQUERY_PUSHDOWN_FOR_MATCH_ON_PERSISTED_CURSORS,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);

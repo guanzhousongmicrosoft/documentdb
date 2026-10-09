@@ -101,6 +101,7 @@ extern bool EnableSortPushToAccumulatorWithPrefix;
 extern bool EnableSampleScanPushdownForDynamicCursor;
 extern bool EnableDistinctIndexPushdown;
 extern bool EnableDistinctExistsFilterPushdown;
+extern bool EnableSubqueryPushdownForMatchOnPersistedCursors;
 extern bool EnableDollarSampleReservoirScan;
 extern bool EnableSupportFunctionIdPushdown;
 
@@ -4983,7 +4984,9 @@ HandleMatchWithIndexFilter(const bson_value_t *existingValue, Query *query,
 	TargetEntry *entry = linitial(query->targetList);
 
 	if (context->joinStatus == JoinStageStatus_NoJoinsOrUnions &&
-		EnableDynamicCursors &&
+		(EnableDynamicCursors ||
+		 (EnableSubqueryPushdownForMatchOnPersistedCursors &&
+		  context->requiresPersistentCursor)) &&
 		IsA(entry->expr, FuncExpr))
 	{
 		/* If we're not doing a filter on a Var field and it's being
@@ -4994,6 +4997,15 @@ HandleMatchWithIndexFilter(const bson_value_t *existingValue, Query *query,
 		 * To achieve this and ensure that subquery pullup works, we add an
 		 * offset 0 (since offset 0) is skipped by the planner but not by
 		 * the subquery optimizer, and push it to a subquery.
+		 * This benefits dynamic cursors as well as persisted cursors:
+		 * persisted cursors track continuation via query-level draining
+		 * (portal/file position), not by reaching into scan nodes, so the
+		 * added SubqueryScan is transparent and needs no extra handling.
+		 * For persisted cursors we only do this when the pipeline already
+		 * resolves to a persistent cursor: the added SubqueryScan cannot be
+		 * streamed over, so applying it to a streaming-eligible pipeline would
+		 * force it onto a persistent cursor, which is a regression. Dynamic
+		 * cursors see through the SubqueryScan, so they are unaffected.
 		 * TODO: Be more aggressive in the subquery pushdown (not just if
 		 * there exists a $lookup somewhere in the pipeline).
 		 */
@@ -9387,6 +9399,18 @@ RequiresPersistentCursorLimit(const bson_value_t *pipelineValue, bool *isSingleR
 	if (pipelineValue->value_type != BSON_TYPE_EOD &&
 		BsonValueIsNumber(pipelineValue))
 	{
+		bool checkFixedInteger = true;
+		if (!IsBsonValue64BitInteger(pipelineValue, checkFixedInteger))
+		{
+			/* A numeric value that cannot be expressed as a 64-bit integer
+			 * (e.g. NaN or out of range). BsonValueAsInt64 would raise a
+			 * generic conversion error here; defer to ParseLimitValue in the
+			 * stage handler to raise the specific validation error, and treat
+			 * the stage conservatively as persistence-requiring.
+			 */
+			return true;
+		}
+
 		int64_t limit = BsonValueAsInt64(pipelineValue);
 		if (limit == 1)
 		{
@@ -9415,6 +9439,18 @@ RequiresPersistentCursorSkip(const bson_value_t *pipelineValue, bool *isSingleRo
 	if (pipelineValue->value_type != BSON_TYPE_EOD &&
 		BsonValueIsNumber(pipelineValue))
 	{
+		bool checkFixedInteger = true;
+		if (!IsBsonValueUnquantized64BitInteger(pipelineValue, checkFixedInteger))
+		{
+			/* A numeric value that cannot be expressed as a 64-bit integer
+			 * (e.g. NaN or out of range). BsonValueAsInt64 would raise a
+			 * generic conversion error here; defer to ParseSkipValue in the
+			 * stage handler to raise the specific validation error, and treat
+			 * the stage conservatively as persistence-requiring.
+			 */
+			return true;
+		}
+
 		int64_t skip = BsonValueAsInt64(pipelineValue);
 		return skip != 0;
 	}
@@ -9596,6 +9632,48 @@ ExtractAggregationStages(const bson_value_t *pipelineValue,
 		stage->stageValue = stageElement.bsonValue;
 
 		aggregationStages = lappend(aggregationStages, stage);
+
+		/*
+		 * Determine up front whether the fully resolved query will resolve to a
+		 * persistent cursor. requiresPersistentCursor is otherwise only known
+		 * incrementally during mutation (a stage sees the stages before it, but
+		 * not after it), so a stage that wants to avoid forcing a
+		 * streaming-eligible pipeline onto a persistent cursor has no way to see
+		 * a later persistence-forcing stage (e.g. a trailing $sort). Raise
+		 * requiresPersistentCursor here, while resolving the stage list, so the
+		 * decision is available to every stage when the pipeline is later
+		 * mutated. Pipeline optimization runs after extraction and only
+		 * simplifies or removes stages (never introduces a new
+		 * persistence-forcing stage), so this pre-optimization raise can only
+		 * ever be conservative: it raises requiresPersistentCursor in a superset
+		 * of the cases the per-stage accumulation during mutation would, which
+		 * is safe because the value is monotonic and mutation still accumulates
+		 * on the optimized stages.
+		 *
+		 * requiresPersistentCursor is monotonic (only ever raised from false to
+		 * true). ExtractAggregationStages also runs for sub-pipeline extracts
+		 * (e.g. resolved views) on the same context, and each such extract ORs
+		 * in its own stages' forces; because the value only ever climbs, those
+		 * extracts can only raise it, so by the time the outer pipeline is
+		 * mutated it reflects whether any stage anywhere in the query forces
+		 * persistence.
+		 *
+		 * The early raise is only needed by the persisted-cursor $match pushdown
+		 * gate in HandleMatchWithIndexFilter, which short-circuits on
+		 * EnableSubqueryPushdownForMatchOnPersistedCursors. Gate the check on the
+		 * same GUC so that when the feature is off there is zero added work and
+		 * the prior code path is preserved.
+		 */
+		if (EnableSubqueryPushdownForMatchOnPersistedCursors &&
+			!context->requiresPersistentCursor)
+		{
+			bool ignoreSingleRowResult = false;
+			if (definition->requiresPersistentCursor(&stage->stageValue,
+													 &ignoreSingleRowResult))
+			{
+				context->requiresPersistentCursor = true;
+			}
+		}
 	}
 
 	/*
