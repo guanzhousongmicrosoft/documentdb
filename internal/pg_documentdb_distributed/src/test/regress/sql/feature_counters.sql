@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation. All rights reserved.
+-- SPDX-License-Identifier: MIT
+
 SET search_path TO documentdb_api_catalog, documentdb_core, documentdb_api, public;
 SET citus.next_shard_id TO 6750000;
 SET documentdb.next_collection_id TO 67500;
@@ -518,3 +521,23 @@ RESET documentdb.defaultUseCompositeOpClass;
 
 SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
 SELECT documentdb_api.drop_collection('db', 'orderedFirstCandidate');
+
+-- Collated term truncation is counted even when rejection is disabled.
+SET documentdb_core.enableCollation TO on;
+SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+SET documentdb.indexTermLimitOverride TO 50;
+SET documentdb.fail_on_collated_index_term_truncation TO off;
+SELECT documentdb_api_internal.create_indexes_non_concurrently(
+    'db',
+    '{"createIndexes":"collatedTruncationCounter","indexes":[{"key":{"a":1},"name":"collated_a_1","collation":{"locale":"en","strength":1},"enableCompositeTerm":true}]}',
+    true);
+SELECT count(*) * 0 AS count FROM documentdb_api_internal.command_feature_counter_stats(true);
+SELECT documentdb_api.insert_one(
+    'db', 'collatedTruncationCounter',
+    format('{"_id":1,"a":"%s"}', repeat('a', 80))::documentdb_core.bson);
+SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
+RESET documentdb.fail_on_collated_index_term_truncation;
+RESET documentdb.indexTermLimitOverride;
+RESET documentdb.enableCollationWithNonUniqueOrderedIndexes;
+RESET documentdb_core.enableCollation;
+SELECT documentdb_api.drop_collection('db', 'collatedTruncationCounter');

@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/configs/feature_flag_configs.c
  *
@@ -530,6 +531,11 @@ bool SkipFailOnCollation = DEFAULT_SKIP_FAIL_ON_COLLATION;
 bool EnableCollationWithNonUniqueOrderedIndexes =
 	DEFAULT_ENABLE_COLLATION_WITH_NON_UNIQUE_ORDERED_INDEXES;
 
+/* Added on v1.2, enabled on v1.2, remove after v1.4 */
+#define DEFAULT_FAIL_ON_COLLATED_INDEX_TERM_TRUNCATION true
+bool FailOnCollatedIndexTermTruncation =
+	DEFAULT_FAIL_ON_COLLATED_INDEX_TERM_TRUNCATION;
+
 /*
  * SECTION: Cluster administration & DDL feature flags
  */
@@ -742,6 +748,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Determines whether collation is supported for non-unique ordered/composite indexes."),
 		NULL, &EnableCollationWithNonUniqueOrderedIndexes,
 		DEFAULT_ENABLE_COLLATION_WITH_NON_UNIQUE_ORDERED_INDEXES,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.fail_on_collated_index_term_truncation", newGucPrefix),
+		gettext_noop(
+			"Whether to fail when a collated term generated from an indexed or query value requires truncation."),
+		NULL, &FailOnCollatedIndexTermTruncation,
+		DEFAULT_FAIL_ON_COLLATED_INDEX_TERM_TRUNCATION,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

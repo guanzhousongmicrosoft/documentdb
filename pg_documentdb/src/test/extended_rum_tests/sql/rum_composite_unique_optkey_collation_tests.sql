@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- SPDX-License-Identifier: MIT
+
 SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 
 SET documentdb.next_collection_id TO 2800;
@@ -102,6 +105,7 @@ SELECT count(*) as array_rows FROM documentdb_api.collection('optkeycolldb', 'co
 -- truncated terms and collide; the runtime recheck folds the full values through
 -- the collation. Case-only differences beyond the limit are collated duplicates,
 -- while genuinely different letters beyond the limit are distinct.
+SET documentdb.fail_on_collated_index_term_truncation TO off;
 SET documentdb.indexTermLimitOverride TO 50;
 SELECT documentdb_api_internal.create_indexes_non_concurrently('optkeycolldb',
   '{ "createIndexes": "coll_trunc", "indexes": [ { "key": { "t": 1 }, "name": "t_coll_1", "unique": true, "collation": { "locale": "en", "strength": 2 } }]}', TRUE);
@@ -148,6 +152,7 @@ SELECT documentdb_api.insert_one('optkeycolldb', 'coll_nested_trunc',
 RESET client_min_messages;
 SELECT count(*) as nested_trunc_rows FROM documentdb_api.collection('optkeycolldb', 'coll_nested_trunc');
 RESET documentdb.indexTermLimitOverride;
+RESET documentdb.fail_on_collated_index_term_truncation;
 
 -- ===== Section 9: Feature-flag matrix for collated unique index creation =====
 -- Creating a collated unique index requires BOTH flags on:
