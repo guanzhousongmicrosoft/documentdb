@@ -1789,6 +1789,24 @@ PostProcessIndexForReIndex(int64 collectionId, IndexDetails *details, bool
 		psprintf("ALTER INDEX %s.%s RENAME to %s", ApiDataSchemaName, reindex_indexname,
 				 base_indexname),
 		readOnly, SPI_OK_UTILITY, &isNullIgnore);
+
+	/*
+	 * The renames swap only the names, so objects that depend on the original
+	 * index (e.g. the planner statistics object, which has an auto dependency
+	 * on it) are still attached to what is now the "_ccold" index. Move them to
+	 * the rebuilt index the same way REINDEX CONCURRENTLY does when it swaps
+	 * indexes. Otherwise dropping "_ccold" cascades to those objects, which
+	 * removes them from the rebuilt index and makes DROP INDEX CONCURRENTLY fail
+	 * with "must be first action in transaction" since the cascaded drop
+	 * assigns a transaction id before the index itself is dropped.
+	 */
+	Oid oldIndexOid = get_relname_relid(old_indexname, ApiDataNamespaceOid());
+	Oid newIndexOid = get_relname_relid(base_indexname, ApiDataNamespaceOid());
+	if (OidIsValid(oldIndexOid) && OidIsValid(newIndexOid))
+	{
+		changeDependenciesOn(RelationRelationId, oldIndexOid, newIndexOid);
+		CommandCounterIncrement();
+	}
 }
 
 
