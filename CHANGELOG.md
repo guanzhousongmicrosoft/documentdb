@@ -1,4 +1,5 @@
 ### documentdb v1.2-0 (Unreleased) ###
+* Estimate direct equality, range, and regular-expression children and pushed index bounds for `$elemMatch` from per-path statistics instead of using a fixed fallback. Controlled by the default-on `documentdb.enable_elem_match_selectivity_from_stats` setting, with compound-index selection regression coverage. *[Bugfix/Perf]* ([#405](https://github.com/documentdb/documentdb/issues/405))
 * Reject collation-aware values that require truncation on both writes and indexed reads by default through the `documentdb.fail_on_collated_index_term_truncation` feature flag. *[Bugfix]* (work item 5643482)
 * Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
 * Estimate the inner side of a `$lookup` join from collected statistics instead of a fixed fallback selectivity, so an index on the `foreignField` is costed correctly. Controlled by the default-on `documentdb.enable_lookup_join_selectivity_from_stats` setting. *[Perf]*

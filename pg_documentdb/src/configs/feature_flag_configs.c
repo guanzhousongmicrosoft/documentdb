@@ -247,6 +247,11 @@ bool EnableIndexCorrelationFromStatistics =
 bool EnableCompositeRangeSelectivity =
 	DEFAULT_ENABLE_COMPOSITE_RANGE_SELECTIVITY;
 
+/* Added on v1.2, enabled on v1.2, remove after v1.5 */
+#define DEFAULT_ENABLE_ELEM_MATCH_SELECTIVITY_FROM_STATS true
+bool EnableElemMatchSelectivityFromStats =
+	DEFAULT_ENABLE_ELEM_MATCH_SELECTIVITY_FROM_STATS;
+
 /* Added in v0.111, enabled in v0.115, remove after v1.0 */
 #define DEFAULT_ENABLE_PER_COLLECTION_PLANNER_STATISTICS true
 bool EnablePerCollectionPlannerStatistics =
@@ -1336,6 +1341,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether to combine multiple range conditions on a composite index path for selectivity estimation."),
 		NULL, &EnableCompositeRangeSelectivity,
 		DEFAULT_ENABLE_COMPOSITE_RANGE_SELECTIVITY,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_elem_match_selectivity_from_stats", newGucPrefix),
+		gettext_noop(
+			"Whether to estimate $elemMatch predicates and retained index bounds from per-path statistics instead of fixed fallback selectivity."),
+		NULL, &EnableElemMatchSelectivityFromStats,
+		DEFAULT_ENABLE_ELEM_MATCH_SELECTIVITY_FROM_STATS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
