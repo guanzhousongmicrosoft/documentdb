@@ -91,7 +91,6 @@ extern bool DefaultInlineWriteOperations;
 extern int MaxAggregationStagesAllowed;
 
 extern bool ForceGroupSubqueryElimination;
-extern bool EnableTailableCursorMaxAwaitTime;
 extern bool RemoveMatchNamespaceFilters;
 extern bool EnableOrderByIndexTerm;
 extern bool EnableGroupByCompoundIdIndexPushdown;
@@ -3511,7 +3510,7 @@ ParseGetMore(text **databaseName, pgbson *getMoreSpec, QueryData *queryData, boo
 			EnsureTopLevelFieldIsNumberLike("getMore.maxTimeMS", value);
 			int32_t maxTimeMS = BsonValueAsInt32(value);
 
-			if (EnableTailableCursorMaxAwaitTime && isTailableCursor)
+			if (isTailableCursor)
 			{
 				/*
 				 * For tailable cursors such as change streams, drivers stash the
@@ -3529,10 +3528,6 @@ ParseGetMore(text **databaseName, pgbson *getMoreSpec, QueryData *queryData, boo
 			{
 				/*
 				 * For regular cursors, maxTimeMS is a statement timeout.
-				 * Also the fallback path when the maxAwaitTimeMS feature is
-				 * disabled via the EnableTailableCursorMaxAwaitTime kill switch:
-				 * we revert to the pre-feature behavior of treating maxTimeMS
-				 * as a statement timeout for tailable cursors as well.
 				 */
 				SetExplicitStatementTimeout(maxTimeMS);
 			}
