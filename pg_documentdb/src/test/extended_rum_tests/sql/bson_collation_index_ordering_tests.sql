@@ -510,6 +510,8 @@ FROM documentdb_api_internal.documentdb_rum_page_get_entries(
 
 
 -- ===== Section 14: Truncated long strings with numericOrdering=true ======
+SET documentdb.fail_on_collated_index_term_truncation TO off;
+
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
   'ord_coll_ordered_db',
   '{
@@ -540,6 +542,8 @@ FROM documentdb_api_internal.documentdb_rum_page_get_entries(
     public.get_raw_page('documentdb_data.documents_rum_index_8129', 1), 
     'documentdb_data.documents_rum_index_8129'::regclass
 ) entry;
+
+RESET documentdb.fail_on_collated_index_term_truncation;
 
 
 -- ===== Section 15: Ordered scans with collation — $not comparison operators ======

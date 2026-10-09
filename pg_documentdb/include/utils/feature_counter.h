@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * include/utils/feature_counter.h
  *
@@ -259,6 +260,7 @@ typedef enum
 	FEATURE_COLLATION,
 	FEATURE_COLLATION_CREATE_COLLECTION,
 	FEATURE_COLLATION_CREATE_INDEX,
+	FEATURE_COLLATION_INDEX_TERM_TRUNCATION,
 	FEATURE_COLLATION_UNSUPPORTED_GROUP_ACCUMULATOR,
 
 	/* Feature counter region - Commands */

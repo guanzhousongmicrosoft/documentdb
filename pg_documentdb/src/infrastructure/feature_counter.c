@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/oss_backend/infrastructure/feature_counter.c
  *
@@ -272,6 +273,7 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_COLLATION] = "collation",
 	[FEATURE_COLLATION_CREATE_COLLECTION] = "collation_with_collection",
 	[FEATURE_COLLATION_CREATE_INDEX] = "collation_with_indexes",
+	[FEATURE_COLLATION_INDEX_TERM_TRUNCATION] = "collation_index_term_truncation",
 	[FEATURE_COLLATION_UNSUPPORTED_GROUP_ACCUMULATOR] =
 		"collation_unsupported_group_accumulator",
 
