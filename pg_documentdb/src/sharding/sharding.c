@@ -1475,6 +1475,13 @@ ShardCollectionCore(ShardCollectionArgs *args)
 							args->databaseName, args->collectionName)));
 	}
 
+	if (collection->options.collationString[0] != '\0')
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg(
+							"Sharding, resharding, or unsharding a collection with a non-simple default collation is not supported")));
+	}
+
 	if (!args->forceRedistribution &&
 		collection->shardKey != NULL && PgbsonEquals(collection->shardKey,
 													 args->shardKeyDefinition))
