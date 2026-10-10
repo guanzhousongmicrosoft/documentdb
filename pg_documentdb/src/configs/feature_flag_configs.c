@@ -612,6 +612,10 @@ bool EnableUpdateWorkerSingleWriteNoSubTransaction =
 bool EnableArrayBsonStatsWithPlannerStatistics =
 	DEFAULT_ENABLE_ARRAY_BSON_STATS_WITH_PLANNER_STATISTICS;
 
+/* Added on v1.2, enabled on v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_IN_GRANULAR_SELECTIVITY true
+bool EnableInGranularSelectivity = DEFAULT_ENABLE_IN_GRANULAR_SELECTIVITY;
+
 
 /*
  * SECTION: Changestream feature flags
@@ -1456,6 +1460,15 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"enabled for new collections."),
 		NULL, &EnableArrayBsonStatsWithPlannerStatistics,
 		DEFAULT_ENABLE_ARRAY_BSON_STATS_WITH_PLANNER_STATISTICS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_in_granular_selectivity", newGucPrefix),
+		gettext_noop(
+			"Whether to estimate $in and $nin selectivity from per-collection "
+			"planner statistics."),
+		NULL, &EnableInGranularSelectivity,
+		DEFAULT_ENABLE_IN_GRANULAR_SELECTIVITY,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

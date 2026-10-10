@@ -36,6 +36,7 @@
 #include "aggregation/bson_query_common.h"
 #include "query/query_operator.h"
 #include "utils/docdb_make_funcs.h"
+#include "utils/hashset_utils.h"
 #include "utils/version_utils.h"
 #include "io/bson_traversal.h"
 #include "api_hooks.h"
@@ -47,7 +48,9 @@ extern bool EnableLookupJoinSelectivityFromStats;
 extern bool EnableElemMatchSelectivityFromStats;
 extern bool EnableElemMatchSelectivityLowerBound;
 extern bool EnableArrayBsonStatsWithPlannerStatistics;
+extern bool EnableInGranularSelectivity;
 extern bool BsonStatsEnableArrayValueUnpack;
+extern int MaxInGranularSelectivityInputSizeBytes;
 
 /* CODESYNC with system_configs.c */
 #define ARRAY_STATISTICS_MAX_SAMPLE_COUNT 128
@@ -409,6 +412,150 @@ GetCustomStatisticsSelectivityForLookup(Oid funcExpr, List *funcArgs,
 }
 
 
+/*
+ * Estimate $in by combining the selectivity of each distinct array element.
+ * This follows PostgreSQL's scalararraysel() approach for "= ANY": maintain
+ * both an independence estimate and, for distinct equality values, a
+ * disjoint-probability sum. Prefer the disjoint sum when it is in [0, 1],
+ * otherwise retain the independence estimate. Regex elements use the regex
+ * operator's generic estimator and disable the disjoint assumption because
+ * regex matches can overlap literals or other regexes. $nin is the complement
+ * of the resulting $in estimate.
+ */
+static double
+GetDollarInCustomSelectivity(PlannerInfo *planner,
+							 Node *leftOperand,
+							 const bson_value_t *rightValue,
+							 Oid selectivityOpExpr,
+							 Oid collation,
+							 int varRelId,
+							 double defaultInputSelectivity,
+							 bool isNotIn)
+{
+	if (rightValue->value_type != BSON_TYPE_ARRAY)
+	{
+		ereport(ERROR, errmsg(
+					"Unexpected non-array value for $in/$nin during selectivity estimation."));
+	}
+
+	if (EnableInGranularSelectivity && ShouldEnableBsonStatsArrayValueUnpack() &&
+		rightValue->value.v_doc.data_len <=
+		(uint32_t) MaxInGranularSelectivityInputSizeBytes)
+	{
+		double selectivity = 0.0;
+
+		bson_iter_t arrayIter;
+		BsonValueInitIterator(rightValue, &arrayIter);
+
+		double disjointSelectivity = 0.0;
+		double perItemSelectivity = 0.0;
+		bool hasRegex = false;
+		Oid regexOperatorOid = InvalidOid;
+		int i = 0;
+		Const *inValueConst = NULL;
+
+		/* TODO: Collation needs to handle deduplication of values. */
+		HTAB *seenValues = CreateBsonValueHashSet();
+		List *args = NIL;
+		while (bson_iter_next(&arrayIter))
+		{
+			CHECK_FOR_INTERRUPTS();
+
+			const bson_value_t *inElement = bson_iter_value(&arrayIter);
+
+			bool found = false;
+			hash_search(seenValues, inElement, HASH_ENTER, &found);
+
+			if (found)
+			{
+				continue;
+			}
+
+			if (i == 0)
+			{
+				inValueConst = MakeBsonConst(BsonValueToDocumentPgbson(inElement));
+				args = list_make2(leftOperand, inValueConst);
+			}
+			else
+			{
+				inValueConst = lsecond(args);
+				pfree(DatumGetPointer(inValueConst->constvalue));
+				inValueConst->constvalue = PointerGetDatum(BsonValueToDocumentPgbson(
+															   inElement));
+			}
+
+			if (inElement->value_type == BSON_TYPE_REGEX)
+			{
+				if (!OidIsValid(regexOperatorOid))
+				{
+					const MongoIndexOperatorInfo *regexOperator =
+						GetMongoIndexOperatorInfoByOperatorType(QUERY_OPERATOR_REGEX);
+					regexOperatorOid = GetMongoQueryOperatorOid(regexOperator);
+				}
+
+				const double defaultPerItemRegexSelectivity = 0.0;
+				perItemSelectivity = generic_restriction_selectivity(
+					planner, regexOperatorOid, collation, args, varRelId,
+					defaultPerItemRegexSelectivity);
+				hasRegex = true;
+			}
+			else
+			{
+				perItemSelectivity = DatumGetFloat8(DirectFunctionCall4(eqsel,
+																		PointerGetDatum(
+																			planner),
+																		ObjectIdGetDatum(
+																			BsonEqualOperatorId()),
+																		PointerGetDatum(
+																			args),
+																		Int32GetDatum(
+																			varRelId)));
+			}
+
+			selectivity = selectivity + perItemSelectivity - selectivity *
+						  perItemSelectivity;
+			disjointSelectivity += perItemSelectivity;
+
+			i++;
+		}
+
+		if (!hasRegex &&
+			disjointSelectivity >= 0.0 && disjointSelectivity <= 1.0)
+		{
+			selectivity = disjointSelectivity;
+		}
+
+		if (isNotIn)
+		{
+			CLAMP_PROBABILITY(selectivity);
+			selectivity = 1.0 - selectivity;
+		}
+
+		if (inValueConst != NULL)
+		{
+			pfree(DatumGetPointer(inValueConst->constvalue));
+			pfree(inValueConst);
+		}
+
+		if (seenValues != NULL)
+		{
+			hash_destroy(seenValues);
+		}
+
+		list_free(args);
+		return selectivity;
+	}
+
+	List *args = list_make2(leftOperand, MakeBsonConst(BsonValueToDocumentPgbson(
+														   rightValue)));
+	double selectivity = generic_restriction_selectivity(planner, selectivityOpExpr,
+														 collation, args, varRelId,
+														 defaultInputSelectivity);
+	list_free(args);
+	return selectivity;
+}
+
+
 static double
 GetCustomStatisticsSelectivity(PlannerInfo *planner, BsonIndexStrategy
 							   indexStrategy, Oid selectivityOpExpr,
@@ -419,8 +566,6 @@ GetCustomStatisticsSelectivity(PlannerInfo *planner, BsonIndexStrategy
 	/*
 	 * TODO Selectivity:
 	 * REGEX: for regex with anchored prefix, we should use range selectivity. Calculate the gte and lte boundaries selectivity.
-	 * $IN/$NIN: for $in and $nin with small set of elements (i.e <= 20) we should consider using scalararray selectivity functions
-	 * (scalararraysel/scalararraynesel), or exploring what btree does for SAOP to have the best selectivity estimate.
 	 */
 
 	List *args = NIL;
@@ -522,6 +667,26 @@ GetCustomStatisticsSelectivity(PlannerInfo *planner, BsonIndexStrategy
 																 selectivityOpExpr),
 															 PointerGetDatum(args),
 															 Int32GetDatum(varRelId)));
+			break;
+		}
+
+		case BSON_INDEX_STRATEGY_DOLLAR_IN:
+		{
+			bool isNotIn = false;
+			selectivity = GetDollarInCustomSelectivity(planner, leftOperand, rightValue,
+													   selectivityOpExpr, collation,
+													   varRelId, defaultInputSelectivity,
+													   isNotIn);
+			break;
+		}
+
+		case BSON_INDEX_STRATEGY_DOLLAR_NOT_IN:
+		{
+			bool isNotIn = true;
+			selectivity = GetDollarInCustomSelectivity(planner, leftOperand, rightValue,
+													   selectivityOpExpr, collation,
+													   varRelId, defaultInputSelectivity,
+													   isNotIn);
 			break;
 		}
 

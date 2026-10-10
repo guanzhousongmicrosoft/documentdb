@@ -49,6 +49,15 @@ int QueryPlanCacheSizeLimit = DEFAULT_QUERY_PLAN_CACHE_SIZE_LIMIT;
 #define DEFAULT_MAX_EXPLAIN_INDEX_COSTS 8
 int MaxExplainIndexCosts = DEFAULT_MAX_EXPLAIN_INDEX_COSTS;
 
+/*
+ * Caps the BSON array size for which $in/$nin selectivity is estimated
+ * element by element. The estimator runs once per applicable index.
+ */
+#define DEFAULT_MAX_IN_GRANULAR_SELECTIVITY_INPUT_SIZE_BYTES 10000
+#define MAX_IN_GRANULAR_SELECTIVITY_INPUT_SIZE_BYTES_LIMIT 30000
+int MaxInGranularSelectivityInputSizeBytes =
+	DEFAULT_MAX_IN_GRANULAR_SELECTIVITY_INPUT_SIZE_BYTES;
+
 /* Cap on the number of ordered scans merged for an $in prefix. */
 #define DEFAULT_MAX_MERGE_SORT_IN_VALUES 200
 
@@ -294,6 +303,15 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 			"Requires enableExtendedExplainPlans and enableExplainScanIndexCosts."),
 		&MaxExplainIndexCosts,
 		DEFAULT_MAX_EXPLAIN_INDEX_COSTS, 1, MAX_EXPLAIN_COSTS_SIZE,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		psprintf("%s.max_in_granular_selectivity_input_size_bytes", newGucPrefix),
+		gettext_noop(
+			"The maximum BSON array size in bytes for element-by-element $in and $nin selectivity estimation."),
+		NULL, &MaxInGranularSelectivityInputSizeBytes,
+		DEFAULT_MAX_IN_GRANULAR_SELECTIVITY_INPUT_SIZE_BYTES, 1,
+		MAX_IN_GRANULAR_SELECTIVITY_INPUT_SIZE_BYTES_LIMIT,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
