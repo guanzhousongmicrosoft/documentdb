@@ -55,7 +55,6 @@ INSERT INTO documentdb_guc_naming_baseline (name) VALUES
     ('documentdb.enableDistinctIndexPushdown'),
     ('documentdb.enableDistinctScanForGroupFirst'),
     ('documentdb.enableDollarSampleHeapSkipReservoirScan'),
-    ('documentdb.enableDollarSampleReservoirScan'),
     ('documentdb.enableDynamicCursors'),
     ('documentdb.enableExplainScanIndexCosts'),
     ('documentdb.enableExplainScanNamespaceName'),

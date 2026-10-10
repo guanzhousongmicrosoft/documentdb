@@ -159,7 +159,6 @@ extern bool EnableDynamicCursors;
 extern bool EnableDistinctCustomScan;
 extern bool EnableGroupByDistinctScan;
 extern bool EnableDistinctScanForGroupFirst;
-extern bool EnableDollarSampleReservoirScan;
 extern bool EnableMergeSortForInPrefix;
 extern bool EnablePartialFilterEvalOnPlanner;
 extern bool EnableRumIndexOnlyScanProjectionWrapper;
@@ -828,7 +827,7 @@ ExtensionRelPathlistHookCore(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	}
 
 	/* Wrap paths with ReservoirSample CustomPath (must happen after all path transforms) */
-	if (EnableDollarSampleReservoirScan && indexContext.reservoirSampleExpr != NULL)
+	if (indexContext.reservoirSampleExpr != NULL)
 	{
 		AddReservoirSampleCustomPath(root, rel, indexContext.reservoirSampleExpr);
 	}

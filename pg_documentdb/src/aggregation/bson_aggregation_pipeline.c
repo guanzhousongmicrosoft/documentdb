@@ -102,7 +102,6 @@ extern bool EnableSampleScanPushdownForDynamicCursor;
 extern bool EnableDistinctIndexPushdown;
 extern bool EnableDistinctExistsFilterPushdown;
 extern bool EnableSubqueryPushdownForMatchOnPersistedCursors;
-extern bool EnableDollarSampleReservoirScan;
 extern bool EnableSupportFunctionIdPushdown;
 
 /* GUC to config tdigest compression */
@@ -10394,13 +10393,13 @@ HandleSample(const bson_value_t *existingValue, Query *query,
 			rte->tablesample = tablesample_sys_rows;
 		}
 	}
-	else if (EnableDollarSampleReservoirScan && rte->rtekind == RTE_RELATION &&
+	else if (rte->rtekind == RTE_RELATION &&
 			 context->mongoCollection != NULL &&
 			 context->mongoCollection->shardKey == NULL &&
 			 sampleSize <= GetMaxReservoirSampleSize())
 	{
 		/*
-		 * When reservoir sampling is enabled, the target is a base relation,
+		 * When the target is a base relation,
 		 * and the collection is NOT sharded, emit a bson_dollar_range qual
 		 * with a "sample" parameter. The set_rel_pathlist_hook detects this
 		 * and wraps the scan paths with a ReservoirSample CustomPath that
