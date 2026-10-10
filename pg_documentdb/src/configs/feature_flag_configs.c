@@ -487,10 +487,6 @@ bool EnableAddShardKeyOnlyOnPrimaryKeyFilters =
 bool EnableSubqueryPushdownForMatchOnPersistedCursors =
 	DEFAULT_ENABLE_SUBQUERY_PUSHDOWN_FOR_MATCH_ON_PERSISTED_CURSORS;
 
-/* Added in v0.114, enabled in v0.114, remove after v0.117 */
-#define DEFAULT_ENABLE_DOLLAR_SAMPLE_RESERVOIR_SCAN true
-bool EnableDollarSampleReservoirScan = DEFAULT_ENABLE_DOLLAR_SAMPLE_RESERVOIR_SCAN;
-
 /* Added in v0.117, Pending stabilization, enable in v1.3 */
 #define DEFAULT_ENABLE_RUM_INDEX_ONLY_SCAN_PROJECTION_WRAPPER false
 bool EnableRumIndexOnlyScanProjectionWrapper =
@@ -1623,17 +1619,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableUpdateWorkerSingleWriteNoSubTransaction,
 		DEFAULT_ENABLE_UPDATE_WORKER_SINGLE_WRITE_NO_SUB_TRANSACTION,
-		PGC_USERSET,
-		0,
-		NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.enableDollarSampleReservoirScan", newGucPrefix),
-		gettext_noop(
-			"Whether to use reservoir sampling for $sample instead of ORDER BY random()."),
-		NULL,
-		&EnableDollarSampleReservoirScan,
-		DEFAULT_ENABLE_DOLLAR_SAMPLE_RESERVOIR_SCAN,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
