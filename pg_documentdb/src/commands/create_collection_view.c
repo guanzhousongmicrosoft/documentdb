@@ -1043,7 +1043,12 @@ CheckForViewCyclesAndDepth(Datum databaseDatum, const char *viewName, const
 		}
 		else
 		{
-			/* Found a base collection - stop */
+			if (collection->options.collationString[0] != '\0')
+			{
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg(
+									"Views referencing a collection with a non-simple default collation are not supported")));
+			}
 			break;
 		}
 	}
