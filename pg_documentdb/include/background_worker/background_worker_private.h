@@ -19,7 +19,7 @@
 
 #include "background_worker/background_worker_job.h"
 
-#define MAX_BACKGROUND_WORKER_JOBS 5
+#define MAX_BACKGROUND_WORKER_JOBS 10
 
 typedef enum
 {

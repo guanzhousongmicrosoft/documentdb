@@ -633,7 +633,15 @@ bool EnablePreImages = DEFAULT_ENABLE_PREIMAGES;
  * SECTION: Schedule jobs via background worker.
  */
 
-/* Added in v0.109, Pending stabilization, enable in v1.2 */
+/* Added in v1.2, Pending stabilization, enable in v1.5 */
+#define DEFAULT_ENABLE_CURSOR_CLEANUP_BACKGROUND false
+bool EnableCursorCleanupBackground = DEFAULT_ENABLE_CURSOR_CLEANUP_BACKGROUND;
+
+/* Added in v1.2, Pending stabilization, enable in v1.6 */
+#define DEFAULT_ENABLE_TTL_CLEANUP_BACKGROUND false
+bool EnableTTLCleanupBackground = DEFAULT_ENABLE_TTL_CLEANUP_BACKGROUND;
+
+/* Added in v0.109, Pending stabilization, enable in v1.8 */
 #define DEFAULT_INDEX_BUILDS_SCHEDULED_ON_BGWORKER false
 bool IndexBuildsScheduledOnBgWorker = DEFAULT_INDEX_BUILDS_SCHEDULED_ON_BGWORKER;
 
@@ -1400,6 +1408,22 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"$group index pushdown."),
 		NULL, &EnableScalarAggregateAccumulatorPathCollection,
 		DEFAULT_ENABLE_SCALAR_AGGREGATE_ACCUMULATOR_PATH_COLLECTION,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_cursor_cleanup_background", newGucPrefix),
+		gettext_noop(
+			"Reserved for future role-neutral cursor cleanup through the background worker."),
+		NULL, &EnableCursorCleanupBackground,
+		DEFAULT_ENABLE_CURSOR_CLEANUP_BACKGROUND,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_ttl_cleanup_background", newGucPrefix),
+		gettext_noop(
+			"Enable expired-row cleanup through the background-worker entry point."),
+		NULL, &EnableTTLCleanupBackground,
+		DEFAULT_ENABLE_TTL_CLEANUP_BACKGROUND,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
