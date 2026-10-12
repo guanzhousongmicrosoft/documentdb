@@ -58,6 +58,11 @@ PGDLLEXPORT bool EnableRumCompareFunctionFmgr = RUM_DEFAULT_ENABLE_COMPARE_FUNCT
 #define RUM_DEFAULT_FIX_INCOMPLETE_SPLIT true
 PGDLLEXPORT bool RumFixIncompleteSplit = RUM_DEFAULT_FIX_INCOMPLETE_SPLIT;
 
+/* FeatureFlag: Added in v1.2, enabled in v1.2, remove after v1.5 */
+#define RUM_DEFAULT_ENABLE_CLEAR_INVALID_INCOMPLETE_SPLIT true
+PGDLLEXPORT bool RumEnableClearInvalidIncompleteSplit =
+	RUM_DEFAULT_ENABLE_CLEAR_INVALID_INCOMPLETE_SPLIT;
+
 /* TestingConfig */
 #define RUM_DEFAULT_ENABLE_INJECT_PAGE_SPLIT_INCOMPLETE false
 PGDLLEXPORT bool RumInjectPageSplitIncomplete =
@@ -510,6 +515,15 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 		NULL,
 		&RumFixIncompleteSplit,
 		RUM_DEFAULT_FIX_INCOMPLETE_SPLIT,
+		PGC_USERSET, 0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_clear_invalid_incomplete_split", documentDBRumGucPrefix),
+		"Clears an incomplete split flag that cannot describe a pending split instead of completing it",
+		NULL,
+		&RumEnableClearInvalidIncompleteSplit,
+		RUM_DEFAULT_ENABLE_CLEAR_INVALID_INCOMPLETE_SPLIT,
 		PGC_USERSET, 0,
 		NULL, NULL, NULL);
 
