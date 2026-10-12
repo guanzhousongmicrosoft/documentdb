@@ -241,7 +241,7 @@ ShouldRunDeferredInitJobs(bool initJobsPending, bool inRecovery)
 /*
  * The allowed commands registry should not be exposed outside this c file to avoid unpredictable behavior.
  */
-#define MAX_BACKGROUND_WORKER_ALLOWED_COMMANDS 5
+#define MAX_BACKGROUND_WORKER_ALLOWED_COMMANDS 10
 static BackgroundWorkerJobCommand
 	AllowedCommandRegistry[MAX_BACKGROUND_WORKER_ALLOWED_COMMANDS];
 static int AllowedCommandEntries = 0;
