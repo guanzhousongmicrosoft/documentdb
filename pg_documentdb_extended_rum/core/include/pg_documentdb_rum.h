@@ -1191,6 +1191,7 @@ extern PGDLLIMPORT bool RumEnableSkipIntermediateEntry;
 extern PGDLLIMPORT bool RumPruneEmptyPages;
 extern PGDLLIMPORT bool RumTrackIncompleteSplit;
 extern PGDLLIMPORT bool RumFixIncompleteSplit;
+extern PGDLLIMPORT bool RumEnableClearInvalidIncompleteSplit;
 extern PGDLLIMPORT bool RumEnableNewBulkDelete;
 extern PGDLLIMPORT bool RumNewBulkDeleteInlineDataPages;
 extern PGDLLIMPORT bool RumVacuumSkipPrunePostingTreePages;

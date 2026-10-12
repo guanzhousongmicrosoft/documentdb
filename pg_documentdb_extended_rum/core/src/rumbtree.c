@@ -422,13 +422,20 @@ rumFindParents(RumBtree btree, RumBtreeStack *stack,
 		page = BufferGetPage(buffer);
 		if (RumPageIsLeaf(page))
 		{
-			elog(ERROR, "Lost path");
+			ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+							errmsg("Lost path"),
+							errdetail_log("Lost path on index %u while finding the "
+										  "parent of block %u; isData %d",
+										  RelationGetRelid(btree->index),
+										  stack->blkno, RumPageIsData(page))));
 		}
 
 		if (RumFixIncompleteSplit &&
 			RumPageIsIncompleteSplit(page))
 		{
-			Assert(blkno != rootBlkno);
+			Assert(RumEnableClearInvalidIncompleteSplit || blkno != rootBlkno);
+
+			/* A flag on the root is cleared by rumFinishOldSplit */
 			ptr->blkno = blkno;
 			ptr->buffer = buffer;
 
@@ -894,9 +901,107 @@ rumPlaceToPage(RumBtree btree, RumBtreeStack *stack,
 }
 
 
+/*
+ * Clears RUM_INCOMPLETE_SPLIT on an exclusively locked page without
+ * otherwise modifying it.
+ */
+static void
+rumClearIncompleteSplitFlag(RumBtree btree, Buffer buffer)
+{
+	if (btree->rumstate->isBuild)
+	{
+		START_CRIT_SECTION();
+		resetIncompleteSplitOnChild(NULL, btree, buffer);
+		END_CRIT_SECTION();
+	}
+	else
+	{
+		GenericXLogState *state = GenericXLogStart(btree->index);
+		resetIncompleteSplitOnChild(state, btree, buffer);
+		GenericXLogFinish(state);
+	}
+}
+
+
+/*
+ * Returns the child block number referenced by the downlink at offset off of
+ * an internal page.
+ */
+static BlockNumber
+rumGetDownlinkAtOffset(Page page, OffsetNumber off)
+{
+	if (RumPageIsData(page))
+	{
+		return PostingItemGetBlockNumber((RumPostingItem *) RumDataPageGetItem(page,
+																			   off));
+	}
+
+	return RumGetDownlink((IndexTuple) PageGetItem(page, PageGetItemId(page, off)));
+}
+
+
+/*
+ * Returns true if btree->rightblkno, the right half of an incomplete split,
+ * already has a downlink at the parent level. parentBuffer is the exclusively
+ * locked parent and parentOff is the offset of the left half's downlink.
+ *
+ * The right half of a genuine incomplete split never has a downlink, so this
+ * only matches when RUM_INCOMPLETE_SPLIT was set on a page whose split had
+ * already been completed. Downlinks are ordered like the child level, so a
+ * linked right half is the next downlink after parentOff: on the same parent
+ * page, or, only when the left half is the parent's last child, the first
+ * downlink of the parent's right sibling.
+ */
+static bool
+rumRightHalfHasDownlink(RumBtree btree, Buffer parentBuffer, OffsetNumber parentOff)
+{
+	Page parentPage = BufferGetPage(parentBuffer);
+	OffsetNumber parentMaxOff = RumPageIsData(parentPage) ?
+								RumDataPageMaxOff(parentPage) :
+								PageGetMaxOffsetNumber(parentPage);
+	BlockNumber parentRightLink;
+	Buffer rightBuffer;
+	Page rightPage;
+	OffsetNumber rightMaxOff;
+	bool found = false;
+
+	Assert(parentOff >= FirstOffsetNumber && parentOff <= parentMaxOff);
+
+	if (parentOff < parentMaxOff)
+	{
+		return rumGetDownlinkAtOffset(parentPage, OffsetNumberNext(parentOff)) ==
+			   btree->rightblkno;
+	}
+
+	parentRightLink = RumPageRightLink(parentPage);
+	if (parentRightLink == InvalidBlockNumber)
+	{
+		return false;
+	}
+
+	/* Lock order is left to right, so this cannot deadlock with the held parent */
+	rightBuffer = ReadBuffer(btree->index, parentRightLink);
+	LockBuffer(rightBuffer, RUM_SHARE);
+	rightPage = BufferGetPage(rightBuffer);
+	rightMaxOff = RumPageIsData(rightPage) ? RumDataPageMaxOff(rightPage) :
+				  PageGetMaxOffsetNumber(rightPage);
+
+	if (!RumPageIsDeleted(rightPage) && !RumPageIsHalfDead(rightPage) &&
+		!RumPageIsLeaf(rightPage) &&
+		RumPageIsData(rightPage) == RumPageIsData(parentPage) &&
+		rightMaxOff >= FirstOffsetNumber)
+	{
+		found = btree->getLeftMostPage(btree, rightPage) == btree->rightblkno;
+	}
+
+	UnlockReleaseBuffer(rightBuffer);
+	return found;
+}
+
+
 static void
 rumFinishSplit(RumBtree btree, RumBtreeStack *stack, BlockNumber rootBlkNo,
-			   bool freeBtreeStack, RumStatsData *buildStats)
+			   bool freeBtreeStack, bool isOldSplit, RumStatsData *buildStats)
 {
 	Page page;
 	bool done;
@@ -953,6 +1058,24 @@ rumFinishSplit(RumBtree btree, RumBtreeStack *stack, BlockNumber rootBlkNo,
 			{
 				rumFinishOldSplit(btree, parent, rootBlkNo, buildStats, RUM_EXCLUSIVE);
 			}
+		}
+
+		/*
+		 * When completing a split found via RUM_INCOMPLETE_SPLIT, verify that
+		 * the right half is not already linked. If it is, the flag is stale
+		 * and inserting would create a duplicate downlink; clear it instead.
+		 */
+		if (first && isOldSplit && RumEnableClearInvalidIncompleteSplit &&
+			rumRightHalfHasDownlink(btree, parent->buffer, parent->off))
+		{
+			ereport(WARNING, (errmsg(
+								  "RUM index \"%s\" block %u is marked as incompletely split but its right sibling %u is already linked, clearing the flag",
+								  RelationGetRelationName(btree->index),
+								  stack->blkno, btree->rightblkno)));
+
+			rumClearIncompleteSplitFlag(btree, stack->buffer);
+			LockBuffer(parent->buffer, RUM_UNLOCK);
+			return;
 		}
 
 		/* insert the downlink */
@@ -1019,13 +1142,30 @@ rumFinishOldSplit(RumBtree btree, RumBtreeStack *stack, BlockNumber rootBlkno,
 		}
 	}
 
+	/*
+	 * A root split is completed in place and the rightmost page of a level
+	 * has no right half, so the flag cannot describe a real incomplete split
+	 * on either. Clear it rather than attempting to link a nonexistent page.
+	 */
+	if (RumEnableClearInvalidIncompleteSplit &&
+		(stack->parent == NULL || stack->blkno == rootBlkno ||
+		 RumPageRightMost(BufferGetPage(stack->buffer))))
+	{
+		ereport(WARNING, (errmsg(
+							  "RUM index \"%s\" block %u is marked as incompletely split but is a root or rightmost page, clearing the flag",
+							  RelationGetRelationName(btree->index), stack->blkno)));
+
+		rumClearIncompleteSplitFlag(btree, stack->buffer);
+		return;
+	}
+
 	/* Before we continue, we need to set up the btree as appropriate
 	 * Since we may be in the middle of an insert, we set up the btree as
 	 * a copy and set the appropriate state.
 	 */
 	localBtree = *btree;
 	localBtree.fillBtreeForIncompleteSplit(&localBtree, stack, stack->buffer);
-	rumFinishSplit(&localBtree, stack, rootBlkno, false, buildStats);
+	rumFinishSplit(&localBtree, stack, rootBlkno, false, true, buildStats);
 }
 
 
@@ -1061,7 +1201,7 @@ rumInsertValueNew(RumBtree btree, RumBtreeStack *stack,
 	}
 	else
 	{
-		rumFinishSplit(btree, stack, rootBlkno, true, buildStats);
+		rumFinishSplit(btree, stack, rootBlkno, true, false, buildStats);
 	}
 }
 

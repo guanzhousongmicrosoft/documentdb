@@ -325,6 +325,94 @@ SELECT documentdb_api_internal.rum_repair_incomplete_split_on_index(
     FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass,
     TRUE, TRUE);
 
+-- now build a tree with more than 2 levels and leave an incomplete split under a
+-- non-leftmost internal page. The repair must walk every page at each level to find it.
+RESET documentdb.rumFailOnLostPath;
+SET documentdb_rum.fix_incomplete_split TO off;
+SET documentdb_rum.track_incomplete_split TO off;
+CALL documentdb_api.drop_indexes(
+    'rumdb',
+    '{ "dropIndexes": "incomplete_split", "index": "a_1" }');
+SELECT FORMAT('TRUNCATE documentdb_data.documents_%s', :collection_id) \gexec
+
+SET documentdb.indexTermLimitOverride TO 2000;
+SELECT documentdb_api_internal.create_indexes_non_concurrently(
+    'rumdb',
+    '{ "createIndexes": "incomplete_split", "indexes": [ { "key": { "a": 1 }, "name": "a_1", "enableCompositeTerm": false } ] }',
+    TRUE);
+
+SELECT index_id AS index_id
+FROM documentdb_api_catalog.collection_indexes
+WHERE collection_id = :collection_id
+  AND (index_spec).index_name = 'a_1' \gset
+
+-- large incompressible keys so that the entry tree has multiple internal levels
+SELECT COUNT(documentdb_api.insert_one(
+    'rumdb', 'incomplete_split',
+    bson_build_document(
+        '_id'::text, i, 'a'::text,
+        'b' || lpad(i::text, 6, '0') ||
+        (SELECT string_agg(md5(i::text || '_' || j::text), '') FROM generate_series(1, 30) j))))
+FROM generate_series(1, 2000) i;
+
+-- the root has internal pages as children (more than one internal page below the root)
+SELECT pg_relation_size(FORMAT('documentdb_data.documents_rum_index_%s', :index_id)) / 8192 AS index_blocks \gset
+SELECT COUNT(*) > 2 AS has_multiple_internal_pages
+FROM generate_series(1, :index_blocks - 1) b
+WHERE documentdb_api_internal.documentdb_rum_page_get_stats(
+    get_raw_page(FORMAT('documentdb_data.documents_rum_index_%s', :index_id), b::int))->>'flagsStr' NOT LIKE '%LEAF%';
+
+-- leave an incomplete split at the right end of the key space (under the rightmost internal page)
+SET documentdb_rum.enable_inject_page_split_incomplete TO on;
+SELECT COUNT(documentdb_api.insert_one(
+    'rumdb', 'incomplete_split',
+    bson_build_document(
+        '_id'::text, i, 'a'::text,
+        'c' || lpad(i::text, 6, '0') ||
+        (SELECT string_agg(md5(i::text || '_' || j::text), '') FROM generate_series(1, 30) j))))
+FROM generate_series(3001, 3010) i;
+SET documentdb_rum.enable_inject_page_split_incomplete TO off;
+
+-- inserts fail with lost path
+SET documentdb.rumFailOnLostPath TO on;
+SELECT COUNT(documentdb_api.insert_one(
+    'rumdb', 'incomplete_split',
+    bson_build_document(
+        '_id'::text, i, 'a'::text,
+        'c' || lpad(i::text, 6, '0') ||
+        (SELECT string_agg(md5(i::text || '_' || j::text), '') FROM generate_series(1, 30) j))))
+FROM generate_series(3011, 3100) i;
+
+SET documentdb_rum.track_incomplete_split TO on;
+SET documentdb_rum.fix_incomplete_split TO on;
+SET client_min_messages TO WARNING;
+
+-- dry run reports the inconsistency without data pages tracking
+SELECT documentdb_api_internal.rum_repair_incomplete_split_on_index(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass,
+    FALSE, TRUE);
+
+-- repair it
+SELECT documentdb_api_internal.rum_repair_incomplete_split_on_index(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass,
+    FALSE, FALSE);
+RESET client_min_messages;
+
+-- inserts now succeed after a single repair
+SELECT COUNT(documentdb_api.insert_one(
+    'rumdb', 'incomplete_split',
+    bson_build_document(
+        '_id'::text, i, 'a'::text,
+        'c' || lpad(i::text, 6, '0') ||
+        (SELECT string_agg(md5(i::text || '_' || j::text), '') FROM generate_series(1, 30) j))))
+FROM generate_series(3011, 3100) i;
+
+-- no inconsistencies left
+SELECT documentdb_api_internal.rum_repair_incomplete_split_on_index(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass,
+    TRUE, TRUE);
+RESET documentdb.indexTermLimitOverride;
+
 RESET documentdb.rumFailOnLostPath;
 RESET documentdb_rum.fix_incomplete_split;
 RESET documentdb_rum.track_incomplete_split;
