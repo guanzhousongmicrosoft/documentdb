@@ -43,11 +43,11 @@ PGDLLEXPORT bool RumTrackIncompleteSplit = RUM_DEFAULT_TRACK_INCOMPLETE_SPLIT;
 PGDLLEXPORT bool RumAllowReplaceOnInsertTuple = RUM_DEFAULT_ALLOW_REPLACE_ON_INSERT_TUPLE;
 
 /* TestingConfig: This is not ready for real consumption */
-#define RUM_DEFAULT_ENABLE_XLOG_INSERT_ENTRY false
+#define RUM_DEFAULT_ENABLE_XLOG_INSERT_ENTRY true
 PGDLLEXPORT bool RumEnableXlogInsertEntry = RUM_DEFAULT_ENABLE_XLOG_INSERT_ENTRY;
 
 /* TestingConfig: This is not ready for real consumption */
-#define RUM_DEFAULT_ENABLE_CUSTOM_XLOG_RMRG false
+#define RUM_DEFAULT_ENABLE_CUSTOM_XLOG_RMRG true
 PGDLLEXPORT bool EnableCustomXlogRmgr = RUM_DEFAULT_ENABLE_CUSTOM_XLOG_RMRG;
 
 /* FeatureFlag: Added in v0.114, enabled in v0.114, remove after v1.0 */
