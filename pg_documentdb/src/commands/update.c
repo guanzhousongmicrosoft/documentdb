@@ -124,6 +124,7 @@ extern int BatchUpdateLockTimeoutMs;
 /* This guc is temporary and is used to handle whether the parameter “bypassDocumentValidation” could be set in the request command.*/
 extern bool EnableBypassDocumentValidation;
 extern bool EnableSchemaValidation;
+extern bool EnableCollationWithSchemaValidation;
 extern bool EnableUpdateManyWorkerPushdown;
 extern bool EnableCommutativeUpdateMany;
 
@@ -753,7 +754,8 @@ PerformUpdateCore(Datum *databaseNameDatum, pgbson *updateSpec,
 		if (CheckSchemaValidationEnabled(collection, batchSpec->bypassDocumentValidation))
 		{
 			state = PrepareForSchemaValidation(collection->schemaValidator.validator,
-											   allocContext);
+											   allocContext,
+											   collection->options.collationString);
 		}
 
 		ProcessBatchUpdate(collection, batchSpec, transactionId,
@@ -2554,6 +2556,27 @@ BuildUpdateAllMatchingDocumentQuery(MongoCollection *collection,
 	/* set the schema validation rule, if any */
 	if (validationLevelArgIndex != -1)
 	{
+		if (EnableCollationWithSchemaValidation &&
+			IsCollationApplicable(collection->options.collationString))
+		{
+			if (!IsClusterVersionAtleast(DocDB_V1, 2, 0))
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+								errmsg(
+									"Multi-document validator on a collated collection requires a cluster schema upgrade")));
+			}
+
+			/* Keep the collection collation with the validator for multi-document updates. */
+			bson_value_t validatorValue = ConvertPgbsonToBsonValue(schemaValidator);
+			pgbson_writer writer;
+			PgbsonWriterInit(&writer);
+			PgbsonWriterAppendValue(&writer, "$__schema_validator",
+									19, &validatorValue);
+			PgbsonWriterAppendUtf8(&writer, "collation", 9,
+								   collection->options.collationString);
+			schemaValidator = PgbsonWriterGetPgbson(&writer);
+		}
+
 		if (IsClusterVersionAtleast(DocDB_V0, 114, 0))
 		{
 			/* New version: pass bson validator */
@@ -3047,7 +3070,7 @@ command_update_worker(PG_FUNCTION_ARGS)
 	{
 		stateForSchemaValidation = PrepareForSchemaValidation(
 			mongoCollection->schemaValidator.validator,
-			CurrentMemoryContext);
+			CurrentMemoryContext, mongoCollection->options.collationString);
 	}
 
 	if (params.isUpdateOne)

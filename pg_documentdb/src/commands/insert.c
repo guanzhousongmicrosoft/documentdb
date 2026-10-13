@@ -1,5 +1,7 @@
 /*-------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ * SPDX-License-Identifier: MIT
  *
  * src/commands/insert.c
  *
@@ -165,6 +167,7 @@ static inline void ReportInsertFeatureUsage(int batchSize);
 bool EnableCreateCollectionOnInsert = true;
 extern bool UseLocalExecutionShardQueries;
 extern bool EnableBypassDocumentValidation;
+extern bool SkipFailOnCollation;
 extern int BatchUpdateLockTimeoutMs;
 extern int32_t DocumentToastCompressionThreshold;
 extern bool DefaultInlineWriteOperations;
@@ -371,6 +374,15 @@ BuildBatchInsertionSpec(bson_iter_t *insertCommandIter, pgbsonsequence *insertDo
 		else if (strcmp(field, "$db") == 0)
 		{
 			ValidateOrExtractDatabaseNameFromSpec(insertCommandIter, databaseNameDatum);
+		}
+		else if (strcmp(field, "collation") == 0)
+		{
+			if (!SkipFailOnCollation)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_UNKNOWNBSONFIELD),
+								errmsg("BSON field 'insert.%s' is an unknown field.",
+									   field)));
+			}
 		}
 		else if (IsCommonSpecIgnoredField(field))
 		{
@@ -894,8 +906,9 @@ ProcessBatchInsertion(MongoCollection *collection, BatchInsertionSpec *batchSpec
 	 */
 	if (CheckSchemaValidationEnabled(collection, batchSpec->bypassDocumentValidation))
 	{
-		evalState = PrepareForSchemaValidation(collection->schemaValidator.validator,
-											   batchResult->resultMemoryContext);
+		evalState = PrepareForSchemaValidation(
+			collection->schemaValidator.validator, batchResult->resultMemoryContext,
+			collection->options.collationString);
 	}
 
 	/*
