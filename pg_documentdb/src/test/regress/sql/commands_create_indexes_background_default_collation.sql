@@ -2,8 +2,8 @@
 -- Licensed under the MIT License.
 -- SPDX-License-Identifier: MIT
 
-SET documentdb.next_collection_id TO 782400;
-SET documentdb.next_collection_index_id TO 782400;
+SET documentdb.next_collection_id TO 782500;
+SET documentdb.next_collection_index_id TO 782500;
 
 SET search_path TO documentdb_core, documentdb_api, documentdb_api_catalog;
 SET documentdb_core.enableCollation TO on;
