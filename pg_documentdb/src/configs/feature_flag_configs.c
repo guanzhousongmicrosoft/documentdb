@@ -25,6 +25,11 @@
 bool EnableSchemaValidation =
 	DEFAULT_ENABLE_SCHEMA_VALIDATION;
 
+/* Added on v1.2, pending stabilization, enable on v1.3 */
+#define DEFAULT_ENABLE_COLLATION_WITH_SCHEMA_VALIDATION false
+bool EnableCollationWithSchemaValidation =
+	DEFAULT_ENABLE_COLLATION_WITH_SCHEMA_VALIDATION;
+
 /* Added in v0.108, enabled in v0.114, remove after v1.3 */
 #define DEFAULT_ENABLE_BYPASSDOCUMENTVALIDATION true
 bool EnableBypassDocumentValidation =
@@ -716,6 +721,17 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableSchemaValidation,
 		DEFAULT_ENABLE_SCHEMA_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_collation_with_schema_validation", newGucPrefix),
+		gettext_noop(
+			"Whether multi-document updates validate with the collection collation."),
+		NULL,
+		&EnableCollationWithSchemaValidation,
+		DEFAULT_ENABLE_COLLATION_WITH_SCHEMA_VALIDATION,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);

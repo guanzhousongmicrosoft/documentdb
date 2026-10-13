@@ -615,7 +615,8 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 		if (CheckSchemaValidationEnabled(collection, spec->bypassDocumentValidation))
 		{
 			evalState = PrepareForSchemaValidation(collection->schemaValidator.validator,
-												   CurrentMemoryContext);
+												   CurrentMemoryContext,
+												   collection->options.collationString);
 		}
 
 		ExecuteUpdateOne(collection, &updateOneParams, shardKeyHash, transactionId,
