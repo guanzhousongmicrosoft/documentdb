@@ -1,8 +1,8 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the MIT License.
 -- SPDX-License-Identifier: MIT
-SET documentdb.next_collection_id TO 782400;
-SET documentdb.next_collection_index_id TO 782400;
+SET documentdb.next_collection_id TO 782500;
+SET documentdb.next_collection_index_id TO 782500;
 SET search_path TO documentdb_core, documentdb_api, documentdb_api_catalog;
 SET documentdb_core.enableCollation TO on;
 SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
@@ -37,7 +37,7 @@ SELECT documentdb_api.create_indexes_background(
 );
                                                                                                                                                                         create_indexes_background                                                                                                                                                                         
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""1"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""2"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782402"" } ] } }")
+ ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""1"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""2"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782502"" } ] } }")
 (1 row)
 
 SELECT index_cmd LIKE '%cl=''fr-u-ks-level1''%' AS has_default_collation,
@@ -112,7 +112,7 @@ SELECT documentdb_api.create_indexes_background(
 );
                                                                                                                                                                         create_indexes_background                                                                                                                                                                         
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""2"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""3"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782403"" } ] } }")
+ ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""2"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""3"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782503"" } ] } }")
 (1 row)
 
 SELECT index_cmd LIKE '%cl=''en-u-ks-level2''%' AS has_index_collation,
@@ -175,7 +175,7 @@ SELECT documentdb_api.create_indexes_background(
 );
                                                                                                                                                                         create_indexes_background                                                                                                                                                                         
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""3"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""4"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782404"" } ] } }")
+ ("{ ""raw"" : { ""defaultShard"" : { ""numIndexesBefore"" : { ""$numberInt"" : ""3"" }, ""numIndexesAfter"" : { ""$numberInt"" : ""4"" }, ""createdCollectionAutomatically"" : false, ""ok"" : { ""$numberInt"" : ""1"" } } }, ""ok"" : { ""$numberInt"" : ""1"" } }",t,"{ ""indexRequest"" : { ""cmdType"" : ""C"", ""ids"" : [ { ""$numberInt"" : ""782504"" } ] } }")
 (1 row)
 
 SELECT index_cmd NOT LIKE '%cl=%' AS uses_binary_comparison,
