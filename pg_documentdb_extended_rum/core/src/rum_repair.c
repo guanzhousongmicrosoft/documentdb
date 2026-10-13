@@ -362,7 +362,7 @@ CheckPageAtLevel(RumState *rumState, BlockNumber blockNumber, int level,
 			}
 			else
 			{
-				shouldFixPage = RumTrackIncompleteSplit && !dryrunMode;
+				shouldFixPage = !dryrunMode;
 				if (message_level_is_interesting(NOTICE))
 				{
 					elog(INFO, "Rum tree is in an inconsistent state. "

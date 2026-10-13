@@ -9,8 +9,18 @@ CREATE FUNCTION rum_incomplete_split_repair_test.index_term_to_bson(bytea)
 RETURNS bson
 LANGUAGE c
 AS '$libdir/pg_documentdb', 'gin_bson_index_term_to_bson';
+-- Simulate legacy interrupted splits without restoring the retired insertion path.
+CREATE FUNCTION rum_incomplete_split_repair_test.clear_incomplete_split_flags(index_rel regclass)
+RETURNS boolean
+LANGUAGE SQL
+AS $$
+    SELECT COUNT(documentdb_api_internal.documentdb_rum_test_set_incomplete_split_on_page(
+        index_rel, b, FALSE)) > 0
+    FROM generate_series(1, (pg_relation_size(index_rel) / current_setting('block_size')::int)::int - 1) b
+    WHERE documentdb_api_internal.documentdb_rum_page_get_stats_index(index_rel, b)->>'flagsStr'
+        LIKE '%INCOMPLETE_SPLIT%';
+$$;
 SET documentdb_rum.fix_incomplete_split TO off;
-SET documentdb_rum.track_incomplete_split TO off;
 SELECT documentdb_api_internal.create_indexes_non_concurrently(
     'rumdb',
     '{ "createIndexes": "incomplete_split", "indexes": [ { "key": { "a": 1 }, "name": "a_1", "enableCompositeTerm": false } ] }');
@@ -126,7 +136,6 @@ WHERE collection_id = :collection_id
   AND (index_spec).index_name = 'a_1' \gset
 -- insert documents that cause splits and leave the tree in a dangling state
 SET documentdb_rum.enable_inject_page_split_incomplete TO on;
-SET documentdb_rum.track_incomplete_split TO on;
 SELECT COUNT(documentdb_api.insert_one(
     'rumdb', 'incomplete_split',
     bson_build_document('_id'::text, i, 'a'::text, i)))
@@ -189,7 +198,7 @@ SELECT COUNT(*) FROM documentdb_api.collection('rumdb', 'incomplete_split');
    995
 (1 row)
 
--- now enable tracking of the incomplete splits and repeat - the insert should go through (after finishing the incomplete split)
+-- Repeat the injection and enable inline repair so inserts finish the splits.
 CALL documentdb_api.drop_indexes(
     'rumdb',
     '{ "dropIndexes": "incomplete_split", "index": "a_1" }');
@@ -313,7 +322,6 @@ WHERE document @@ '{ "a": { "$exists": true } }';
 
 -- now repeat this exercise again but use the repair function to fix it.
 SET documentdb_rum.fix_incomplete_split TO off;
-SET documentdb_rum.track_incomplete_split TO off;
 CALL documentdb_api.drop_indexes(
     'rumdb',
     '{ "dropIndexes": "incomplete_split", "index": "a_1" }');
@@ -353,6 +361,13 @@ FROM generate_series(1, 1000) i;
   1000
 (1 row)
 
+SELECT rum_incomplete_split_repair_test.clear_incomplete_split_flags(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass);
+ clear_incomplete_split_flags
+------------------------------
+ t
+(1 row)
+
 -- the root page doesn't have all the children (the tree is inconsistent)
 SELECT COUNT(*)
 FROM documentdb_api_internal.documentdb_rum_page_get_entries(
@@ -379,7 +394,7 @@ FROM documentdb_api_internal.documentdb_rum_page_get_entries(
 SELECT COUNT(*) FROM documentdb_api.collection('rumdb', 'incomplete_split');
  count 
 -------
-   996
+   995
 (1 row)
 
 -- now insert some more docs - we should get a lost path error
@@ -403,8 +418,7 @@ SQL statement "SELECT p_result                   FROM documentdb_api.insert(
       p_transaction_id)"
 PL/pgSQL function documentdb_api.insert_one(text,text,bson,text) line 7 at SQL statement
 -- repair the index using the rum repair functions
-SET documentdb_rum.track_incomplete_split TO on;
-SET documentdb_rum.fix_incomplete_split TO on;
+-- Keep inline repair disabled until the repair function has marked the legacy splits.
 -- run in dry run mode - reports but doesn't fix.
 SELECT documentdb_api_internal.rum_repair_incomplete_split_on_index(
     FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass,
@@ -446,7 +460,8 @@ INFO:  Rum tree is in an inconsistent state. parentPage 1 has child 2 with right
  
 (1 row)
 
--- this now works fine once dynamic repair is turned on:
+-- Inserts finish the marked splits once inline repair is enabled.
+SET documentdb_rum.fix_incomplete_split TO on;
 SELECT COUNT(documentdb_api.insert_one(
     'rumdb', 'incomplete_split',
     bson_build_document('_id'::text, i, 'a'::text, i)))
@@ -493,12 +508,11 @@ FROM documentdb_api.collection('rumdb', 'incomplete_split')
 WHERE document @@ '{ "a": { "$exists": true } }';
  count 
 -------
-  1996
+  1995
 (1 row)
 
 -- now repeat with larger index keys to see if there's multiple levels.
 SET documentdb_rum.fix_incomplete_split TO off;
-SET documentdb_rum.track_incomplete_split TO off;
 SELECT FORMAT('TRUNCATE documentdb_data.documents_%s', :collection_id) \gexec
 TRUNCATE documentdb_data.documents_2701
 SELECT COUNT(*) FROM documentdb_api.collection('rumdb', 'incomplete_split');
@@ -518,6 +532,13 @@ FROM generate_series(1, 10000) i;
  10000
 (1 row)
 
+SELECT rum_incomplete_split_repair_test.clear_incomplete_split_flags(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass);
+ clear_incomplete_split_flags
+------------------------------
+ t
+(1 row)
+
 -- assert that documents got missed due to injecting incomplete split.
 SELECT COUNT(*) < 10000
 FROM documentdb_api.collection('rumdb', 'incomplete_split');
@@ -526,7 +547,6 @@ FROM documentdb_api.collection('rumdb', 'incomplete_split');
  t
 (1 row)
 
-SET documentdb_rum.track_incomplete_split TO on;
 SET documentdb_rum.fix_incomplete_split TO on;
 SET documentdb_rum.enable_inject_page_split_incomplete TO off;
 -- run in dry run mode - reports but doesn't fix.
@@ -625,7 +645,6 @@ INFO:  Repairing index with dryRunMode 1, and trackDataPages 1
 -- non-leftmost internal page. The repair must walk every page at each level to find it.
 RESET documentdb.rumFailOnLostPath;
 SET documentdb_rum.fix_incomplete_split TO off;
-SET documentdb_rum.track_incomplete_split TO off;
 CALL documentdb_api.drop_indexes(
     'rumdb',
     '{ "dropIndexes": "incomplete_split", "index": "a_1" }');
@@ -689,6 +708,13 @@ FROM generate_series(3001, 3010) i;
 (1 row)
 
 SET documentdb_rum.enable_inject_page_split_incomplete TO off;
+SELECT rum_incomplete_split_repair_test.clear_incomplete_split_flags(
+    FORMAT('documentdb_data.documents_rum_index_%s', :index_id)::regclass);
+ clear_incomplete_split_flags
+------------------------------
+ t
+(1 row)
+
 -- inserts fail with lost path
 SET documentdb.rumFailOnLostPath TO on;
 SELECT COUNT(documentdb_api.insert_one(
@@ -711,7 +737,6 @@ SQL statement "SELECT p_result                   FROM documentdb_api.insert(
       p_document::bsonsequence,
       p_transaction_id)"
 PL/pgSQL function documentdb_api.insert_one(text,text,bson,text) line 7 at SQL statement
-SET documentdb_rum.track_incomplete_split TO on;
 SET documentdb_rum.fix_incomplete_split TO on;
 SET client_min_messages TO WARNING;
 -- dry run reports the inconsistency without data pages tracking
@@ -763,7 +788,6 @@ INFO:  Repairing index with dryRunMode 1, and trackDataPages 1
 RESET documentdb.indexTermLimitOverride;
 RESET documentdb.rumFailOnLostPath;
 RESET documentdb_rum.fix_incomplete_split;
-RESET documentdb_rum.track_incomplete_split;
 SELECT documentdb_api.drop_collection('rumdb', 'incomplete_split');
  drop_collection 
 -----------------
@@ -771,4 +795,6 @@ SELECT documentdb_api.drop_collection('rumdb', 'incomplete_split');
 (1 row)
 
 DROP SCHEMA rum_incomplete_split_repair_test CASCADE;
-NOTICE:  drop cascades to function rum_incomplete_split_repair_test.index_term_to_bson(bytea)
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to function rum_incomplete_split_repair_test.index_term_to_bson(bytea)
+drop cascades to function rum_incomplete_split_repair_test.clear_incomplete_split_flags(regclass)

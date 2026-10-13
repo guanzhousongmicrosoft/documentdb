@@ -33,11 +33,6 @@ PGDLLEXPORT bool DocumentDBRumLoadCommonGUCs = true;
 PGDLLEXPORT bool RumThrowErrorOnInvalidDataPage =
 	RUM_DEFAULT_THROW_ERROR_ON_INVALID_DATA_PAGE;
 
-/* rumbtree.c */
-/* FeatureFlag: Added in v0.108, enabled in v0.108, remove after v1.3 */
-#define RUM_DEFAULT_TRACK_INCOMPLETE_SPLIT true
-PGDLLEXPORT bool RumTrackIncompleteSplit = RUM_DEFAULT_TRACK_INCOMPLETE_SPLIT;
-
 /* FeatureFlag: Added in v0.114, enabled in v0.114, remove after v1.7 */
 #define RUM_DEFAULT_ALLOW_REPLACE_ON_INSERT_TUPLE true
 PGDLLEXPORT bool RumAllowReplaceOnInsertTuple = RUM_DEFAULT_ALLOW_REPLACE_ON_INSERT_TUPLE;
@@ -467,14 +462,6 @@ InitializeCommonDocumentDBGUCs(const char *rumGucPrefix, const
 		PGC_USERSET, 0,
 		NULL, NULL, NULL);
 
-	DefineCustomBoolVariable(
-		psprintf("%s.track_incomplete_split", documentDBRumGucPrefix),
-		"Sets whether or not to track incomplete splits",
-		NULL,
-		&RumTrackIncompleteSplit,
-		RUM_DEFAULT_TRACK_INCOMPLETE_SPLIT,
-		PGC_USERSET, 0,
-		NULL, NULL, NULL);
 	DefineCustomBoolVariable(
 		psprintf("%s.allow_replace_on_insert_tuple", documentDBRumGucPrefix),
 		"Sets whether or not to allow replacing an existing tuple on insert",
