@@ -1812,14 +1812,16 @@ ShardCollectionCore(ShardCollectionArgs *args)
 
 		bool buildAsUniqueForPrepareUnique = EnablePrepareUnique;
 		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&databaseDatum,
-																  createIndexesMsg,
-																  buildAsUniqueForPrepareUnique);
+																  createIndexesMsg);
 		bool skipCheckCollectionCreate = createIndexesArg.blocking;
 		bool uniqueIndexOnly = false;
 
 		/* We call it good if it doesn't throw. */
+		List *optionalIndexList = NIL;
 		create_indexes_non_concurrently(databaseDatum, createIndexesArg,
-										skipCheckCollectionCreate, uniqueIndexOnly);
+										skipCheckCollectionCreate, uniqueIndexOnly,
+										buildAsUniqueForPrepareUnique,
+										optionalIndexList);
 
 		/* recreate extended indexes */
 		if (EnableExtendedIndexes)

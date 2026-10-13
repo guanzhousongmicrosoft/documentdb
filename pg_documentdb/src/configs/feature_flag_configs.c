@@ -166,6 +166,11 @@ bool EnableCompositeUniqueOptionalKey =
 bool EnableUniqueNullMissingEquivalence =
 	DEFAULT_ENABLE_UNIQUE_NULL_MISSING_EQUIVALENCE;
 
+/* Added on v1.2, enabled on v1.2, remove after v1.6 */
+#define DEFAULT_ENABLE_UNIQUE_NULL_MISSING_SEMANTICS true
+bool EnableUniqueNullMissingSemantics =
+	DEFAULT_ENABLE_UNIQUE_NULL_MISSING_SEMANTICS;
+
 /* Added in v1.2, Pending stabilization, enable in v1.4 */
 #define DEFAULT_ENABLE_COLLATED_UNIQUE_INDEXES false
 bool EnableCollatedUniqueIndexes =
@@ -929,6 +934,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"null value."),
 		NULL, &EnableUniqueNullMissingEquivalence,
 		DEFAULT_ENABLE_UNIQUE_NULL_MISSING_EQUIVALENCE,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_unique_null_missing_semantics", newGucPrefix),
+		gettext_noop(
+			"Whether unique index null/missing conflict checks use corrected semantics."),
+		NULL, &EnableUniqueNullMissingSemantics,
+		DEFAULT_ENABLE_UNIQUE_NULL_MISSING_SEMANTICS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

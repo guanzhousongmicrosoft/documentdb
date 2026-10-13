@@ -990,7 +990,8 @@ ParseReindexSpec(pgbson *reindexSpec, char **collectionName, bool *updateOptions
 
 static char *
 GenerateIndexCreateSpecForUpdateOptions(IndexDetails *indexDef, bool
-										buildAsUniqueForPrepareUnique)
+										buildAsUniqueForPrepareUnique,
+										const bson_value_t *defaultCollation)
 {
 	/* First convert indexSpec to bson */
 	pgbson *indexSpecBson = IndexSpecAsBson(&indexDef->indexSpec);
@@ -1001,11 +1002,13 @@ GenerateIndexCreateSpecForUpdateOptions(IndexDetails *indexDef, bool
 	PgbsonInitIterator(indexSpecBson, &indexSpecIter);
 	bool ignoreUnknownIndexOptions = true;
 	const bool useTTLIndexInvalidOptionsError = false;
+
 	IndexDef *indexDefinition = ParseIndexDefDocumentInternal(&indexSpecIter,
 															  specJsonRepresentation,
 															  ignoreUnknownIndexOptions,
 															  buildAsUniqueForPrepareUnique,
-															  useTTLIndexInvalidOptionsError);
+															  useTTLIndexInvalidOptionsError,
+															  defaultCollation);
 
 	bool isBackgroundBuild = true;
 	bool createIndexesConcurrently = true;
@@ -1044,6 +1047,8 @@ command_reindex_index_background_internal(PG_FUNCTION_ARGS)
 	}
 
 	uint64 collectionId = collection->collectionId;
+	const bson_value_t *defaultCollation =
+		FetchAndCloneCollationSpecForCollection(collection);
 
 	/*
 	 * Please note that the advisory lock will be released after first transaction commit.
@@ -1100,7 +1105,8 @@ command_reindex_index_background_internal(PG_FUNCTION_ARGS)
 			{
 				bool buildAsUnique = true;
 				indexBuildCmd = GenerateIndexCreateSpecForUpdateOptions(indexDef,
-																		buildAsUnique);
+																		buildAsUnique,
+																		defaultCollation);
 			}
 			else
 			{
@@ -1153,7 +1159,8 @@ command_reindex_index_background_internal(PG_FUNCTION_ARGS)
 		{
 			bool buildAsUnique = false;
 			const char *indexBuildCmd = GenerateIndexCreateSpecForUpdateOptions(indexDef,
-																				buildAsUnique);
+																				buildAsUnique,
+																				defaultCollation);
 
 			const char *suffix = strstr(indexBuildCmd, "USING");
 			if (!suffix)
@@ -1237,11 +1244,10 @@ command_create_indexes_background_internal(PG_FUNCTION_ARGS)
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
-		bool buildAsUniqueForPrepareUnique = false;
-		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum,
-																  arg,
-																  buildAsUniqueForPrepareUnique);
-		*result = SubmitCreateIndexesRequest(dbNameDatum, createIndexesArg, snapshotSet);
+		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum, arg);
+		List *optionalIndexList = NIL;
+		*result = SubmitCreateIndexesRequest(dbNameDatum, createIndexesArg, snapshotSet,
+											 optionalIndexList);
 
 		ReleaseCurrentSubTransaction();
 		MemoryContextSwitchTo(savedMemoryContext);
@@ -1471,7 +1477,8 @@ setup_index_queue_table(PG_FUNCTION_ARGS)
  */
 CreateIndexesResult
 SubmitCreateIndexesRequest(Datum dbNameDatum,
-						   CreateIndexesArg createIndexesArg, bool *volatile snapshotSet)
+						   CreateIndexesArg createIndexesArg, bool *volatile snapshotSet,
+						   List *optionalIndexDefList)
 {
 	char *collectionName = createIndexesArg.collectionName;
 	Datum collectionNameDatum = CStringGetTextDatum(collectionName);
@@ -1480,6 +1487,7 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 		.ok = true /* we will throw an error otherwise */
 	};
 
+	bool buildAsUniqueForPrepareUnique = false;
 	MongoCollection *collection =
 		GetMongoCollectionByNameDatum(dbNameDatum, collectionNameDatum,
 									  AccessShareLock);
@@ -1489,6 +1497,21 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 	}
 	else
 	{
+		/*
+		 * Validate before implicit collection creation, then parse again below
+		 * with the collection metadata that wins any creation race.
+		 */
+		const bson_value_t *defaultCollationForValidation = NULL;
+		if (optionalIndexDefList == NIL)
+		{
+			List *indexDefListTemp =
+				GetIndexesDefList(&createIndexesArg.indexesValue,
+								  createIndexesArg.ignoreUnknownIndexOptions,
+								  buildAsUniqueForPrepareUnique,
+								  defaultCollationForValidation);
+			list_free_deep(indexDefListTemp);
+		}
+
 		/*
 		 * collection does not exist, create it (or race for creating it).
 		 * The creation is implicit to this command, so it may be carried
@@ -1514,6 +1537,28 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 	EnsureCollectionOwner(collection);
 
 	uint64 collectionId = collection->collectionId;
+	const bson_value_t *defaultCollation =
+		FetchAndCloneCollationSpecForCollection(collection);
+
+	List *indexDefList = NIL;
+	if (optionalIndexDefList != NIL)
+	{
+		if (createIndexesArg.indexesValue.value_type != BSON_TYPE_EOD)
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+							errmsg(
+								"Cannot specify both optionalIndexDefList and indexes array in createIndexesArg")));
+		}
+
+		indexDefList = optionalIndexDefList;
+	}
+	else
+	{
+		indexDefList = GetIndexesDefList(&createIndexesArg.indexesValue,
+										 createIndexesArg.ignoreUnknownIndexOptions,
+										 buildAsUniqueForPrepareUnique,
+										 defaultCollation);
+	}
 
 	/*
 	 * Please note that the advisory lock will be released after first transaction commit.
@@ -1541,21 +1586,20 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 	 * some of them due to an identical index.
 	 */
 
-	int nindexesRequested = list_length(createIndexesArg.indexDefList);
+	int nindexesRequested = list_length(indexDefList);
 
 	List *indexIdList = NIL;
-	createIndexesArg.indexDefList =
+	indexDefList =
 		CheckForConflictsAndPruneExistingIndexes(collectionId,
-												 createIndexesArg.indexDefList,
+												 indexDefList,
 												 &indexIdList);
 
 	result.numIndexesBefore = CollectionIdGetIndexCount(collectionId);
 
-	if (result.numIndexesBefore + list_length(createIndexesArg.indexDefList) >
-		MaxIndexesPerCollection)
+	if (result.numIndexesBefore + list_length(indexDefList) > MaxIndexesPerCollection)
 	{
 		int reportIndexDefIdx = MaxIndexesPerCollection - result.numIndexesBefore;
-		const IndexDef *reportIndexDef = list_nth(createIndexesArg.indexDefList,
+		const IndexDef *reportIndexDef = list_nth(indexDefList,
 												  reportIndexDefIdx);
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_CANNOTCREATEINDEX),
 						errmsg("add index fails, too many indexes for %s.%s key:%s",
@@ -1584,15 +1628,23 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 
 		bool uniqueIndexOnly = false;
 		bool skipCheckCollectionCreate = true;
+		CreateIndexesArg parsedCreateIndexesArg = createIndexesArg;
+		if (list_length(indexDefList) > 0)
+		{
+			parsedCreateIndexesArg.indexesValue.value_type = BSON_TYPE_EOD;
+		}
+
 		CreateIndexesResult innerResult = create_indexes_non_concurrently(dbNameDatum,
-																		  createIndexesArg,
+																		  parsedCreateIndexesArg,
 																		  skipCheckCollectionCreate,
-																		  uniqueIndexOnly);
+																		  uniqueIndexOnly,
+																		  buildAsUniqueForPrepareUnique,
+																		  indexDefList);
 		innerResult.createdCollectionAutomatically = true;
 		return innerResult;
 	}
 
-	foreach(indexDefCell, createIndexesArg.indexDefList)
+	foreach(indexDefCell, indexDefList)
 	{
 		IndexDef *indexDef = (IndexDef *) lfirst(indexDefCell);
 		const IndexSpec indexSpec = MakeIndexSpecForIndexDef(indexDef);
@@ -1625,7 +1677,7 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 	ereport(DEBUG1, (errmsg(
 						 "Submitted all requests for collection indexes creation successfully")));
 	result.ok = true;
-	int indexCount = list_length(createIndexesArg.indexDefList);
+	int indexCount = list_length(indexDefList);
 
 	/*
 	 * Set "note" field of the response message based on whether we
