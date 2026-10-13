@@ -254,7 +254,7 @@ typedef struct
 	 * Represents value of "indexes" field.
 	 * Contains IndexDef objects for each document in "indexes" array.
 	 */
-	List *indexDefList;
+	bson_value_t indexesValue;
 
 	/* For unknown index options, ignore or throw error */
 	bool ignoreUnknownIndexOptions;
@@ -270,15 +270,20 @@ typedef struct
 
 bool IsCallCreateIndexesStmt(const Node *node);
 bool IsCallReIndexStmt(const Node *node);
-CreateIndexesArg ParseCreateIndexesArg(Datum *dbNameDatum, pgbson *arg,
-									   bool buildAsUniqueForPrepareUnique);
+CreateIndexesArg ParseCreateIndexesArg(Datum *dbNameDatum, pgbson *arg);
+List * GetIndexesDefList(const bson_value_t *indexesValue, bool ignoreUnknownIndexOptions,
+						 bool buildAsUniqueForPrepareUnique, const
+						 bson_value_t *collationSpec);
 CreateIndexesResult create_indexes_non_concurrently(Datum dbNameDatum,
 													CreateIndexesArg createIndexesArg,
 													bool skipCheckCollectionCreate,
-													bool uniqueIndexOnly);
+													bool uniqueIndexOnly,
+													bool buildAsUniqueForPrepareUnique,
+													List *optionalIndexDefList);
 CreateIndexesResult create_indexes_concurrently(Datum dbNameDatum,
 												CreateIndexesArg createIndexesArg,
-												bool uniqueIndexOnly);
+												bool uniqueIndexOnly, bool
+												buildAsUniqueForPrepareUnique);
 void command_create_indexes(const CallStmt *callStmt,
 							ProcessUtilityContext context,
 							const ParamListInfo params,
@@ -317,7 +322,8 @@ void ValidateIndexName(const bson_value_t *nameValue);
 
 CreateIndexesResult SubmitCreateIndexesRequest(Datum dbNameDatum,
 											   CreateIndexesArg createIndexesArg,
-											   bool *volatile snapshotSet);
+											   bool *volatile snapshotSet,
+											   List *optionalIndexDefList);
 
 Datum ReindexOrCreateCommandCore(PG_FUNCTION_ARGS, char *internalQuery);
 
@@ -326,6 +332,7 @@ IndexDef * ParseIndexDefDocumentInternal(const bson_iter_t *indexesDocIter,
 										 const char *indexSpecRepr,
 										 bool ignoreUnknownIndexOptions,
 										 bool buildAsUniqueForPrepareUnique,
-										 bool useTTLIndexInvalidOptionsError);
+										 bool useTTLIndexInvalidOptionsError,
+										 const bson_value_t *defaultCollation);
 
 #endif

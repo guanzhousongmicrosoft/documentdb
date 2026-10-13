@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/opclass/bson_gin_composite_entrypoint.c
  *
@@ -202,6 +203,7 @@ extern bool EnableFailureOnParallelIndexArraysForMetadataTracking;
 extern bool EnableDynamicCursorDedupTracking;
 extern bool EnableCompositeSecondaryPathOrderPushdown;
 extern bool EnableOrderedSaopMultiRangeSkipAdvance;
+extern bool EnableUniqueNullMissingSemantics;
 
 static void ValidateCompositePathSpec(const char *prefix);
 static Size FillCompositePathSpec(const char *prefix, void *buffer);
@@ -5926,6 +5928,12 @@ GenerateCompositedUniqueEqualQueryValues(Datum *indexEntries, bool *partialMatch
 					options, (int32_t) pathCount);
 				metadata.isDescending = IsIndexTermValueDescending(&indexTerm);
 
+				bool useDescendingBound = metadata.isDescending &&
+										  EnableUniqueNullMissingSemantics;
+				if (useDescendingBound)
+				{
+					indexTerm.element.bsonValue.value_type = BSON_TYPE_NULL;
+				}
 				BsonIndexTermSerialized nullKeySerialized = SerializeBsonIndexTerm(
 					&indexTerm.element, &metadata);
 
@@ -5933,7 +5941,10 @@ GenerateCompositedUniqueEqualQueryValues(Datum *indexEntries, bool *partialMatch
 				BsonIndexTermSerialized minKeySerialized = SerializeBsonIndexTerm(
 					&indexTerm.element, &metadata);
 
-				compositeDatums[j] = minKeySerialized.indexTermVal;
+				/* Start at the first bound in physical index order. */
+				compositeDatums[j] = useDescendingBound ?
+									 nullKeySerialized.indexTermVal :
+									 minKeySerialized.indexTermVal;
 				runDataForEntry->indexBounds[j].lowerBound.bound.value_type =
 					BSON_TYPE_MINKEY;
 				runDataForEntry->indexBounds[j].lowerBound.indexTermValue.element.

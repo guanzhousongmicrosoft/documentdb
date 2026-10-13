@@ -195,6 +195,38 @@ WHERE schemaname = 'documentdb_data' AND tablename = 'documents_' || :'fm_col'
   AND indexname LIKE '%rum%'
 ORDER BY indexname;
 
+-- Descending nullable keys must also conflict under a non-default collation.
+-- The leading string key exercises collated equality during the null probe.
+SELECT documentdb_api_internal.create_indexes_non_concurrently('optkeycolldb',
+  '{ "createIndexes": "coll_null_desc", "indexes": [ { "key": { "s": 1, "a": -1 }, "name": "s_a_desc", "unique": true, "collation": { "locale": "fr", "strength": 1 } }]}', TRUE);
+-- Accepted: the ("cafe", null) key does not exist; missing a indexes as null.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 1, "s": "cafe" }');
+-- Rejected: "CAFE" equals "cafe" under the collation, and null equals missing a.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 2, "s": "CAFE", "a": null }');
+-- Accepted: the "other" prefix differs from the existing "cafe" prefix.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 3, "s": "other", "a": null }');
+-- Rejected: "OTHER" equals "other" under the collation, and missing a equals null.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 4, "s": "OTHER" }');
+-- Accepted: the "distinct" prefix has no existing key.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 5, "s": "distinct", "a": null }');
+SELECT count(*) AS coll_null_desc_rows FROM documentdb_api.collection('optkeycolldb', 'coll_null_desc');
+
+-- DocumentDB currently treats null and literal undefined as the same
+-- unique key, also with collation. We accept this compatibility difference.
+-- Exercise both insertion orders, then reject exact-type duplicates.
+-- Rejected: "OTHER" equals "other", and undefined is equivalent to _id:3's null.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 6, "s": "OTHER", "a": { "$undefined": true } }');
+-- Accepted: the "reverse" prefix has no existing key.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 7, "s": "reverse", "a": { "$undefined": true } }');
+-- Rejected: "REVERSE" equals "reverse", and null is equivalent to _id:7's undefined.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 8, "s": "REVERSE", "a": null }');
+-- Rejected: "Reverse" equals "reverse", and the undefined key duplicates _id:7.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 9, "s": "Reverse", "a": { "$undefined": true } }');
+-- Rejected: the ("other", null) key duplicates _id:3.
+SELECT documentdb_api.insert_one('optkeycolldb', 'coll_null_desc', '{ "_id": 10, "s": "other", "a": null }');
+-- Four documents remain because the two cross-type inserts are duplicates.
+SELECT count(*) AS coll_undefined_rows FROM documentdb_api.collection('optkeycolldb', 'coll_null_desc');
+
 RESET documentdb.enable_collated_unique_indexes;
 RESET documentdb.enableCollationWithNonUniqueOrderedIndexes;
 RESET documentdb_core.enableCollation;

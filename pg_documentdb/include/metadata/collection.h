@@ -228,6 +228,13 @@ bool IsDataTableCreatedWithinCurrentXact(const MongoCollection *collection);
 /* make a copy of given MongoCollection */
 MongoCollection * CopyMongoCollection(const MongoCollection *collection);
 
+/*
+ * Fetches and clones the raw default collation for a non-NULL collection.
+ * Returns NULL for an absent or simple default collation.
+ * Do not use on hot paths: non-simple defaults require a catalog query.
+ */
+bson_value_t * FetchAndCloneCollationSpecForCollection(const MongoCollection *collection);
+
 
 /* Copies collection metadata by ID and reports whether the collection exists. */
 bool TryCopyMongoCollectionByCollectionId(MongoCollection *collection,

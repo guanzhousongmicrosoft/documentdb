@@ -2713,3 +2713,71 @@ CopyCollectionOptions(const pgbson *options, MongoCollection *collection)
 		}
 	}
 }
+
+
+bson_value_t *
+FetchAndCloneCollationSpecForCollection(const MongoCollection *collection)
+{
+	if (collection == NULL)
+	{
+		ereport(ERROR, (errmsg("Collection must not be NULL")));
+	}
+
+	if (collection->options.collationString[0] == '\0')
+	{
+		return NULL;
+	}
+
+	if (!IsClusterVersionAtleast(DocDB_V1, 0, 0))
+	{
+		return NULL;
+	}
+
+	StringInfoData query;
+	Oid argTypes[1];
+	Datum argValues[1];
+
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT options FROM %s.collections WHERE collection_id = $1",
+					 ApiCatalogSchemaName);
+
+	argTypes[0] = INT8OID;
+	argValues[0] = UInt64GetDatum(collection->collectionId);
+
+	bool isNull = false;
+	int nArgs = 1;
+	char *argNulls = NULL;
+
+	/* Allow dirty reads here to ensure we can create a collection and read it in the same transaction */
+	bool readOnly = false;
+	Datum result = ExtensionExecuteQueryWithArgsViaSPI(query.data, nArgs, argTypes,
+													   argValues, argNulls, readOnly,
+													   SPI_OK_SELECT, &isNull);
+
+	if (isNull)
+	{
+		return NULL;
+	}
+
+	pgbson *options = DatumGetPgBson(result);
+	if (options == NULL)
+	{
+		return NULL;
+	}
+
+	bson_iter_t optionsIter;
+	PgbsonInitIterator(options, &optionsIter);
+	if (!bson_iter_find(&optionsIter, "collation"))
+	{
+		return NULL;
+	}
+
+	const bson_value_t *collationValue = bson_iter_value(&optionsIter);
+	bson_value_t *target = palloc(sizeof(bson_value_t));
+	bson_value_copy(collationValue, target);
+	pfree(options);
+	pfree(query.data);
+
+	return target;
+}
