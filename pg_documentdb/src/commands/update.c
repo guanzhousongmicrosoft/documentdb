@@ -144,9 +144,6 @@ typedef struct
 {
 	UpdateOneParams updateOneParams;
 
-	/* original collation document for worker serialization */
-	const bson_value_t *collation;
-
 	/* whether to update multiple documents */
 	int isMulti;
 } UpdateSpec;
@@ -338,13 +335,15 @@ static BatchUpdateSpec * BuildBatchUpdateSpec(bson_iter_t *updateCommandIter,
 											  pgbsonsequence *updateDocs,
 											  Datum *databaseNameDatum);
 static List * BuildUpdateSpecList(bson_iter_t *updateArrayIter, bool *hasUpsert,
-								  const bson_value_t *variableSpec);
+								  const bson_value_t *variableSpec,
+								  bool allowInternalFields);
 static List * BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs,
 											  bool *hasUpsert,
-											  const bson_value_t *variableSpec);
+											  const bson_value_t *variableSpec,
+											  bool allowInternalFields);
 static UpdateSpec * BuildUpdateSpec(bson_iter_t *updateIterator,
-									const bson_value_t *variableSpec);
-static void EnsureUpdateCollationParsed(UpdateSpec *updateSpec);
+									const bson_value_t *variableSpec,
+									bool allowInternalFields);
 static void ProcessBatchUpdate(MongoCollection *collection,
 							   BatchUpdateSpec *batchSpec,
 							   text *transactionId,
@@ -849,17 +848,19 @@ BuildUpdates(BatchUpdateSpec *spec)
 	}
 
 	List *updates = NIL;
+	bool allowInternalFields = false;
 	if (spec->updateSequence != NULL)
 	{
 		updates = BuildUpdateSpecListFromSequence(spec->updateSequence, &spec->hasUpsert,
-												  &spec->variableSpec);
+												  &spec->variableSpec,
+												  allowInternalFields);
 	}
 	else if (spec->updateValue.value_type == BSON_TYPE_ARRAY)
 	{
 		bson_iter_t updateArrayIter;
 		BsonValueInitIterator(&spec->updateValue, &updateArrayIter);
 		updates = BuildUpdateSpecList(&updateArrayIter, &spec->hasUpsert,
-									  &spec->variableSpec);
+									  &spec->variableSpec, allowInternalFields);
 	}
 	else
 	{
@@ -1020,7 +1021,7 @@ BuildBatchUpdateSpec(bson_iter_t *updateCommandIter, pgbsonsequence *updateDocs,
  */
 static List *
 BuildUpdateSpecList(bson_iter_t *updateArrayIter, bool *hasUpsert,
-					const bson_value_t *variableSpec)
+					const bson_value_t *variableSpec, bool allowInternalFields)
 {
 	List *updates = NIL;
 
@@ -1035,7 +1036,8 @@ BuildUpdateSpecList(bson_iter_t *updateArrayIter, bool *hasUpsert,
 		bson_iter_t updateOperationIter;
 		bson_iter_recurse(updateArrayIter, &updateOperationIter);
 
-		UpdateSpec *update = BuildUpdateSpec(&updateOperationIter, variableSpec);
+		UpdateSpec *update = BuildUpdateSpec(&updateOperationIter, variableSpec,
+											 allowInternalFields);
 
 		updates = lappend(updates, update);
 
@@ -1054,7 +1056,8 @@ BuildUpdateSpecList(bson_iter_t *updateArrayIter, bool *hasUpsert,
  */
 static List *
 BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs, bool *hasUpsert,
-								const bson_value_t *variableSpec)
+								const bson_value_t *variableSpec,
+								bool allowInternalFields)
 {
 	List *updates = NIL;
 
@@ -1065,7 +1068,8 @@ BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs, bool *hasUpsert,
 		bson_iter_t updateOperationIter;
 		BsonValueInitIterator(lfirst(documentCell), &updateOperationIter);
 
-		UpdateSpec *update = BuildUpdateSpec(&updateOperationIter, variableSpec);
+		UpdateSpec *update = BuildUpdateSpec(&updateOperationIter, variableSpec,
+											 allowInternalFields);
 
 		updates = lappend(updates, update);
 
@@ -1084,7 +1088,8 @@ BuildUpdateSpecListFromSequence(pgbsonsequence *updateDocs, bool *hasUpsert,
  * operation.
  */
 static UpdateSpec *
-BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
+BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec,
+				bool allowInternalFields)
 {
 	bson_value_t *query = NULL;
 	bson_value_t *update = NULL;
@@ -1092,8 +1097,8 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 	bool isMulti = false;
 	bool isUpsert = false;
 	bson_value_t *sort = NULL;
-	bson_value_t *collation = NULL;
 
+	char collationStringBuffer[MAX_ICU_COLLATION_LENGTH] = { 0 };
 	while (bson_iter_next(updateIter))
 	{
 		const char *field = bson_iter_key(updateIter);
@@ -1153,8 +1158,11 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 				if (EnsureTopLevelFieldIsDocumentNullOrEmptyOk(
 						"update.updates.collation", updateIter))
 				{
-					collation = palloc(sizeof(bson_value_t));
-					*collation = *bson_iter_value(updateIter);
+					/*
+					 * TODO_COLLATION: Keep parse failures inside the per-update error boundary.
+					 */
+					ParseAndGetCollationString(bson_iter_value(updateIter),
+											   collationStringBuffer);
 				}
 			}
 			else
@@ -1163,6 +1171,15 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 								errmsg("BSON field 'update.updates.collation' is not yet "
 									   "supported")));
 			}
+		}
+		else if (allowInternalFields && strcmp(field, "$_internalCollation") == 0)
+		{
+			EnsureTopLevelFieldType("update.updates.$_internalCollation",
+									updateIter, BSON_TYPE_UTF8);
+
+			const char *collationString = bson_iter_utf8(updateIter, NULL);
+			strlcpy(collationStringBuffer, collationString,
+					sizeof(collationStringBuffer));
 		}
 		else if (strcmp(field, "hint") == 0)
 		{
@@ -1213,38 +1230,13 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec)
 	updateSpec->updateOneParams.sort = sort;
 	updateSpec->updateOneParams.variableSpec = variableSpec;
 	updateSpec->isMulti = isMulti;
-
-	/*
-	 * Left unparsed: batch push-down re-serializes this document for the worker,
-	 * and deferring the parse to EnsureUpdateCollationParsed() keeps an invalid
-	 * collation a write error indexed to this update rather than a command-level
-	 * failure.
-	 */
-	updateSpec->collation = collation;
-
-	return updateSpec;
-}
-
-
-/*
- * Parses the retained collation document into updateOneParams.collationString,
- * and is a no-op once that is populated. Call only from inside the per-update
- * error boundary, since an invalid collation throws here.
- */
-static void
-EnsureUpdateCollationParsed(UpdateSpec *updateSpec)
-{
-	char collationString[MAX_ICU_COLLATION_LENGTH] = { 0 };
-
-	if (updateSpec->collation == NULL ||
-		IsCollationValid(updateSpec->updateOneParams.collationString))
+	if (IsCollationValid(collationStringBuffer))
 	{
-		return;
+		strlcpy(updateSpec->updateOneParams.collationString, collationStringBuffer,
+				sizeof(updateSpec->updateOneParams.collationString));
 	}
 
-	ParseAndGetCollationString(updateSpec->collation, collationString);
-	strlcpy(updateSpec->updateOneParams.collationString, collationString,
-			sizeof(updateSpec->updateOneParams.collationString));
+	return updateSpec;
 }
 
 
@@ -1959,8 +1951,6 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 			  text *transactionId, UpdateResult *result, bool forceInlineWrites,
 			  ExprEvalState *stateForSchemaValidation)
 {
-	EnsureUpdateCollationParsed(updateSpec);
-
 	const bson_value_t *query = updateSpec->updateOneParams.query;
 	const bson_value_t *update = updateSpec->updateOneParams.update;
 	const bson_value_t *arrayFilters = updateSpec->updateOneParams.arrayFilters;
@@ -3130,17 +3120,20 @@ command_update_worker(PG_FUNCTION_ARGS)
 
 	/* we have a batch unsharded update. */
 	bool hasUpsertIgnore = false;
+	bool allowInternalFields = true;
 	List *updates = NIL;
 	if (updateSequence != NULL)
 	{
 		updates = BuildUpdateSpecListFromSequence(updateSequence, &hasUpsertIgnore,
-												  params.variableSpec);
+												  params.variableSpec,
+												  allowInternalFields);
 	}
 	else
 	{
 		bson_iter_t arrayIter;
 		BsonValueInitIterator(&params.param.updateBatch, &arrayIter);
-		updates = BuildUpdateSpecList(&arrayIter, &hasUpsertIgnore, params.variableSpec);
+		updates = BuildUpdateSpecList(&arrayIter, &hasUpsertIgnore, params.variableSpec,
+									  allowInternalFields);
 	}
 
 	pgbson *result = ProcessUnshardedUpdateBatchWorker(mongoCollection,
@@ -3301,9 +3294,10 @@ WriteUpdateOneParamsAsUpdateSpec(UpdateSpec *updateSpec, pgbson_writer *writer)
 								params->arrayFilters);
 	}
 
-	if (updateSpec->collation != NULL)
+	if (IsCollationValid(params->collationString))
 	{
-		PgbsonWriterAppendValue(writer, "collation", 9, updateSpec->collation);
+		PgbsonWriterAppendUtf8(writer, "$_internalCollation", 19,
+							   params->collationString);
 	}
 }
 
@@ -3343,6 +3337,19 @@ SerializeUpdateBatchParams(int *updateIndex, List *updates,
 			updateSpec->updateOneParams.variableSpec->value_type == BSON_TYPE_DOCUMENT)
 		{
 			variableSpec = updateSpec->updateOneParams.variableSpec;
+		}
+
+		/*
+		 * $_internalCollation was added to the worker spec in version 1.2.
+		 * Older workers reject this field.
+		 */
+		if (IsCollationValid(updateSpec->updateOneParams.collationString) &&
+			!IsClusterVersionAtleast(DocDB_V1, 2, 0))
+		{
+			ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+							errmsg(
+								"BSON field 'update.updates.collation' is not supported "
+								"for remote bulk updates")));
 		}
 
 		WriteUpdateOneParamsAsUpdateSpec(updateSpec, &specWriter);
@@ -4818,7 +4825,6 @@ ValidateQueryAndUpdateDocuments(BatchUpdateSpec *batchSpec,
 		MemoryContext oldContext = CurrentMemoryContext;
 		PG_TRY();
 		{
-			EnsureUpdateCollationParsed(updateSpec);
 			ValidateQueryDocumentValue(updateSpec->updateOneParams.query);
 			ValidateUpdateDocument(updateSpec->updateOneParams.update,
 								   updateSpec->updateOneParams.query,
@@ -5316,8 +5322,6 @@ GenerateUpdateQuery(text *database, pgbson *updateSpec, bool setStatementTimeout
 	}
 
 	UpdateSpec *updateSingleSpec = linitial(batchSpec->updates);
-	EnsureUpdateCollationParsed(updateSingleSpec);
-
 	if (updateSingleSpec->isMulti &&
 		updateSingleSpec->updateOneParams.sort != NULL)
 	{
