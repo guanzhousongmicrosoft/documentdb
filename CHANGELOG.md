@@ -20,6 +20,7 @@
 * Preserve UTF-8 string boundaries in trim expressions and string-to-binData conversions. *[Bugfix]*
 * Limit result string size for `$concat`. *[Bugfix]*
 * Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
+* Prevent backend crashes and incorrect results when a correlated `$lookup` rescans a `$densify` stage using full bounds, including scans stopped early by a downstream `$limit`. Release copied partition keys, projection trees, and date intervals between scans to reduce peak query memory. *[Bugfix]*
 * Allow unfiltered `$sample` queries to be pushed down to a `Sample Scan` when a dynamic cursor marker is present. Guarded by the `enable_sample_scan_pushdown_for_dynamic_cursor` feature flag. *[Bugfix/Perf]*
 * Treat an explicit `simple` collation as no collation, emitting no collation tag so it uses binary comparison on every query and index path. *[Bugfix]*
 * Preserve sorting and grouping results when a null equality lies between compound-index sort keys. *[Bugfix]*
