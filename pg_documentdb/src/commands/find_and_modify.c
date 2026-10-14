@@ -1,5 +1,7 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * Licensed under the MIT License.
+ * SPDX-License-Identifier: MIT
  *
  * src/commands/find_and_modify.c
  *
@@ -72,6 +74,11 @@ typedef struct
 
 	/* command collation */
 	char collationString[MAX_ICU_COLLATION_LENGTH];
+
+	/*
+	 * Whether a non-null, non-empty collation was specified, including "simple".
+	 */
+	bool hasExplicitCollation;
 
 	/* parsed variable spec */
 	bson_value_t variableSpec;
@@ -370,6 +377,7 @@ ParseFindAndModifyMessage(pgbson *message, Datum *databaseNameDatum)
 				{
 					ParseAndGetCollationString(bson_iter_value(&messageIter),
 											   spec.collationString);
+					spec.hasExplicitCollation = true;
 				}
 			}
 			else if (!SkipFailOnCollation)
@@ -525,6 +533,12 @@ static FindAndModifyResult
 ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 						 text *transactionId)
 {
+	if (!spec->hasExplicitCollation)
+	{
+		strlcpy(spec->collationString, collection->options.collationString,
+				sizeof(spec->collationString));
+	}
+
 	int64 shardKeyHash = 0;
 	bool shardKeyValueCollationAware = false;
 	bool hasShardKeyValueFilter =
@@ -535,7 +549,7 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 										 &shardKeyHash,
 										 &shardKeyValueCollationAware);
 
-	if (IsCollationValid(spec->collationString) &&
+	if (IsCollationApplicable(spec->collationString) &&
 		shardKeyValueCollationAware)
 	{
 		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDOPTIONS),
@@ -558,7 +572,8 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 			.returnFields = spec->returnFields,
 			.returnDeletedDocument = true,
 			.sort = spec->sort,
-			.variableSpec = &spec->variableSpec
+			.variableSpec = &spec->variableSpec,
+			.hasExplicitCollation = spec->hasExplicitCollation
 		};
 
 		strlcpy((char *) deleteOneParams.collationString, spec->collationString,
@@ -602,7 +617,8 @@ ProcessFindAndModifySpec(MongoCollection *collection, FindAndModifySpec *spec,
 			.returnFields = spec->returnFields,
 			.sort = spec->sort,
 			.update = spec->update,
-			.variableSpec = &spec->variableSpec
+			.variableSpec = &spec->variableSpec,
+			.hasExplicitCollation = spec->hasExplicitCollation
 		};
 
 		strlcpy(updateOneParams.collationString, spec->collationString,
