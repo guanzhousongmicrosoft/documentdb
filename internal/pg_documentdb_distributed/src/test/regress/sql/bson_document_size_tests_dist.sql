@@ -4,7 +4,7 @@ SET documentdb.next_collection_id TO 27150000;
 SET documentdb.next_collection_index_id TO 27150000;
 
 -- Inline document compression with distributed execution. Stored size of a
--- document of about 1.5 KB of data with the threshold set to 1024 (about 620
+-- document of about 1.5 KB of data with the threshold set to 1024 (about 610
 -- to 690 bytes means compressed).
 --
 -- "remote" means local shard execution is off
@@ -16,16 +16,17 @@ SET documentdb.next_collection_index_id TO 27150000;
 -- | Operation                                         | Stored size | Compressed? |
 -- |---------------------------------------------------|-------------|-------------|
 -- | insertOne local                                   | 629         | yes         |
--- | insertOne remote (TODO)                           | 1539        | no          |
+-- | insertOne remote                                  | 611         | yes         |
 -- | insertMany local                                  | 633         | yes         |
 -- | insertMany remote (TODO)                          | 1538        | no          |
+-- | insertMany remote single-document retries         | 630         | yes         |
 -- | update updateByObjectId                           | 635-685     | yes         |
 -- | update updateOne (filter not on _id)              | 628         | yes         |
--- | update updateMany (TODO, not implemented)         | 1538        | no          |
+-- | update updateMany                                | 631-636     | yes         |
 -- | update upsert                                     | 626         | yes         |
 -- | update_txn_proc updateByObjectId                  | 622         | yes         |
 -- | update_txn_proc updateOne (filter not on _id)     | 631         | yes         |
--- | update_txn_proc updateMany (TODO, not implemented)| 1537        | no          |
+-- | update_txn_proc updateMany                       | 626         | yes         |
 -- | update_txn_proc upsert                            | 624         | yes         |
 -- | Raw UPDATE through the test function              | 623         | yes         |
 -- | Raw INSERT through the test function (TODO)       | 1537        | no          |
@@ -42,18 +43,19 @@ SET documentdb.next_collection_index_id TO 27150000;
 --   multi false) are routed to update_worker on the shard. The write then
 --   runs on the node that owns the shard, with the shard table known, and the
 --   document is compressed right before it is written.
+-- * Eligible remote single-document inserts are routed to insert_worker when
+--   compression is enabled on the coordinator. The worker compresses the
+--   document before inserting directly into the local shard.
 --
--- Why remote inserts are not compressed (TODO):
--- * Without local shard execution there is no shard table, so the insert is
+-- Why remote batches are not compressed (TODO):
+-- * Without local shard execution there is no shard table, so the batch is
 --   built as an INSERT on the distributed table (CreateInsertQuery) and run
 --   through the distributed executor (RunInsertQuery). The coordinator
 --   compresses the document parameter, but the executor sends the value to
 --   the shard over the connection in its serialized form, which is always the
 --   full uncompressed document. The shard stores what it receives and nothing
---   compresses it again. This applies to single document and batch inserts.
--- * Possible fix: compress on the shard, for example by routing inserts to
---   insert_worker like updates are routed to update_worker. Inserts with a
---   transaction id already call insert_worker, which is not covered here.
+--   compresses it again. Single-document retries after a batch error use
+--   insert_worker and are compressed.
 
 -- Run every write without local shard execution so that the commands are sent
 -- to the shards through the distributed executor.
@@ -69,14 +71,13 @@ SELECT current_user AS original_test_user \gset
 CREATE ROLE doc_size_compress_user WITH LOGIN SUPERUSER IN ROLE :original_test_user;
 ALTER ROLE doc_size_compress_user SET documentdb.document_toast_compression_threshold TO 1024;
 SET ROLE doc_size_compress_user;
+-- Routing decisions use the coordinator setting as well as the worker setting.
+SET documentdb.document_toast_compression_threshold TO 1024;
 SET citus.propagate_set_commands TO 'local';
 
 -- Documents of roughly 1.5 KB with nested documents, arrays, dates, and a
 -- string or compound _id. Verify the stored size after insert and after an
 -- in place single document update.
--- TODO: The insert_one calls below are stored uncompressed (see the header
--- for why). The updates that follow run on the shard and are stored
--- compressed.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_string_id');
 
 SELECT documentdb_api.insert_one('doc_size_db', 'doc_size_string_id', '{"_id": "hijklmnopqrstuvwxyz0123456789abcdefg", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}');
@@ -222,9 +223,8 @@ DROP FUNCTION documentdb_api_internal.test_compress_bson_if_needed(documentdb_co
 -- insertMany batches.
 -- TODO: insertMany batches are stored uncompressed. A batch is a single
 -- multi row INSERT on the distributed table, and each document reaches the
--- shard uncompressed for the same reason as single document inserts (see the
--- header). The retry of the remaining documents after a duplicate key error
--- inserts them one at a time and is not compressed either.
+-- shard uncompressed (see the header). The retry of the remaining documents
+-- after a duplicate key error inserts them one at a time and compresses them.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_insert_many');
 
 SELECT documentdb_api.insert('doc_size_db', '{ "insert": "doc_size_insert_many", "ordered": true, "documents": [ {"_id": "insertmanyorderedabcdefghijklmnop01", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}, {"_id": "insertmanyorderedabcdefghijklmnop02", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}, {"_id": "insertmanyorderedabcdefghijklmnop03", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}} ] }');
@@ -247,8 +247,6 @@ FROM documentdb_data.documents_27150005 ORDER BY object_id;
 SELECT document FROM bson_aggregation_find('doc_size_db', '{ "find": "doc_size_insert_many", "projection": { "f01abcdefghijkl": 1 }, "sort": { "_id": 1 } }');
 
 -- updateMany over all documents in the collection.
--- TODO: updateMany is stored uncompressed because compression is not
--- implemented for multi document updates yet.
 SELECT documentdb_api.update('doc_size_db', '{ "update": "doc_size_insert_many", "updates": [ { "q": {}, "u": { "$set": { "f01abcdefghijkl": "updmany" } }, "multi": true } ] }');
 
 SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(document::bytea) AS bytea_length
@@ -262,7 +260,7 @@ SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_insert_many');
 -- transaction block, so it relies on the threshold set for the role.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_txn_proc');
 
--- The inserted document is stored uncompressed (see the TODO in the header).
+-- The inserted document is stored compressed.
 SELECT documentdb_api.insert_one('doc_size_db', 'doc_size_txn_proc', '{"_id": "txnprocupdateabcdefghijklmnopqrstu", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}');
 
 SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(document::bytea) AS bytea_length
@@ -296,7 +294,7 @@ SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_txn_proc');
 -- updateOne with a filter that is not on _id, through update() and through
 -- update_txn_proc, and updateMany through update_txn_proc. Each document has
 -- a unique value in f01abcdefghijkl that the filters match on. The inserts
--- are stored uncompressed (see the TODO in the header).
+-- are stored compressed.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_update_kinds');
 SELECT documentdb_api.insert_one('doc_size_db', 'doc_size_update_kinds', '{"_id": "updatekindsfilterabcdefghijklmnopq", "f01abcdefghijkl": "markera", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}');
 SELECT documentdb_api.insert_one('doc_size_db', 'doc_size_update_kinds', '{"_id": "updatekindstxnfilterabcdefghijklmn", "f01abcdefghijkl": "markerb", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}');
@@ -317,8 +315,7 @@ CALL documentdb_api.update_txn_proc('doc_size_db', '{ "update": "doc_size_update
 SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(document::bytea) AS bytea_length
 FROM documentdb_data.documents_27150007 ORDER BY object_id;
 
--- TODO: updateMany through update_txn_proc is stored uncompressed because
--- compression is not implemented for multi document updates yet.
+-- updateMany through update_txn_proc compresses the modified document.
 CALL documentdb_api.update_txn_proc('doc_size_db', '{ "update": "doc_size_update_kinds", "updates": [ { "q": { "f01abcdefghijkl": "markerc" }, "u": { "$set": { "f01abcdefghijkl": "updatec" } }, "multi": true } ] }');
 
 SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(document::bytea) AS bytea_length
