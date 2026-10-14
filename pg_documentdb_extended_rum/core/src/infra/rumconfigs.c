@@ -126,7 +126,7 @@ PGDLLEXPORT bool RumPruneEmptyPages = RUM_DEFAULT_PRUNE_EMPTY_PAGES;
 #define RUM_DEFAULT_ENABLE_NEW_BULK_DELETE true
 PGDLLEXPORT bool RumEnableNewBulkDelete = RUM_DEFAULT_ENABLE_NEW_BULK_DELETE;
 
-/* FeatureFlag: Added in v0.108, Pending stabilization, enable on v1.2 */
+/* FeatureFlag: Added in v0.108, Pending stabilization, enable on v1.3 */
 #define RUM_DEFAULT_ENABLE_NEW_BULK_DELETE_INLINE_DATA_PAGES false
 PGDLLEXPORT bool RumNewBulkDeleteInlineDataPages =
 	RUM_DEFAULT_ENABLE_NEW_BULK_DELETE_INLINE_DATA_PAGES;
@@ -164,7 +164,7 @@ PGDLLEXPORT bool RumEnableOverwriteEntryTupleOnVacuum =
 PGDLLEXPORT bool RumEnableTargetedPostingTreePruning =
 	RUM_DEFAULT_ENABLE_TARGETED_POSTING_TREE_PRUNING;
 
-/* FeatureFlag: Added in v0.115, Pending stabilization, enable on v1.1 */
+/* FeatureFlag: Added in v0.115, Pending stabilization, enable on v1.3 */
 #define RUM_DEFAULT_ENABLE_SINGLE_PASS_POSTING_TREE_VACUUM false
 PGDLLEXPORT bool RumEnableSinglePassPostingTreeVacuum =
 	RUM_DEFAULT_ENABLE_SINGLE_PASS_POSTING_TREE_VACUUM;
