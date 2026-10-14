@@ -1097,6 +1097,7 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec,
 	bool isMulti = false;
 	bool isUpsert = false;
 	bson_value_t *sort = NULL;
+	bool hasExplicitCollation = false;
 
 	char collationStringBuffer[MAX_ICU_COLLATION_LENGTH] = { 0 };
 	while (bson_iter_next(updateIter))
@@ -1163,6 +1164,7 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec,
 					 */
 					ParseAndGetCollationString(bson_iter_value(updateIter),
 											   collationStringBuffer);
+					hasExplicitCollation = true;
 				}
 			}
 			else
@@ -1180,6 +1182,7 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec,
 			const char *collationString = bson_iter_utf8(updateIter, NULL);
 			strlcpy(collationStringBuffer, collationString,
 					sizeof(collationStringBuffer));
+			hasExplicitCollation = true;
 		}
 		else if (strcmp(field, "hint") == 0)
 		{
@@ -1230,11 +1233,10 @@ BuildUpdateSpec(bson_iter_t *updateIter, const bson_value_t *variableSpec,
 	updateSpec->updateOneParams.sort = sort;
 	updateSpec->updateOneParams.variableSpec = variableSpec;
 	updateSpec->isMulti = isMulti;
-	if (IsCollationValid(collationStringBuffer))
-	{
-		strlcpy(updateSpec->updateOneParams.collationString, collationStringBuffer,
-				sizeof(updateSpec->updateOneParams.collationString));
-	}
+	updateSpec->updateOneParams.hasExplicitCollation = hasExplicitCollation;
+
+	strlcpy(updateSpec->updateOneParams.collationString, collationStringBuffer,
+			sizeof(updateSpec->updateOneParams.collationString));
 
 	return updateSpec;
 }
@@ -1956,6 +1958,13 @@ ProcessUpdate(MongoCollection *collection, UpdateSpec *updateSpec,
 	const bson_value_t *arrayFilters = updateSpec->updateOneParams.arrayFilters;
 	bool isUpsert = updateSpec->updateOneParams.isUpsert;
 	bool isMulti = updateSpec->isMulti;
+
+	if (EnableCollation && !updateSpec->updateOneParams.hasExplicitCollation)
+	{
+		strlcpy(updateSpec->updateOneParams.collationString,
+				collection->options.collationString,
+				sizeof(updateSpec->updateOneParams.collationString));
+	}
 
 	/* sort cannot be performed when multi is set to true  */
 	if (isMulti && updateSpec->updateOneParams.sort != NULL)
@@ -3270,10 +3279,8 @@ SerializeUnshardedUpdateParams(const bson_value_t *updateSpec, bool isOrdered,
 
 
 static void
-WriteUpdateOneParamsAsUpdateSpec(UpdateSpec *updateSpec, pgbson_writer *writer)
+WriteUpdateOneParamsAsUpdateSpec(UpdateOneParams *params, pgbson_writer *writer)
 {
-	UpdateOneParams *params = &updateSpec->updateOneParams;
-
 	if (params->query != NULL)
 	{
 		PgbsonWriterAppendValue(writer, "q", 1, params->query);
@@ -3294,7 +3301,7 @@ WriteUpdateOneParamsAsUpdateSpec(UpdateSpec *updateSpec, pgbson_writer *writer)
 								params->arrayFilters);
 	}
 
-	if (IsCollationValid(params->collationString))
+	if (params->hasExplicitCollation)
 	{
 		PgbsonWriterAppendUtf8(writer, "$_internalCollation", 19,
 							   params->collationString);
@@ -3352,7 +3359,7 @@ SerializeUpdateBatchParams(int *updateIndex, List *updates,
 								"for remote bulk updates")));
 		}
 
-		WriteUpdateOneParamsAsUpdateSpec(updateSpec, &specWriter);
+		WriteUpdateOneParamsAsUpdateSpec(&updateSpec->updateOneParams, &specWriter);
 		PgbsonWriterAppendBool(&specWriter, "multi", 5, updateSpec->isMulti);
 		PgbsonArrayWriterEndDocument(&specsWriter, &specWriter);
 		(*updateIndex)++;
@@ -3631,11 +3638,9 @@ DeserializeUpdateWorkerSpec(pgbson *updateInternalSpec,
 		else if (strcmp(key, "collation") == 0)
 		{
 			const char *collationString = bson_iter_utf8(&internalIter, NULL);
-			if (IsCollationValid(collationString))
-			{
-				strlcpy(updateOneParams->collationString, collationString,
-						sizeof(updateOneParams->collationString));
-			}
+			updateOneParams->hasExplicitCollation = true;
+			strlcpy(updateOneParams->collationString, collationString,
+					sizeof(updateOneParams->collationString));
 		}
 	}
 }
@@ -5064,6 +5069,7 @@ DeserializeUpdateManyWorkerSpec(const bson_value_t *value, WorkerUpdateParam *pa
 			uint32_t collationStringLength = 0;
 			const char *collationString = bson_iter_utf8(&iter,
 														 &collationStringLength);
+			updateManyParams->hasExplicitCollation = true;
 			if (IsCollationValid(collationString))
 			{
 				const uint32_t maxCopyLength =
@@ -5313,6 +5319,12 @@ GenerateUpdateQuery(text *database, pgbson *updateSpec, bool setStatementTimeout
 	Datum databaseDatum = database == NULL ? (Datum) 0 : PointerGetDatum(database);
 	BatchUpdateSpec *batchSpec = BuildBatchUpdateSpec(&updateCommandIter, updateDocs,
 													  &databaseDatum);
+
+	Datum collectionNameDatum = CStringGetTextDatum(batchSpec->collectionName);
+	MongoCollection *collection =
+		GetMongoCollectionByNameDatum(databaseDatum, collectionNameDatum,
+									  RowExclusiveLock);
+
 	BuildUpdates(batchSpec);
 
 	if (list_length(batchSpec->updates) != 1)
@@ -5322,6 +5334,14 @@ GenerateUpdateQuery(text *database, pgbson *updateSpec, bool setStatementTimeout
 	}
 
 	UpdateSpec *updateSingleSpec = linitial(batchSpec->updates);
+	if (EnableCollation && collection != NULL &&
+		!updateSingleSpec->updateOneParams.hasExplicitCollation)
+	{
+		strlcpy(updateSingleSpec->updateOneParams.collationString,
+				collection->options.collationString,
+				sizeof(updateSingleSpec->updateOneParams.collationString));
+	}
+
 	if (updateSingleSpec->isMulti &&
 		updateSingleSpec->updateOneParams.sort != NULL)
 	{
@@ -5345,11 +5365,7 @@ GenerateUpdateQuery(text *database, pgbson *updateSpec, bool setStatementTimeout
 						   updateSingleSpec->updateOneParams.variableSpec,
 						   updateSingleSpec->updateOneParams.collationString);
 
-	Datum collectionNameDatum = CStringGetTextDatum(batchSpec->collectionName);
-	MongoCollection *collection =
-		GetMongoCollectionByNameDatum(databaseDatum, collectionNameDatum,
-									  RowExclusiveLock);
-
+	/* Preserve update-spec validation before reporting a missing collection. */
 	if (collection == NULL)
 	{
 		ereport(ERROR, (errmsg(
