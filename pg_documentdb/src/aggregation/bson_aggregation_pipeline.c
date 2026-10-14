@@ -7414,15 +7414,19 @@ AddGroupExpression(Expr *expression, ParseState *parseState, char *identifiers,
 
 
 /*
- * Given an accumulator expression, checks whether it can be statically
- * evaluated to a const. If it can, then returns a const "Expr".
- * If not, returns the original docExpr.
+ * Checks whether a group expression is constant under the supplied collation.
+ * Constant expressions do not need the input document.
  */
 static Expr *
 GetDocumentExprForGroupAccumulatorValue(const bson_value_t *accumulatorValue,
-										Expr *docExpr)
+										Expr *docExpr, const char *collationString)
 {
 	ParseAggregationExpressionContext parseContext = { 0 };
+	if (IsCollationApplicable(collationString))
+	{
+		parseContext.collationString = collationString;
+	}
+
 	AggregationExpressionData expressionData;
 	memset(&expressionData, 0, sizeof(AggregationExpressionData));
 
@@ -7551,7 +7555,8 @@ AddSimpleGroupAccumulator(Query *query, const bson_value_t *accumulatorValue,
 												  accumulatorValue));
 
 	documentExpr = GetDocumentExprForGroupAccumulatorValue(accumulatorValue,
-														   documentExpr);
+														   documentExpr,
+														   collationString);
 
 	FuncExpr *accumFunc = MakeGroupAccumulatorExpressionGet(documentExpr, constValue,
 															variableSpec,
@@ -7581,7 +7586,8 @@ AddSimpleGroupAccumulatorWithExpr(Query *query, const bson_value_t *accumulatorV
 	Expr *exprConst = (Expr *) MakeBsonConst(BsonValueToDocumentPgbson(accumulatorValue));
 
 	documentExpr = GetDocumentExprForGroupAccumulatorValue(accumulatorValue,
-														   documentExpr);
+														   documentExpr,
+														   context->collationString);
 
 	if (IsDistributedShardContext(context) &&
 		BsonTypeId() != DocumentDBCoreBsonTypeId())
@@ -8207,8 +8213,9 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 	List *groupArgs;
 	Oid bsonExpressionGetFunction;
 
-	Expr *transformedGroupExpr = GetDocumentExprForGroupAccumulatorValue(&idValue,
-																		 origEntry->expr);
+	Expr *transformedGroupExpr =
+		GetDocumentExprForGroupAccumulatorValue(&idValue, origEntry->expr,
+												context->collationString);
 	bool isGroupConstant = IsA(transformedGroupExpr, Const);
 
 	/* Now do the projector / accumulators
@@ -8261,7 +8268,7 @@ HandleGroupCore(const bson_value_t *existingValue, Query *query,
 			const bson_value_t *fieldVal = bson_iter_value(&fieldIter);
 			pgbson *fieldGroupValue = BsonValueToDocumentPgbson(fieldVal);
 			Expr *fieldDocExpr = GetDocumentExprForGroupAccumulatorValue(
-				fieldVal, origEntry->expr);
+				fieldVal, origEntry->expr, context->collationString);
 
 			FuncExpr *fieldGroupFunc;
 			if (IsCollationApplicable(context->collationString))
