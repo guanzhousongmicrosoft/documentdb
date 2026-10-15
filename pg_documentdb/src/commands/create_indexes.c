@@ -521,14 +521,6 @@ command_create_indexes_non_concurrently(PG_FUNCTION_ARGS)
 
 	Datum dbNameDatum = PG_ARGISNULL(0) ? (Datum) 0 : PG_GETARG_DATUM(0);
 
-	/* Temporary hack. This allows the MX Tests to call
-	 * the non-concurrent index creation so that we can get
-	 * tests to pass minus the stabilization of CREATE/DROP
-	 * indexes. We will be able to ensure that in MX scenarios
-	 * when Create/Drop indexes comes in, we'll be able to
-	 * release MX with no further blockers. This is used for
-	 * testing purposes only.
-	 */
 	bool skip_check_collection_create = false;
 
 	/* For back-compat scenarios ensure that we check nargs */
