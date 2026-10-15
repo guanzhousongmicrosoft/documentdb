@@ -590,7 +590,7 @@ bool EnableNewNamespaceValidation =
  * SECTION: Write path feature flags
  */
 
-/* Added in v0.116, Pending stabilization, enable in v1.1 */
+/* Added in v0.116, Pending stabilization, enable in v1.3 */
 #define DEFAULT_ENABLE_UPDATE_MANY_WORKER_PUSHDOWN false
 bool EnableUpdateManyWorkerPushdown = DEFAULT_ENABLE_UPDATE_MANY_WORKER_PUSHDOWN;
 
