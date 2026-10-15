@@ -330,6 +330,19 @@ HandleSearch(const bson_value_t *existingValue, Query *query,
 				}
 			}
 		}
+		else if (strcmp(key, "sort") == 0)
+		{
+			EnsureTopLevelFieldValueType("$search.sort", value,
+										 BSON_TYPE_DOCUMENT);
+			if (IsBsonValueEmptyDocument(value))
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
+								errmsg(
+									"The option 'sort' must specify at least one field.")));
+			}
+
+			searchOptions.sortSpecBson = *value;
+		}
 		else if (strcmp(key, "returnStoredSource") == 0)
 		{
 			/* We ignore these options */
@@ -377,6 +390,14 @@ HandleSearch(const bson_value_t *existingValue, Query *query,
 						errmsg(
 							"$search operator not supported: %s",
 							searchOptions.searchOperator->operatorName)));
+	}
+
+	if (searchOptions.sortSpecBson.value_type != BSON_TYPE_EOD &&
+		searchOptions.searchOperator->operatorType != SEARCH_OPERATOR_EXTENDED)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg(
+							"The option 'sort' is not supported for the specified search operator.")));
 	}
 
 	if (searchOptions.searchOperator->featureType != INVALID_SEARCH_OPERATOR_FEATURE_TYPE)
