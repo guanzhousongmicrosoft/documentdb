@@ -123,8 +123,8 @@ void RegisterBackgroundWorkerJobStats(int jobId);
 void GetBackgroundWorkerJobStatsSnapshot(BackgroundWorkerJobStatsSnapshot *snapshot);
 int FindBackgroundWorkerJobStatsIndex(int jobId,
 									  const BackgroundWorkerJobStatsSnapshot *snapshot);
-void PublishBackgroundWorkerJobCompletion(int jobId,
-										  BackgroundWorkerJobResult result,
+void PublishBackgroundWorkerJobCompletion(int jobId, BackgroundWorkerJobResult result,
+										  double *observedAttemptDurationMilliseconds,
 										  TimestampTz attemptStartTimestamp,
 										  instr_time attemptStartTime,
 										  bool hasAttemptObservationInterval,
