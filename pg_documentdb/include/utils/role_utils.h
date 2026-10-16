@@ -30,6 +30,7 @@
 #define API_RBAC_API_ACCESS_ROLE "documentdb_rbac_api_access_role"
 #define API_RBAC_API_COLLECTION_OWNER_ROLE "documentdb_rbac_api_collection_owner_role"
 #define API_RBAC_API_COLLECTION_CREATE_ROLE "documentdb_rbac_api_collection_create_role"
+#define API_RBAC_API_INDEX_CREATE_ROLE "documentdb_rbac_api_index_create_role"
 #define API_RBAC_BASELINE_READ_ROLE "documentdb_rbac_baseline_read_role"
 #define API_RBAC_BASELINE_WRITE_ROLE "documentdb_rbac_baseline_write_role"
 #define API_RBAC_READWRITE_ANYDB_ROLE "documentdb_rbac_readwrite_anydb_role"

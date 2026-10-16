@@ -243,6 +243,12 @@ typedef struct
 	SubmittedIndexRequests *request;
 } CreateIndexesResult;
 
+typedef enum CreateIndexesPrivilegeMode
+{
+	CreateIndexesPrivilegeMode_Background = 1,
+	CreateIndexesPrivilegeMode_NonConcurrent = 2,
+} CreateIndexesPrivilegeMode;
+
 
 /* Represents whole "arg" document passed to dbcommand/createIndexes */
 typedef struct
@@ -324,6 +330,11 @@ CreateIndexesResult SubmitCreateIndexesRequest(Datum dbNameDatum,
 											   CreateIndexesArg createIndexesArg,
 											   bool *volatile snapshotSet,
 											   List *optionalIndexDefList);
+pgbson * RunCreateIndexesWithPrivilegeChecks(Datum databaseName,
+											 const char *collectionName,
+											 const pgbson *indexSpec,
+											 CreateIndexesPrivilegeMode mode,
+											 bool skipCollectionCreateCheck);
 
 Datum ReindexOrCreateCommandCore(PG_FUNCTION_ARGS, char *internalQuery);
 

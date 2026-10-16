@@ -519,6 +519,7 @@ Oid CursorGetMoreFunctionOid(void);
 
 /* DDL Functions */
 Oid ApiCreateCollectionFunctionId(void);
+Oid ApiCreateIndexesDispatchFunctionId(void);
 
 /* Compat functions*/
 Oid DocumentDBCoreBsonToBsonFunctionOId(void);
@@ -533,6 +534,7 @@ Oid ApiReadOnlyRoleOid(void);
 Oid CollectionRbacBaselineReadRoleOid(void);
 Oid CollectionRbacBaselineWriteRoleOid(void);
 Oid CollectionRbacReadWriteAnyDatabaseRoleOid(void);
+Oid CreateIndexesRoleOid(void);
 
 
 /* Statistics functions */
