@@ -269,6 +269,11 @@ static char FeatureMapping[MAX_FEATURE_COUNT][MAX_FEATURE_NAME_LENGTH] = {
 	[FEATURE_AGGREGATE_WINDOW_TOP] = "window_top",
 	[FEATURE_AGGREGATE_WINDOW_TOP_N] = "window_top_n",
 
+	/* Feature Mapping region - Change stream */
+	[FEATURE_CHANGE_STREAM_CLUSTER_TIME] = "change_stream_cluster_time",
+	[FEATURE_CHANGE_STREAM_CLUSTER_TIME_STALLED] = "change_stream_cluster_time_stalled",
+	[FEATURE_CHANGE_STREAM_HISTORICAL] = "change_stream_historical",
+
 	/* Find/Aggregate using collation */
 	[FEATURE_COLLATION] = "collation",
 	[FEATURE_COLLATION_CREATE_COLLECTION] = "collation_with_collection",
