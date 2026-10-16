@@ -133,6 +133,10 @@ typedef bool (*CanInlineLookupStage)(const bson_value_t *stageValue, const
 									 StringView *lookupPath, bool hasLet);
 
 
+typedef bool (*IsDynamicCursorFetchAllFunc)(const bson_value_t *existingValue,
+											Query *query);
+
+
 /*
  * Declaration of a given aggregation pipeline stage.
  */
@@ -173,6 +177,18 @@ typedef struct AggregationStageDefinition
 
 	/* Allow Base shard table pushdown */
 	bool allowBaseShardTablePushdown;
+
+
+	/*
+	 * Whether or not the stage requires persisted cursors
+	 * even when dynamic cursors are present.
+	 * TODO: This is temporary, until we can get the persisted costing
+	 * fixed directly in the planner when dynamic cursors decide persisted
+	 * vs streaming based on startup cost during planning.
+	 * Also note: It is by design we DO NOT want to run planning twice as a
+	 * fix for this.
+	 */
+	IsDynamicCursorFetchAllFunc isDynamicCursorFetchAllFunc;
 
 	Stage stageEnum;
 } AggregationStageDefinition;
@@ -472,6 +488,13 @@ static Query * ApplyAggregationStagesToBaseQuery(Query *baseQuery, CursorParamKi
 												 List *aggregationStages, bool
 												 isCollectionAgnosticQuery);
 
+static bool IsPersistedDynamicCursorStageFalse(const bson_value_t *existingValue,
+											   Query *query);
+static bool IsPersistedDynamicCursorStageTrue(const bson_value_t *existingValue,
+											  Query *query);
+static bool IsPersistedDynamicCursorStageSortGroup(const bson_value_t *existingValue,
+												   Query *query);
+
 #define COMPATIBLE_CHANGE_STREAM_STAGES_COUNT 8
 const char *CompatibleChangeStreamPipelineStages[COMPATIBLE_CHANGE_STREAM_STAGES_COUNT] =
 {
@@ -501,6 +524,7 @@ static const AggregationStageDefinition LookupUnwindStageDefinition = {
 
 	/* $lookup may touch multiple collections */
 	.isMultiJoinUnionStage = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 	.stageEnum = Stage_LookupUnwind,
 };
 
@@ -518,6 +542,7 @@ static const AggregationStageDefinition SortGroupStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageSortGroup,
 	.stageEnum = Stage_SortGroup,
 };
 
@@ -533,6 +558,7 @@ static const AggregationStageDefinition FindMatchStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Match,
 };
 
@@ -548,6 +574,7 @@ static const AggregationStageDefinition FindSortStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Sort,
 };
 
@@ -563,6 +590,9 @@ static const AggregationStageDefinition FindSkipStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+
+	/* Handled via dynamic cursor find skip/limit separately */
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Skip,
 };
 
@@ -578,6 +608,9 @@ static const AggregationStageDefinition FindLimitStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+
+	/* Handled via dynamic cursor find skip/limit separately */
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Limit,
 };
 
@@ -593,6 +626,7 @@ static const AggregationStageDefinition ProjectFindStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Project,
 };
 
@@ -615,6 +649,7 @@ static const AggregationStageDefinition ProjectStageDefinition = {
 	.isMultiJoinUnionStage = false,
 	.pipelineCheckFunc = NULL,
 	.allowBaseShardTablePushdown = true,
+	.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 	.stageEnum = Stage_Project,
 };
 
@@ -637,6 +672,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = true,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.stageEnum = Stage_Internal_InhibitOptimization,
 	},
 	{
@@ -651,6 +687,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = true,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.stageEnum = Stage_AddFields,
 	},
 	{
@@ -664,6 +701,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Bucket,
 	},
@@ -678,6 +716,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_BucketAuto,
 	},
@@ -694,6 +733,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $changeStream may touch multiple collections or cluster level */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = PreCheckChangeStreamPipelineStages,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_ChangeStream,
 	},
@@ -709,6 +749,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = false,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.stageEnum = Stage_CollStats,
 	},
 	{
@@ -727,6 +768,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = true,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.stageEnum = Stage_Count,
 	},
 	{
@@ -747,6 +789,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $currentOp may touch multiple collections via joins etc */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_CurrentOp,
 	},
@@ -761,6 +804,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Densify,
 	},
@@ -779,6 +823,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		 */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_Documents,
 	},
@@ -799,6 +844,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $facet may handle sub-pipelines with joins */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_Facet,
 	},
@@ -813,6 +859,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Fill,
 	},
@@ -831,6 +878,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		 */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_GeoNear,
 	},
@@ -847,6 +895,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Recursive CTE has joins with self */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_GraphLookup,
 	},
@@ -866,6 +915,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageSortGroup,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Group,
 	},
@@ -881,6 +931,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = false,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.stageEnum = Stage_IndexStats,
 	},
 	{
@@ -900,6 +951,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $inverseMatch joins with another collection */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_InverseMatch,
 	},
@@ -918,6 +970,9 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+
+		/* TODO - do we not want to do fast start up here? */
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Limit,
 	},
@@ -934,6 +989,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Defensive - assume that this joins */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_ListLocalSessions,
 	},
@@ -947,6 +1003,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isProjectTransform = false,
 		.isOutputStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_ListSearchIndexes,
 	},
@@ -963,6 +1020,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Defensive - assume that this joins */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_ListSessions,
 	},
@@ -981,6 +1039,9 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Lookup is a left join */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+
+		/* TODO: This should be a planner decision */
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_Lookup,
 	},
@@ -999,6 +1060,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Match,
 	},
@@ -1015,6 +1077,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $merge outputs into same or different collection */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_Merge,
 	},
@@ -1031,6 +1094,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* $out outputs to a new collection */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_Out,
 	},
@@ -1047,6 +1111,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Project,
 	},
@@ -1061,6 +1126,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Redact,
 	},
@@ -1077,6 +1143,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_ReplaceRoot,
 	},
@@ -1093,6 +1160,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_ReplaceWith,
 	},
@@ -1111,6 +1179,11 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+
+		/* TODO: This can be streaming especially if it's doing the reservoir sampling
+		 * on an index.
+		 */
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Sample,
 	},
@@ -1129,6 +1202,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Defensive: Presume it *may* join */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Search,
 	},
@@ -1145,6 +1219,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		/* Defensive: Presume it *may* join */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_SearchMeta,
 	},
@@ -1159,6 +1234,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Set,
 	},
@@ -1173,6 +1249,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_SetWindowFields,
 	},
@@ -1191,6 +1268,11 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+
+		/* TODO: This should ideally come from the Skip/Limit handling for dynamic cursors
+		 * once this is extended beyond find.
+		 */
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Skip,
 	},
@@ -1209,6 +1291,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageSortGroup,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Sort,
 	},
@@ -1224,6 +1307,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = true,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.stageEnum = Stage_SortByCount,
 	},
 	{
@@ -1242,6 +1326,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		 */
 		.isMultiJoinUnionStage = true,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = false,
 		.stageEnum = Stage_UnionWith,
 	},
@@ -1257,6 +1342,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
 		.allowBaseShardTablePushdown = true,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageFalse,
 		.stageEnum = Stage_Unset,
 	},
 	{
@@ -1270,6 +1356,9 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+
+		/* TODO: Are there cases where this could be false for an unwind stage? */
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 		.allowBaseShardTablePushdown = true,
 		.stageEnum = Stage_Unwind,
 	},
@@ -1286,6 +1375,7 @@ static const AggregationStageDefinition StageDefinitions[] =
 		.isOutputStage = false,
 		.isMultiJoinUnionStage = false,
 		.pipelineCheckFunc = NULL,
+		.isDynamicCursorFetchAllFunc = &IsPersistedDynamicCursorStageTrue,
 
 		/* $vectorSearch is needed to be executed withing custom scan boundaries see EvaluateMetaSearchScore in vector/vector_utilities.c */
 		.allowBaseShardTablePushdown = false,
@@ -1626,6 +1716,9 @@ MutateQueryWithPipeline(Query *query, List *aggregationStages,
 			context->requiresPersistentCursor ||
 			definition->requiresPersistentCursor(&stage->stageValue,
 												 &context->isSingleRowResult);
+		context->requiresDynamicFetchAllCursor =
+			context->requiresDynamicFetchAllCursor ||
+			definition->isDynamicCursorFetchAllFunc(&stage->stageValue, query);
 
 		if (!definition->preservesStableSortOrder)
 		{
@@ -1653,6 +1746,7 @@ inline static void
 SetCursorTopology(QueryData *queryData,
 				  const AggregationPipelineBuildContext *context)
 {
+	queryData->requiresDynamicFetchAllCursor = context->requiresDynamicFetchAllCursor;
 	if (context->mongoCollection == NULL)
 	{
 		return;
@@ -12092,4 +12186,70 @@ BuildSyntheticInclusionProjectStage(HTAB *consumedFields, bool includeId)
 	projStage->stageValue = ConvertPgbsonToBsonValue(
 		PgbsonWriterGetPgbson(&projWriter));
 	return projStage;
+}
+
+
+static bool
+IsPersistedDynamicCursorStageFalse(const bson_value_t *existingValue, Query *query)
+{
+	return false;
+}
+
+
+static bool
+IsPersistedDynamicCursorStageTrue(const bson_value_t *existingValue, Query *query)
+{
+	return true;
+}
+
+
+static bool
+IsPersistedDynamicCursorStageSortGroup(const bson_value_t *existingValue, Query *query)
+{
+	/* For a sort or group stage, it's considered streaming IF the base query is pointing to
+	 * a base table RTE. Otherwise, it counts as persistent (a group or sort on a subquery)
+	 * cannot push down to indexes anyway.
+	 * TODO: Pull up subqueries *could* eliminate this - should we consider revisiting.
+	 */
+
+	if (list_length(query->rtable) != 1)
+	{
+		return true;
+	}
+
+	RangeTblEntry *rte = linitial(query->rtable);
+	if (rte->rtekind == RTE_SUBQUERY)
+	{
+		/* For a subquery, we can consider this potentially streamable
+		 * if the projections from the query are Vars and the subquery supports
+		 * streaming group/sort - this is a proxy to the SS Pull up subqueries that
+		 * may happen later. Essentially, if the projector is a FuncExpr - we currently
+		 * will not consider it streamable.
+		 * TODO: This may change with match/group pushup optimizations.
+		 */
+		List *tle = query->targetList;
+		ListCell *cell;
+		foreach(cell, tle)
+		{
+			TargetEntry *targetEntry = (TargetEntry *) lfirst(cell);
+			if (targetEntry->resjunk)
+			{
+				continue;
+			}
+
+			if (!IsA(targetEntry->expr, Var))
+			{
+				/* If any projection is not a Var, consider it not streamable */
+				return true;
+			}
+		}
+
+		/* Not the best catch-all but consider it a pretty good proxy for now. Let the planner
+		 * decide what's best here.
+		 */
+		return false;
+	}
+
+	/* RTE's that are not baserels - just default to persistent */
+	return rte->rtekind != RTE_RELATION;
 }

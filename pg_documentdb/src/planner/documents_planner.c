@@ -2230,9 +2230,6 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 		if (EnableDynamicCursors)
 		{
 			cursorParams = CursorParamKind_Dynamic;
-
-			/* ensure that in this path, the plan follows what cursors do */
-			*cursorOptions = GetDynamicCursorCursorOptions();
 		}
 	}
 
@@ -2305,6 +2302,14 @@ ExpandAggregationFunction(Query *query, ParamListInfo boundParams, PlannedStmt *
 	{
 		ereport(ERROR, (errmsg(
 							"Unrecognized pipeline functionid provided. This is unexpected")));
+	}
+
+	if (EnableCursorsOnAggregationQueryRewrite &&
+		queryData.cursorKind == QueryCursorType_Dynamic)
+	{
+		/* ensure that in this path, the plan follows what cursors do */
+		bool allowFastPlan = !queryData.requiresDynamicFetchAllCursor;
+		*cursorOptions = GetDynamicCursorCursorOptions(allowFastPlan);
 	}
 
 	if (queryData.cursorKind == QueryCursorType_PointRead)

@@ -213,6 +213,11 @@ typedef struct AggregationPipelineBuildContext
 	 */
 	bool requiresPersistentCursor;
 
+	/* whether or not the query will end up with a dynamic persistent cursor
+	 * false negatives are fine (reporting false when it could be true is acceptable)
+	 */
+	bool requiresDynamicFetchAllCursor;
+
 	/* Whether or not the stage can handle a single batch cursor */
 	bool isSingleRowResult;
 

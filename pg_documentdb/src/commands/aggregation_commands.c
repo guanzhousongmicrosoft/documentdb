@@ -721,9 +721,11 @@ DrainLocalCursorGetMorePage(text *database, pgbson *cursorSpec,
 			bool isDynamicStreaming = false;
 			bool allowOffsetLimitNode =
 				queryData.streamingLimit > 0 || queryData.streamingSkip > 0;
+			bool allowFastPlan = !queryData.requiresDynamicFetchAllCursor;
 			QueryCursorPlanResult *planResult =
 				PlanDynamicQueryAndDetermineCursorType(
 					query, allowOffsetLimitNode,
+					allowFastPlan,
 					&isDynamicStreaming);
 			if (!isDynamicStreaming)
 			{
@@ -1540,8 +1542,9 @@ HandleLocalFirstPageRequestCore(text *database, pgbson *querySpec, int64_t curso
 			bool isDynamicStreaming = false;
 			bool allowOffsetLimitNode =
 				queryData->streamingLimit > 0 || queryData->streamingSkip > 0;
+			bool allowFastPlan = !queryData->requiresDynamicFetchAllCursor;
 			QueryCursorPlanResult *planResult = PlanDynamicQueryAndDetermineCursorType(
-				query, allowOffsetLimitNode, &isDynamicStreaming);
+				query, allowOffsetLimitNode, allowFastPlan, &isDynamicStreaming);
 
 			if (isDynamicStreaming)
 			{
