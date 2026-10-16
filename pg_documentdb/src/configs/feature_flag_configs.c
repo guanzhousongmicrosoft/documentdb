@@ -374,6 +374,16 @@ bool EnableDynamicCursorEarlyIndexLockRelease =
 #define DEFAULT_ENABLE_DYNAMIC_CURSOR_PARALLEL_PLANS true
 bool EnableDynamicCursorParallelPlans = DEFAULT_ENABLE_DYNAMIC_CURSOR_PARALLEL_PLANS;
 
+/* Added on v1.2, enabled on v1.2, remove after v1.8 */
+#define DEFAULT_ENABLE_NON_DYNAMIC_CURSOR_PARALLEL_PLANS true
+bool EnableNonDynamicCursorParallelPlans =
+	DEFAULT_ENABLE_NON_DYNAMIC_CURSOR_PARALLEL_PLANS;
+
+/* Added on v1.2, enabled on v1.2, remove after v1.8 */
+#define DEFAULT_ENABLE_SKIP_PARALLEL_PLANS_WITHOUT_STATS true
+bool EnableSkipParallelPlansWithoutStats =
+	DEFAULT_ENABLE_SKIP_PARALLEL_PLANS_WITHOUT_STATS;
+
 /* Tracks deduplication state for ordered multikey index scans and carries it
  * forward in the continuation so each document is returned at most once across
  * cursor batches. Enabled by default; can be disabled as an escape hatch. */
@@ -870,6 +880,22 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Whether or not to allow parallel plans for dynamic cursors."),
 		NULL, &EnableDynamicCursorParallelPlans,
 		DEFAULT_ENABLE_DYNAMIC_CURSOR_PARALLEL_PLANS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_non_dynamic_cursor_parallel_plans", newGucPrefix),
+		gettext_noop(
+			"Whether to allow parallel plans for non-dynamic cursors and single-result queries."),
+		NULL, &EnableNonDynamicCursorParallelPlans,
+		DEFAULT_ENABLE_NON_DYNAMIC_CURSOR_PARALLEL_PLANS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_skip_parallel_plans_without_stats", newGucPrefix),
+		gettext_noop(
+			"Whether dynamic cursor planning skips parallel scans when collection statistics are unavailable."),
+		NULL, &EnableSkipParallelPlansWithoutStats,
+		DEFAULT_ENABLE_SKIP_PARALLEL_PLANS_WITHOUT_STATS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

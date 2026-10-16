@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * Copyright (c) Microsoft Corporation.
+ * SPDX-License-Identifier: MIT
  *
  * src/commands/cursors.c
  *
@@ -57,6 +58,7 @@ extern bool EnablePrimaryKeyCursorScan;
 extern bool UseFileBasedPersistedCursors;
 extern bool EnableDebugQueryText;
 extern bool EnableDynamicCursorParallelPlans;
+extern bool EnableNonDynamicCursorParallelPlans;
 extern bool EnableDynamicCursorEarlyIndexLockRelease;
 
 
@@ -361,8 +363,10 @@ DrainSingleResultQuery(Query *query)
 {
 	int cursorOptions = CURSOR_OPT_NO_SCROLL | CURSOR_OPT_BINARY;
 
-	/* Allow the planner to consider parallel plans for the query. */
-	cursorOptions |= CURSOR_OPT_PARALLEL_OK;
+	if (EnableNonDynamicCursorParallelPlans)
+	{
+		cursorOptions |= CURSOR_OPT_PARALLEL_OK;
+	}
 	MemoryContext currentContext = CurrentMemoryContext;
 
 	/* Deparse query text before planning since the planner may modify the query tree */
@@ -516,14 +520,18 @@ PlanResultHasParallelPlan(QueryCursorPlanResult *planResult)
 
 
 int
-GetDynamicCursorCursorOptions(void)
+GetDynamicCursorCursorOptions(bool allowFastPlan)
 {
 	int cursorOptions = CURSOR_OPT_BINARY;
 
 	/* Turn on fast plan to consider statistics tupleFraction
 	 * for startup path.
 	 */
-	cursorOptions |= CURSOR_OPT_FAST_PLAN;
+	if (allowFastPlan)
+	{
+		cursorOptions |= CURSOR_OPT_FAST_PLAN;
+	}
+
 
 	if (EnableDynamicCursorParallelPlans)
 	{
@@ -538,12 +546,13 @@ GetDynamicCursorCursorOptions(void)
 QueryCursorPlanResult *
 PlanDynamicQueryAndDetermineCursorType(Query *query,
 									   bool allowOffsetLimitNode,
+									   bool allowFastPlan,
 									   bool *isDynamicStreamable)
 {
 	/* Deparse query text before planning since the planner may modify the query tree */
 	char *sourceText = "";
 
-	int cursorOptions = GetDynamicCursorCursorOptions();
+	int cursorOptions = GetDynamicCursorCursorOptions(allowFastPlan);
 	if (EnableDebugQueryText)
 	{
 		bool pretty = false;
@@ -993,7 +1002,8 @@ PlanForcedPersistentQuery(Query *query, bool isHoldCursor)
 	 * executor detects the row-count-bounded fetch and simply runs the
 	 * Gather leader-only — correct, just not parallel.
 	 */
-	if (isHoldCursor && UseFileBasedPersistedCursors &&
+	if (EnableNonDynamicCursorParallelPlans &&
+		isHoldCursor && UseFileBasedPersistedCursors &&
 		query->commandType == CMD_SELECT && !query->hasModifyingCTE)
 	{
 		cursorOptions |= CURSOR_OPT_PARALLEL_OK;
@@ -1044,7 +1054,8 @@ CreateAndDrainSingleBatchQuery(const char *cursorName, Query *query,
 	 *
 	 * Read-only queries only: a parallel plan cannot contain writes.
 	 */
-	if (query->commandType == CMD_SELECT && !query->hasModifyingCTE)
+	if (EnableNonDynamicCursorParallelPlans &&
+		query->commandType == CMD_SELECT && !query->hasModifyingCTE)
 	{
 		cursorOptions |= CURSOR_OPT_PARALLEL_OK;
 	}
