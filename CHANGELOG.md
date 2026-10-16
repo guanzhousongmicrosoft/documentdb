@@ -1,6 +1,8 @@
 ### documentdb v1.3-0 (Unreleased) ###
 
 ### documentdb v1.2-0 (Unreleased) ###
+* Restrict access to the change-stream heartbeat task and skip heartbeat WAL emission during read-only transactions or disk-full read-only mode. *[Bugfix]* (work item 5713030)
+* Bound timestamp-based change-stream startup scans by the configured archive-segment download limit. *[Bugfix]* (work item 5713030)
 * Skip parallel scan plans for dynamic cursor queries without collection planner statistics by default, controlled by `documentdb.enable_skip_parallel_plans_without_stats`. *[Bugfix]*
 * Reject dynamic streaming paths early for `$unionWith` and SQL set operations so persistent cursors retain selective scan alternatives. *[Bugfix]*
 * Compress eligible remote single-document inserts on the shard before storing them. *[Bugfix]*
