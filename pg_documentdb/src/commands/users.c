@@ -312,12 +312,12 @@ documentdb_extension_create_user(PG_FUNCTION_ARGS)
 		"JOIN pg_auth_members am ON parent.oid = am.roleid "
 		"JOIN pg_roles child ON am.member = child.oid "
 		"WHERE child.rolcanlogin = true "
-		"  AND child.rolname NOT IN ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s');",
+		"  AND child.rolname NOT IN ('%s', '%s', '%s', '%s', '%s', '%s', '%s') "
+		"  AND NOT pg_catalog.starts_with(child.rolname, '%s');",
 		ApiAdminRole, ApiAdminRoleV2, ApiAdminRoleV3,
 		ApiBgWorkerRole, ApiBgWorkerRoleV3,
 		ApiReplicationRole, ApiSettingsManagerRole,
-		API_RBAC_API_COLLECTION_OWNER_ROLE,
-		API_RBAC_API_COLLECTION_CREATE_ROLE);
+		API_RBAC_API_ROLE_PREFIX);
 
 	bool readOnly = true;
 	bool isNull = false;

@@ -67,9 +67,13 @@ static PrivilegedFunctionData PrivilegedFunctions[MAX_ALLOWED_PRIVILEGED_FUNCTIO
 		.functionIdentityFunc = ApiCreateCollectionFunctionId,
 		.functionNameInfo = { },
 	},
+	{
+		.functionIdentityFunc = ApiCreateIndexesDispatchFunctionId,
+		.functionNameInfo = { },
+	},
 };
 
-static int NumPrivilegedFunctions = 1;
+static int NumPrivilegedFunctions = 2;
 
 
 void
@@ -279,10 +283,10 @@ ValidateNamespaceArguments(Oid *argTypes, char *argNulls, int nargs)
 
 
 Datum
-RunCollectionLevelFunctionWithPrivilegeChecks(const char *schemaName, const
-											  char *functionName,
-											  Datum *args, Oid *argTypes, char *argNulls,
-											  int nargs,
+RunCollectionLevelFunctionWithPrivilegeChecks(const char *schemaName,
+											  const char *functionName,
+											  Datum *args, Oid *argTypes,
+											  char *argNulls, int nargs,
 											  bool readOnly, bool canUseLibPq,
 											  bool *isNull)
 {
@@ -297,17 +301,14 @@ RunCollectionLevelFunctionWithPrivilegeChecks(const char *schemaName, const
 
 	if (run_collection_level_function_with_privilege_checks_hook != NULL)
 	{
-		return run_collection_level_function_with_privilege_checks_hook(schemaName,
-																		functionName,
-																		args, argTypes,
-																		argNulls, nargs,
-																		readOnly,
-																		canUseLibPq,
-																		isNull);
+		return run_collection_level_function_with_privilege_checks_hook(
+			schemaName, functionName, args, argTypes, argNulls, nargs,
+			readOnly, canUseLibPq, isNull);
 	}
 
-	return RunCollectionLevelFunctionAsCaller(schemaName, functionName, args, argTypes,
-											  argNulls, nargs, readOnly, isNull);
+	return RunCollectionLevelFunctionAsCaller(schemaName, functionName, args,
+											  argTypes, argNulls, nargs, readOnly,
+											  isNull);
 }
 
 

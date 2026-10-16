@@ -57,6 +57,7 @@
 #include "utils/guc_utils.h"
 #include "utils/list_utils.h"
 #include "utils/query_utils.h"
+#include "utils/role_utils.h"
 #include "utils/feature_counter.h"
 #include "utils/index_utils.h"
 #include "utils/version_utils.h"
@@ -1239,16 +1240,38 @@ command_create_indexes_background_internal(PG_FUNCTION_ARGS)
 	CreateIndexesResult *result = palloc0(sizeof(CreateIndexesResult));
 	MemoryContext savedMemoryContext = CurrentMemoryContext;
 	ResourceOwner oldOwner = CurrentResourceOwner;
+	pgbson *volatile response = NULL;
 
-	/* use a subtransaction to correctly handle failures */
+	/*
+	 * Keep parsing and execution in a subtransaction so every failure retains
+	 * the established background response shape.
+	 */
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
 		CreateIndexesArg createIndexesArg = ParseCreateIndexesArg(&dbNameDatum, arg);
-		List *optionalIndexList = NIL;
-		*result = SubmitCreateIndexesRequest(dbNameDatum, createIndexesArg, snapshotSet,
-											 optionalIndexList);
 
+		MemoryContextSwitchTo(savedMemoryContext);
+
+		pgbson *innerResponse = NULL;
+		if (IsClusterVersionAtleast(DocDB_V1, 2, 0))
+		{
+			bool skipCollectionCreateCheck = true;
+			innerResponse = RunCreateIndexesWithPrivilegeChecks(
+				dbNameDatum, createIndexesArg.collectionName, arg,
+				CreateIndexesPrivilegeMode_Background,
+				skipCollectionCreateCheck);
+		}
+		else
+		{
+			List *optionalIndexList = NIL;
+			CreateIndexesResult innerResult =
+				SubmitCreateIndexesRequest(
+					dbNameDatum, createIndexesArg, snapshotSet, optionalIndexList);
+			innerResponse = MakeCreateIndexesMsg(&innerResult);
+		}
+
+		response = innerResponse;
 		ReleaseCurrentSubTransaction();
 		MemoryContextSwitchTo(savedMemoryContext);
 		CurrentResourceOwner = oldOwner;
@@ -1260,6 +1283,7 @@ command_create_indexes_background_internal(PG_FUNCTION_ARGS)
 		 */
 		MemoryContextSwitchTo(savedMemoryContext);
 		ErrorData *edata = CopyErrorDataAndFlush();
+		response = NULL;
 		result->errcode = edata->sqlerrcode;
 		result->errmsg = edata->message;
 
@@ -1278,7 +1302,14 @@ command_create_indexes_background_internal(PG_FUNCTION_ARGS)
 	}
 	PG_END_TRY();
 
-	PG_RETURN_POINTER(MakeCreateIndexesMsg(result));
+	pfree(snapshotSet);
+
+	if (response == NULL)
+	{
+		response = MakeCreateIndexesMsg(result);
+	}
+
+	PG_RETURN_POINTER((pgbson *) response);
 }
 
 
@@ -1464,6 +1495,22 @@ setup_index_queue_table(PG_FUNCTION_ARGS)
 						 GetIndexQueueName(),
 						 ApiReadWriteRole);
 		ExtensionExecuteQueryViaSPI(grantStr->data, false, SPI_OK_UTILITY,
+									&isNull);
+	}
+
+	if (majorVersion == DocDB_V1 &&
+		minorVersion == 2 &&
+		patchVersion == 0)
+	{
+		StringInfo grantStr = makeStringInfo();
+		bool isNull = false;
+		bool readOnly = false;
+		appendStringInfo(grantStr,
+						 "GRANT INSERT ON TABLE %s TO %s",
+						 quote_qualified_identifier(ApiCatalogSchemaNameV2,
+													GetIndexQueueTableName()),
+						 quote_identifier(API_RBAC_API_INDEX_CREATE_ROLE));
+		ExtensionExecuteQueryViaSPI(grantStr->data, readOnly, SPI_OK_UTILITY,
 									&isNull);
 	}
 
@@ -1668,7 +1715,15 @@ SubmitCreateIndexesRequest(Datum dbNameDatum,
 												   isBackgroundBuild,
 												   isUpgradeOptionsCommand);
 
-		Oid userOid = GetAuthenticatedUserId();
+		/*
+		 * A privileged request must be replayed as the index-create role so the
+		 * background worker can alter relations owned by the collection-owner
+		 * role. Ordinary requests retain their authenticated identity.
+		 */
+		Oid createIndexesRoleOid = CreateIndexesRoleOid();
+		Oid currentUserOid = GetUserId();
+		Oid userOid = currentUserOid == createIndexesRoleOid ?
+					  currentUserOid : GetAuthenticatedUserId();
 		AddRequestInIndexQueue(cmd, indexId, collectionId, CREATE_INDEX_COMMAND_TYPE,
 							   userOid);
 		indexIdList = lappend_int(indexIdList, indexId);
