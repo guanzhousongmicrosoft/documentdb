@@ -1,3 +1,5 @@
+### documentdb v1.3-0 (Unreleased) ###
+
 ### documentdb v1.2-0 (Unreleased) ###
 * Skip parallel scan plans for dynamic cursor queries without collection planner statistics by default, controlled by `documentdb.enable_skip_parallel_plans_without_stats`. *[Bugfix]*
 * Reject dynamic streaming paths early for `$unionWith` and SQL set operations so persistent cursors retain selective scan alternatives. *[Bugfix]*
