@@ -6,7 +6,7 @@
 * Bound timestamp-based change-stream startup scans by the configured archive-segment download limit. *[Bugfix]* (work item 5713030)
 * Skip parallel scan plans for dynamic cursor queries without collection planner statistics by default, controlled by `documentdb.enable_skip_parallel_plans_without_stats`. *[Bugfix]*
 * Reject dynamic streaming paths early for `$unionWith` and SQL set operations so persistent cursors retain selective scan alternatives. *[Bugfix]*
-* Compress eligible remote single-document inserts on the shard before storing them. *[Bugfix]*
+* Compress eligible remote single-document and batch inserts on the shard before storing them, preserving every document in partial batches and accurate insert counts. *[Bugfix]*
 * Apply the configured inline document compression threshold to multi-document updates. *[Bugfix]*
 * Enforce null/missing conflicts in descending unique indexes by starting conflict probes at the correct bound, including compound keys and collated indexes. Controlled by the default-on `documentdb.enable_unique_null_missing_semantics` setting. *[Bugfix]*
 * Estimate direct equality, range, and regular-expression children and pushed index bounds for `$elemMatch` from per-path statistics instead of using a fixed fallback. Controlled by the default-on `documentdb.enable_elem_match_selectivity_from_stats` setting, with compound-index selection regression coverage. *[Bugfix/Perf]* ([#405](https://github.com/documentdb/documentdb/issues/405))

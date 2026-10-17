@@ -1,3 +1,7 @@
+/* Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ * SPDX-License-Identifier: MIT
+ */
 SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 SET citus.next_shard_id TO 271500000;
 SET documentdb.next_collection_id TO 27150000;
@@ -17,7 +21,7 @@ SET documentdb.next_collection_index_id TO 27150000;
 -- | insertOne local                                   | 629         | yes         |
 -- | insertOne remote                                  | 611         | yes         |
 -- | insertMany local                                  | 633         | yes         |
--- | insertMany remote (TODO)                          | 1538        | no          |
+-- | insertMany remote                                 | 631         | yes         |
 -- | insertMany remote single-document retries         | 630         | yes         |
 -- | update updateByObjectId                           | 635-685     | yes         |
 -- | update updateOne (filter not on _id)              | 628         | yes         |
@@ -42,19 +46,14 @@ SET documentdb.next_collection_index_id TO 27150000;
 --   multi false) are routed to update_worker on the shard. The write then
 --   runs on the node that owns the shard, with the shard table known, and the
 --   document is compressed right before it is written.
--- * Eligible remote single-document inserts are routed to insert_worker when
+-- * Eligible remote single-document and batch inserts are routed to insert_worker when
 --   compression is enabled on the coordinator. The worker compresses the
 --   document before inserting directly into the local shard.
 --
--- Why remote batches are not compressed (TODO):
--- * Without local shard execution there is no shard table, so the batch is
---   built as an INSERT on the distributed table (CreateInsertQuery) and run
---   through the distributed executor (RunInsertQuery). The coordinator
---   compresses the document parameter, but the executor sends the value to
---   the shard over the connection in its serialized form, which is always the
---   full uncompressed document. The shard stores what it receives and nothing
---   compresses it again. Single-document retries after a batch error use
---   insert_worker and are compressed.
+-- * Remote batches are sent as document sequences. The worker prepares and
+--   compresses each document before inserting into its local shard. Failed
+--   batches are rolled back before individual retries, preserving ordered
+--   and unordered error handling.
 -- Run every write without local shard execution so that the commands are sent
 -- to the shards through the distributed executor.
 SET documentdb.useLocalExecutionShardQueries TO off;
@@ -373,10 +372,7 @@ SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_raw');
 
 DROP FUNCTION documentdb_api_internal.test_compress_bson_if_needed(documentdb_core.bson);
 -- insertMany batches.
--- TODO: insertMany batches are stored uncompressed. A batch is a single
--- multi row INSERT on the distributed table, and each document reaches the
--- shard uncompressed (see the header). The retry of the remaining documents
--- after a duplicate key error inserts them one at a time and compresses them.
+-- Remote insertMany batches and individual retries are stored compressed.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_insert_many');
 NOTICE:  creating collection
  create_collection 
@@ -394,9 +390,9 @@ SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(d
 FROM documentdb_data.documents_27150005 ORDER BY object_id;
                  id                  | column_size | bytea_length 
 ---------------------------------------------------------------------
- insertmanyorderedabcdefghijklmnop01 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop02 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop03 |        1538 |         1534
+ insertmanyorderedabcdefghijklmnop01 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop02 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop03 |         631 |         1534
 (3 rows)
 
 -- Unordered insertMany.
@@ -410,11 +406,11 @@ SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(d
 FROM documentdb_data.documents_27150005 ORDER BY object_id;
                  id                  | column_size | bytea_length 
 ---------------------------------------------------------------------
- insertmanyorderedabcdefghijklmnop01 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop02 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop03 |        1538 |         1534
- insertmanyunorderedabcdefghijklm01  |        1537 |         1533
- insertmanyunorderedabcdefghijklm02  |        1537 |         1533
+ insertmanyorderedabcdefghijklmnop01 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop02 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop03 |         631 |         1534
+ insertmanyunorderedabcdefghijklm01  |         631 |         1533
+ insertmanyunorderedabcdefghijklm02  |         631 |         1533
 (5 rows)
 
 -- A duplicate _id fails the batch, and the remaining documents are retried one at a time.
@@ -428,13 +424,13 @@ SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(d
 FROM documentdb_data.documents_27150005 ORDER BY object_id;
                  id                  | column_size | bytea_length 
 ---------------------------------------------------------------------
- insertmanyorderedabcdefghijklmnop01 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop02 |        1538 |         1534
- insertmanyorderedabcdefghijklmnop03 |        1538 |         1534
+ insertmanyorderedabcdefghijklmnop01 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop02 |         631 |         1534
+ insertmanyorderedabcdefghijklmnop03 |         631 |         1534
  insertmanyretryabcdefghijklmnopq01  |         630 |         1533
  insertmanyretryabcdefghijklmnopq02  |         630 |         1533
- insertmanyunorderedabcdefghijklm01  |        1537 |         1533
- insertmanyunorderedabcdefghijklm02  |        1537 |         1533
+ insertmanyunorderedabcdefghijklm01  |         631 |         1533
+ insertmanyunorderedabcdefghijklm02  |         631 |         1533
 (7 rows)
 
 SELECT document FROM bson_aggregation_find('doc_size_db', '{ "find": "doc_size_insert_many", "projection": { "f01abcdefghijkl": 1 }, "sort": { "_id": 1 } }');
@@ -725,6 +721,208 @@ SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_local_insert');
  t
 (1 row)
 
+RESET documentdb.document_toast_compression_threshold;
+RESET citus.enable_local_execution;
+RESET documentdb.useLocalExecutionShardQueries;
+-- Worker batch limits can differ from the coordinator's session setting.
+CREATE ROLE doc_size_batch_user WITH LOGIN SUPERUSER IN ROLE :original_test_user;
+ALTER ROLE doc_size_batch_user SET documentdb.document_toast_compression_threshold TO 1024;
+ALTER ROLE doc_size_batch_user SET documentdb.batchWriteSubTransactionCount TO 1;
+SET ROLE doc_size_batch_user;
+SET documentdb.document_toast_compression_threshold TO 1024;
+SET documentdb.useLocalExecutionShardQueries TO off;
+SET citus.enable_local_execution TO off;
+-- A batch smaller than the limit must insert every document exactly once.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_short_batch');
+NOTICE:  creating collection
+ create_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_short_batch","documents":[{"_id":1,"payload":"' || repeat('abc', 400) || '"},{"_id":2,"payload":"' || repeat('abc', 400) || '"}]}')::bson);
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""2"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+SELECT document->>'_id' AS id, pg_column_size(document) < length(document::bytea) AS compressed
+FROM documentdb_api.collection('doc_size_db', 'doc_size_short_batch') ORDER BY object_id;
+ id | compressed 
+---------------------------------------------------------------------
+ 1  | t
+ 2  | t
+(2 rows)
+
+BEGIN;
+SET LOCAL documentdb.document_toast_compression_threshold TO -1;
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_short_batch","documents":[{"_id":3,"payload":"' || repeat('abc', 400) || '"},{"_id":4,"payload":"' || repeat('abc', 400) || '"}]}')::bson);
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""2"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+COMMIT;
+SELECT document->>'_id' AS id, pg_column_size(document) < length(document::bytea) AS compressed
+FROM documentdb_api.collection('doc_size_db', 'doc_size_short_batch') ORDER BY object_id;
+ id | compressed 
+---------------------------------------------------------------------
+ 1  | t
+ 2  | t
+ 3  | f
+ 4  | f
+(4 rows)
+
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_short_batch');
+ drop_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+-- These document sizes hit the sequence writer's former 59/64-byte boundary.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_sequence_boundary');
+NOTICE:  creating collection
+ create_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_sequence_boundary","documents":[{"a":"' || repeat('x', 46) || '"},{},{}]}')::bson);
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""3"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+SELECT count(*) AS stored_count, count(DISTINCT document->>'_id') AS distinct_ids,
+    max(length(document->>'a')) AS payload_length
+FROM documentdb_api.collection('doc_size_db', 'doc_size_sequence_boundary');
+ stored_count | distinct_ids | payload_length 
+---------------------------------------------------------------------
+            3 |            3 |             46
+(1 row)
+
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_sequence_boundary');
+ drop_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+-- Two full sub-batches followed by a single-document tail, with generated IDs.
+SET documentdb.batchWriteSubTransactionCount TO 2;
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_partial_batch');
+NOTICE:  creating collection
+ create_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":1},{"v":2},{"v":3},{"v":4},{"v":5}]}');
+                                         insert                                         
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""5"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" } }",t)
+(1 row)
+
+SELECT document->>'v' AS v FROM documentdb_api.collection('doc_size_db', 'doc_size_partial_batch') ORDER BY v;
+ v 
+---------------------------------------------------------------------
+ 1
+ 2
+ 3
+ 4
+ 5
+(5 rows)
+
+CALL documentdb_api.insert_txn_proc('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":6},{"v":7},{"v":8},{"v":9},{"v":10}]}');
+                               p_result                               | p_success 
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "5" }, "ok" : { "$numberDouble" : "1.0" } } | t
+(1 row)
+
+CALL documentdb_api.insert_bulk('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":11},{"v":12},{"v":13},{"v":14},{"v":15}]}');
+                               p_result                               | p_success 
+---------------------------------------------------------------------
+ { "n" : { "$numberInt" : "5" }, "ok" : { "$numberDouble" : "1.0" } } | t
+(1 row)
+
+SELECT (document->>'v')::integer AS v FROM documentdb_api.collection('doc_size_db', 'doc_size_partial_batch') ORDER BY v;
+ v  
+---------------------------------------------------------------------
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+(15 rows)
+
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_partial_batch');
+ drop_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+-- Failed sub-batches retain ordered and unordered duplicate-key behavior.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_batch_errors');
+NOTICE:  creating collection
+ create_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_batch_errors","ordered":true,"documents":[{"_id":1},{"_id":2},{"_id":3},{"_id":3},{"_id":4}]}');
+                                                                                                                                           insert                                                                                                                                            
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""3"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" }, ""writeErrors"" : [ { ""index"" : { ""$numberInt"" : ""3"" }, ""code"" : { ""$numberInt"" : ""319029277"" }, ""errmsg"" : ""Duplicate key violation on the requested collection: Index '_id_'"" } ] }",f)
+(1 row)
+
+SELECT document->>'_id' AS id FROM documentdb_api.collection('doc_size_db', 'doc_size_batch_errors') ORDER BY object_id;
+ id 
+---------------------------------------------------------------------
+ 1
+ 2
+ 3
+(3 rows)
+
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_batch_errors","ordered":false,"documents":[{"_id":5},{"_id":6},{"_id":3},{"_id":7},{"_id":8}]}');
+                                                                                                                                           insert                                                                                                                                            
+---------------------------------------------------------------------
+ ("{ ""n"" : { ""$numberInt"" : ""4"" }, ""ok"" : { ""$numberDouble"" : ""1.0"" }, ""writeErrors"" : [ { ""index"" : { ""$numberInt"" : ""2"" }, ""code"" : { ""$numberInt"" : ""319029277"" }, ""errmsg"" : ""Duplicate key violation on the requested collection: Index '_id_'"" } ] }",f)
+(1 row)
+
+SELECT document->>'_id' AS id FROM documentdb_api.collection('doc_size_db', 'doc_size_batch_errors') ORDER BY object_id;
+ id 
+---------------------------------------------------------------------
+ 1
+ 2
+ 3
+ 5
+ 6
+ 7
+ 8
+(7 rows)
+
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_batch_errors');
+ drop_collection 
+---------------------------------------------------------------------
+ t
+(1 row)
+
+RESET ROLE;
+REASSIGN OWNED BY doc_size_batch_user TO :original_test_user;
+DROP ROLE doc_size_batch_user;
+RESET documentdb.batchWriteSubTransactionCount;
 RESET documentdb.document_toast_compression_threshold;
 RESET citus.enable_local_execution;
 RESET documentdb.useLocalExecutionShardQueries;
