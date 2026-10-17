@@ -363,6 +363,7 @@ extern bool EnableCrossIndexBitmapOrSortMerge;
 extern bool EnableCompositeReducedCorrelatedFirstOwnerFallback;
 extern bool EnableLookupJoinSelectivityFromStats;
 extern bool EnableFullScanCostAndSelectivity;
+extern bool EnableBtreeOrderByWithFilters;
 
 /* --------------------------------------------------------- */
 /* Forward declaration */
@@ -552,7 +553,6 @@ static const ForceIndexSupportFuncs ForceIndexOperatorSupport[] =
 extern bool EnableVectorForceIndexPushdown;
 extern bool EnableGeonearForceIndexPushdown;
 extern bool ForceIndexOnlyScanIfAvailable;
-extern bool EnableOrderByIdOnCostFunction;
 extern int MaxMergeSortInValues;
 extern bool EnablePrimaryKeyCursorScan;
 
@@ -3778,7 +3778,7 @@ documentdb_btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 {
 	bool convertedToIndexOnlyScan = false;
 
-	if (EnableOrderByIdOnCostFunction &&
+	if (ShouldEnableOrderByIdOnCostFunction(root, path->path.parent) &&
 		list_length(root->query_pathkeys) == 1)
 	{
 		ConsiderBtreeOrderByPushdown(root, path);
@@ -4324,7 +4324,8 @@ ConsiderIndexOrderByPushdownForId(PlannerInfo *root, RelOptInfo *rel, RangeTblEn
 	/* In this path, we only consider order by pushdown for the PK index - so we only support
 	 * having a single order by path key
 	 */
-	if (EnableOrderByIdOnCostFunction || list_length(root->query_pathkeys) != 1)
+	if (ShouldEnableOrderByIdOnCostFunction(root, rel) || list_length(
+			root->query_pathkeys) != 1)
 	{
 		return;
 	}
@@ -4428,14 +4429,68 @@ ConsiderIndexOrderByPushdownForId(PlannerInfo *root, RelOptInfo *rel, RangeTblEn
 				SortPathKeyStrategy(sortDetailsInput->sortPathKey) ==
 				BTGreaterStrategyNumber ?
 				BackwardScanDirection : ForwardScanDirection;
+			IndexPath *primaryKeyPath = NULL;
 
-			IndexClause *shard_key_clause =
-				BuildPointReadIndexClause(
-					context->plannerOrderByData.shardKeyEqualityExpr, 0);
-			List *indexClauses = list_make1(shard_key_clause);
-			IndexPath *primaryKeyPath = create_index_path(
-				root, primaryKeyIndex, indexClauses, NIL, NIL, NIL, scanDir, false, NULL,
-				1, false);
+			if (EnableBtreeOrderByWithFilters)
+			{
+				List *newIndexList = list_make1(primaryKeyIndex);
+
+				List *oldRelPaths = rel->pathlist;
+				List *oldIndexList = rel->indexlist;
+				rel->pathlist = NIL;
+				rel->indexlist = newIndexList;
+				create_index_paths(root, rel);
+				List *buildPaths = rel->pathlist;
+				rel->pathlist = oldRelPaths;
+				rel->indexlist = oldIndexList;
+
+				if (list_length(buildPaths) > 0)
+				{
+					Path *bestPath = linitial(buildPaths);
+					IndexPath *indexPath = NULL;
+					if (IsA(bestPath, IndexPath))
+					{
+						indexPath = (IndexPath *) bestPath;
+					}
+					else if (IsA(bestPath, BitmapHeapPath))
+					{
+						BitmapHeapPath *bitmapPath = (BitmapHeapPath *) bestPath;
+						if (IsA(bitmapPath->bitmapqual, IndexPath))
+						{
+							indexPath = (IndexPath *) bitmapPath->bitmapqual;
+						}
+					}
+
+					if (indexPath != NULL &&
+						indexPath->indexinfo == primaryKeyIndex)
+					{
+						if (list_length(indexPath->indexclauses) > 1)
+						{
+							bool hasNonIdFilters = false;
+							indexPath = TrimIndexRestrictInfoForBtreePath(root, indexPath,
+																		  &hasNonIdFilters);
+						}
+
+						primaryKeyPath = indexPath;
+					}
+				}
+			}
+
+			/* An unsharded collection's redundant shard-key qual may already
+			 * be removed, leaving no indexable filters to regenerate a path. */
+			if (primaryKeyPath == NULL)
+			{
+				IndexClause *shard_key_clause =
+					BuildPointReadIndexClause(
+						context->plannerOrderByData.shardKeyEqualityExpr, 0);
+				List *indexClauses = list_make1(shard_key_clause);
+				primaryKeyPath = create_index_path(
+					root, primaryKeyIndex, indexClauses, NIL, NIL, NIL, scanDir, false,
+					NULL,
+					1, false);
+			}
+
+			primaryKeyPath->indexscandir = scanDir;
 			primaryKeyPath->path.pathkeys = list_make1(sortDetailsInput->sortPathKey);
 			pathsToAdd = lappend(pathsToAdd, primaryKeyPath);
 		}

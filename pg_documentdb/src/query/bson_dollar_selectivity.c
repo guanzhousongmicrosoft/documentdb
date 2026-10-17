@@ -51,6 +51,8 @@ extern bool EnableArrayBsonStatsWithPlannerStatistics;
 extern bool EnableInGranularSelectivity;
 extern bool BsonStatsEnableArrayValueUnpack;
 extern int MaxInGranularSelectivityInputSizeBytes;
+extern bool EnableOrderByIdOnCostFunction;
+extern bool EnableOrderByIdOnCostFunctionWithStats;
 
 /* CODESYNC with system_configs.c */
 #define ARRAY_STATISTICS_MAX_SAMPLE_COUNT 128
@@ -231,6 +233,24 @@ IsBtreeBsonSelectivityFromStatsEnabledForRelation(PlannerInfo *planner,
 												   &isPerCollectionStatsEnabled);
 	return isPerCollectionStatsEnabled ||
 		   IsBtreeBsonSelectivityFromStatsEnabled();
+}
+
+
+bool
+ShouldEnableOrderByIdOnCostFunction(PlannerInfo *root, RelOptInfo *rel)
+{
+	if (EnableOrderByIdOnCostFunction)
+	{
+		return true;
+	}
+
+	if (EnableOrderByIdOnCostFunctionWithStats &&
+		IsBtreeBsonSelectivityFromStatsEnabledForRelation(root, rel))
+	{
+		return true;
+	}
+
+	return false;
 }
 
 
