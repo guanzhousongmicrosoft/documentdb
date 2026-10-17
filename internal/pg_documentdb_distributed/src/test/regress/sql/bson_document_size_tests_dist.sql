@@ -1,3 +1,7 @@
+/* Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT License.
+ * SPDX-License-Identifier: MIT
+ */
 SET search_path TO documentdb_api,documentdb_core,documentdb_api_catalog;
 SET citus.next_shard_id TO 271500000;
 SET documentdb.next_collection_id TO 27150000;
@@ -18,7 +22,7 @@ SET documentdb.next_collection_index_id TO 27150000;
 -- | insertOne local                                   | 629         | yes         |
 -- | insertOne remote                                  | 611         | yes         |
 -- | insertMany local                                  | 633         | yes         |
--- | insertMany remote (TODO)                          | 1538        | no          |
+-- | insertMany remote                                 | 631         | yes         |
 -- | insertMany remote single-document retries         | 630         | yes         |
 -- | update updateByObjectId                           | 635-685     | yes         |
 -- | update updateOne (filter not on _id)              | 628         | yes         |
@@ -43,19 +47,14 @@ SET documentdb.next_collection_index_id TO 27150000;
 --   multi false) are routed to update_worker on the shard. The write then
 --   runs on the node that owns the shard, with the shard table known, and the
 --   document is compressed right before it is written.
--- * Eligible remote single-document inserts are routed to insert_worker when
+-- * Eligible remote single-document and batch inserts are routed to insert_worker when
 --   compression is enabled on the coordinator. The worker compresses the
 --   document before inserting directly into the local shard.
 --
--- Why remote batches are not compressed (TODO):
--- * Without local shard execution there is no shard table, so the batch is
---   built as an INSERT on the distributed table (CreateInsertQuery) and run
---   through the distributed executor (RunInsertQuery). The coordinator
---   compresses the document parameter, but the executor sends the value to
---   the shard over the connection in its serialized form, which is always the
---   full uncompressed document. The shard stores what it receives and nothing
---   compresses it again. Single-document retries after a batch error use
---   insert_worker and are compressed.
+-- * Remote batches are sent as document sequences. The worker prepares and
+--   compresses each document before inserting into its local shard. Failed
+--   batches are rolled back before individual retries, preserving ordered
+--   and unordered error handling.
 
 -- Run every write without local shard execution so that the commands are sent
 -- to the shards through the distributed executor.
@@ -221,10 +220,7 @@ SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_raw');
 DROP FUNCTION documentdb_api_internal.test_compress_bson_if_needed(documentdb_core.bson);
 
 -- insertMany batches.
--- TODO: insertMany batches are stored uncompressed. A batch is a single
--- multi row INSERT on the distributed table, and each document reaches the
--- shard uncompressed (see the header). The retry of the remaining documents
--- after a duplicate key error inserts them one at a time and compresses them.
+-- Remote insertMany batches and individual retries are stored compressed.
 SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_insert_many');
 
 SELECT documentdb_api.insert('doc_size_db', '{ "insert": "doc_size_insert_many", "ordered": true, "documents": [ {"_id": "insertmanyorderedabcdefghijklmnop01", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}, {"_id": "insertmanyorderedabcdefghijklmnop02", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}}, {"_id": "insertmanyorderedabcdefghijklmnop03", "f01abcdefghijkl": "opqrstu", "f02abcde": "vwxyz0123456789abcdefghijklmnopqrstu", "f03abcdefghijk": {"f04abcd": "23456789abcdefghijklmnopqrstuvwxyz0123456789", "f05a": "9abcdefghijklmnopqrstuvw", "f06ab": "ghijklmnopqrstuvwxyz0123", "f07abcd": "nopqrstuvwxyz0123456789a"}, "f08abcdefghi": ["uvwxyz0123456789abcdefgh"], "f09abcd": "12", "f10abcdef": {"$date": {"$numberLong": "1700000010000"}}, "f11abcdefghijklmn": "fghijklmnopqrs", "f12abcd": true, "f13abcdefghijkl": {"f04abcd": "mnopqrstuvwxyz0123456789abcdefghijklmnopqrst", "f05a": "tuvwxyz0123456789abcdefg", "f06ab": "0123456789abcdefghijklmn", "f07abcd": "789abcdefghijklmnopqrstu"}, "f14abcdefghijklm": "efgh", "f15abcdefghijklmno": "lmno", "f16abcdefghijk": true, "f17abcdefghi": true, "f18abcdefghijklmnopqrs": true, "f19abcdefghi": true, "f20abcdefghij": [], "f21abcdefghi": {"f22a": "stuvwxyz012", "f23ab": "z01"}, "f24a": "6789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwx", "f25ab": {"f26abcdef": "defghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", "f27ab": "klmnopqrstuvwxyz01234567"}, "f28abcdefghijk": ["rstuvwxyz"], "f29abcdefghi": [{"f22a": "yz0123456", "f30abcdefgh": [{"f31a": {"$numberInt": "25"}}]}], "f32abcdefghijkl": [], "f33abcdefghijklmnop": {"f24a": "cdefghijklmnop"}, "f34abc": "jklmnop", "f35ab": "qrstuvwxyz0123456789abcd", "f36abcdef": {"$date": {"$numberLong": "1700000029000"}}, "f37ab": true, "f38abcdefghij": {"$date": {"$numberLong": "1700000030000"}}, "f39abcdefgh": "bcdefghijklmnopqrstuvwxyz0123456789abcdef", "f40abc": {"f41abcd": "i", "f42abcd": "p", "f43abcdef": "wxyz", "f44ab": "3456", "f36abcdef": {"$date": {"$numberLong": "1700000036000"}}, "f12abcd": true, "f45abcdefgh": "h"}} ] }');
@@ -351,6 +347,66 @@ SELECT document->>'_id' AS id, pg_column_size(document) AS column_size, length(d
 FROM documentdb_data.documents_27150008 ORDER BY object_id;
 
 SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_local_insert');
+RESET documentdb.document_toast_compression_threshold;
+RESET citus.enable_local_execution;
+RESET documentdb.useLocalExecutionShardQueries;
+
+-- Worker batch limits can differ from the coordinator's session setting.
+CREATE ROLE doc_size_batch_user WITH LOGIN SUPERUSER IN ROLE :original_test_user;
+ALTER ROLE doc_size_batch_user SET documentdb.document_toast_compression_threshold TO 1024;
+ALTER ROLE doc_size_batch_user SET documentdb.batchWriteSubTransactionCount TO 1;
+SET ROLE doc_size_batch_user;
+SET documentdb.document_toast_compression_threshold TO 1024;
+SET documentdb.useLocalExecutionShardQueries TO off;
+SET citus.enable_local_execution TO off;
+
+-- A batch smaller than the limit must insert every document exactly once.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_short_batch');
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_short_batch","documents":[{"_id":1,"payload":"' || repeat('abc', 400) || '"},{"_id":2,"payload":"' || repeat('abc', 400) || '"}]}')::bson);
+SELECT document->>'_id' AS id, pg_column_size(document) < length(document::bytea) AS compressed
+FROM documentdb_api.collection('doc_size_db', 'doc_size_short_batch') ORDER BY object_id;
+
+BEGIN;
+SET LOCAL documentdb.document_toast_compression_threshold TO -1;
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_short_batch","documents":[{"_id":3,"payload":"' || repeat('abc', 400) || '"},{"_id":4,"payload":"' || repeat('abc', 400) || '"}]}')::bson);
+COMMIT;
+SELECT document->>'_id' AS id, pg_column_size(document) < length(document::bytea) AS compressed
+FROM documentdb_api.collection('doc_size_db', 'doc_size_short_batch') ORDER BY object_id;
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_short_batch');
+
+-- These document sizes hit the sequence writer's former 59/64-byte boundary.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_sequence_boundary');
+SELECT documentdb_api.insert('doc_size_db',
+    ('{"insert":"doc_size_sequence_boundary","documents":[{"a":"' || repeat('x', 46) || '"},{},{}]}')::bson);
+SELECT count(*) AS stored_count, count(DISTINCT document->>'_id') AS distinct_ids,
+    max(length(document->>'a')) AS payload_length
+FROM documentdb_api.collection('doc_size_db', 'doc_size_sequence_boundary');
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_sequence_boundary');
+
+-- Two full sub-batches followed by a single-document tail, with generated IDs.
+SET documentdb.batchWriteSubTransactionCount TO 2;
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_partial_batch');
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":1},{"v":2},{"v":3},{"v":4},{"v":5}]}');
+SELECT document->>'v' AS v FROM documentdb_api.collection('doc_size_db', 'doc_size_partial_batch') ORDER BY v;
+CALL documentdb_api.insert_txn_proc('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":6},{"v":7},{"v":8},{"v":9},{"v":10}]}');
+CALL documentdb_api.insert_bulk('doc_size_db', '{"insert":"doc_size_partial_batch","documents":[{"v":11},{"v":12},{"v":13},{"v":14},{"v":15}]}');
+SELECT (document->>'v')::integer AS v FROM documentdb_api.collection('doc_size_db', 'doc_size_partial_batch') ORDER BY v;
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_partial_batch');
+
+-- Failed sub-batches retain ordered and unordered duplicate-key behavior.
+SELECT documentdb_api.create_collection('doc_size_db', 'doc_size_batch_errors');
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_batch_errors","ordered":true,"documents":[{"_id":1},{"_id":2},{"_id":3},{"_id":3},{"_id":4}]}');
+SELECT document->>'_id' AS id FROM documentdb_api.collection('doc_size_db', 'doc_size_batch_errors') ORDER BY object_id;
+SELECT documentdb_api.insert('doc_size_db', '{"insert":"doc_size_batch_errors","ordered":false,"documents":[{"_id":5},{"_id":6},{"_id":3},{"_id":7},{"_id":8}]}');
+SELECT document->>'_id' AS id FROM documentdb_api.collection('doc_size_db', 'doc_size_batch_errors') ORDER BY object_id;
+SELECT documentdb_api.drop_collection('doc_size_db', 'doc_size_batch_errors');
+
+RESET ROLE;
+REASSIGN OWNED BY doc_size_batch_user TO :original_test_user;
+DROP ROLE doc_size_batch_user;
+RESET documentdb.batchWriteSubTransactionCount;
 RESET documentdb.document_toast_compression_threshold;
 RESET citus.enable_local_execution;
 RESET documentdb.useLocalExecutionShardQueries;
