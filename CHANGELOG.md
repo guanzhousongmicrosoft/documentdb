@@ -1,4 +1,5 @@
 ### documentdb v1.3-0 (Unreleased) ###
+* Preserve released schema definitions when introducing the change-stream heartbeat task. *[Bugfix]* (work item 5713030)
 
 ### documentdb v1.2-0 (Unreleased) ###
 * Restrict access to the change-stream heartbeat task and skip heartbeat WAL emission during read-only transactions or disk-full read-only mode. *[Bugfix]* (work item 5713030)
