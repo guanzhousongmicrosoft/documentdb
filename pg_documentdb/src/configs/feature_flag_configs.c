@@ -143,6 +143,15 @@ bool EnableCompositeIndexPlanner = DEFAULT_ENABLE_COMPOSITE_INDEX_PLANNER;
 #define DEFAULT_ENABLE_ORDER_BY_ID_ON_COST false
 bool EnableOrderByIdOnCostFunction = DEFAULT_ENABLE_ORDER_BY_ID_ON_COST;
 
+/* Added on v1.3, enabled on v1.3, remove after v1.5 */
+#define DEFAULT_ENABLE_ORDER_BY_ID_ON_COST_WITH_STATS true
+bool EnableOrderByIdOnCostFunctionWithStats =
+	DEFAULT_ENABLE_ORDER_BY_ID_ON_COST_WITH_STATS;
+
+/* Added on v1.3, enabled on v1.3, remove after v1.5 */
+#define DEFAULT_ENABLE_BTREE_ORDER_BY_WITH_FILTERS true
+bool EnableBtreeOrderByWithFilters = DEFAULT_ENABLE_BTREE_ORDER_BY_WITH_FILTERS;
+
 /* Note: this is a long term feature flag since we need to validate compatiblity
  * in mixed mode for older indexes - once this is
  * enabled by default - please move this to testing_configs.
@@ -1177,6 +1186,21 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		gettext_noop(
 			"Whether to enable index terms that are value only."),
 		NULL, &EnableOrderByIdOnCostFunction, DEFAULT_ENABLE_ORDER_BY_ID_ON_COST,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_order_by_id_on_cost_function_with_stats", newGucPrefix),
+		gettext_noop(
+			"Whether to enable cost-based primary-key ordering when statistics are available."),
+		NULL, &EnableOrderByIdOnCostFunctionWithStats,
+		DEFAULT_ENABLE_ORDER_BY_ID_ON_COST_WITH_STATS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_btree_order_by_with_filters", newGucPrefix),
+		gettext_noop(
+			"Whether ordered primary-key index scans retain matching index filters."),
+		NULL, &EnableBtreeOrderByWithFilters, DEFAULT_ENABLE_BTREE_ORDER_BY_WITH_FILTERS,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

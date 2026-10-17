@@ -229,7 +229,6 @@ PG_FUNCTION_INFO_V1(command_cursor_tracker_support);
 
 extern bool EnableRumCursorDynamicIndexScans;
 extern bool EnableRumDynamicIndexScansSkipToTid;
-extern bool EnableOrderByIdOnCostFunction;
 extern bool EnableMergeSortForInPrefix;
 extern bool EnableGroupByDynamicStreaming;
 extern bool EnableDynamicCursorMultiKeyBitmap;
@@ -981,7 +980,7 @@ WalkRelPathsAndCreateCustomPathsForFirstPage(PlannerInfo *root, RelOptInfo *rel,
 					/* By default we don't add orderby for _id indexes until after the query is fully optimized.
 					 * We need to attempt that here before deciding to bail on the _id index.
 					 */
-					if (!EnableOrderByIdOnCostFunction &&
+					if (!ShouldEnableOrderByIdOnCostFunction(root, rel) &&
 						list_length(root->query_pathkeys) == 1)
 					{
 						ConsiderBtreeOrderByPushdown(root, ipath);
