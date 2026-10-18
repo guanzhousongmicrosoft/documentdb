@@ -2927,6 +2927,12 @@ ParseIndexDefDocumentInternal(const bson_iter_t *indexesDocIter,
 			}
 		}
 
+		/* _fts/_ftsx text keys are not added to keyPathList, so check for text directly. */
+		if (indexDef->key->hasTextIndexes)
+		{
+			indexDef->key->canSupportCompositeTerm = false;
+		}
+
 		if (list_length(indexDef->key->keyPathList) > INDEX_MAX_KEYS)
 		{
 			/* Since we no longer have PG to enforce this limit, enforce it here. */

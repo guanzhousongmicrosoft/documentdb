@@ -1,4 +1,5 @@
 ### documentdb v1.3-0 (Unreleased) ###
+* Build text indexes specified with the `{ _fts: "text", _ftsx: 1 }` key format as text indexes when ordered indexes are enabled by default, so `$text` queries work on them. *[Bugfix]*
 * Preserve ordered `_id` scan candidates and range bounds when filters are present, and enable cost-time ordering when collection or native btree statistics are enabled. Controlled by the default-on `documentdb.enable_btree_order_by_with_filters` and `documentdb.enable_order_by_id_on_cost_function_with_stats` settings. *[Bugfix]*
 * Preserve released schema definitions when introducing the change-stream heartbeat task. *[Bugfix]* (work item 5713030)
 
