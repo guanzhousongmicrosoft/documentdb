@@ -307,10 +307,6 @@ bool EnableElemMatchSelectivityFromStats =
 bool EnablePerCollectionPlannerStatistics =
 	DEFAULT_ENABLE_PER_COLLECTION_PLANNER_STATISTICS;
 
-/* Added in v0.116, enabled in v0.116, remove after v1.1 */
-#define DEFAULT_SKIP_LEGACY_ID_INDEX_STATS_CHECK true
-bool SkipLegacyIdIndexStatsCheck = DEFAULT_SKIP_LEGACY_ID_INDEX_STATS_CHECK;
-
 /* Added in v0.113, Pending stabilization, enable in v1.2 */
 #define DEFAULT_ENABLE_PLANNER_STATISTICS_NEW_COLLECTIONS false
 bool EnablePlannerStatisticsNewCollections =
@@ -1658,16 +1654,6 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"planner statistics."),
 		NULL, &EnableInGranularSelectivity,
 		DEFAULT_ENABLE_IN_GRANULAR_SELECTIVITY,
-		PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomBoolVariable(
-		psprintf("%s.skip_legacy_id_index_stats_check", newGucPrefix),
-		gettext_noop(
-			"Whether to skip the legacy _id_ index-options fallback when "
-			"checking if a collection has planner statistics enabled. Skipped "
-			"by default; retained for backward compatibility and will be retired."),
-		NULL, &SkipLegacyIdIndexStatsCheck,
-		DEFAULT_SKIP_LEGACY_ID_INDEX_STATS_CHECK,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
