@@ -685,8 +685,8 @@ bool EnableInGranularSelectivity = DEFAULT_ENABLE_IN_GRANULAR_SELECTIVITY;
 #define DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS true
 bool RemoveMatchNamespaceFilters = DEFAULT_REMOVE_MATCH_NAMESPACE_FILTERS;
 
-/* Added in v0.112, Pending stabilization, enable in v1.2 */
-#define DEFAULT_ENABLE_PREIMAGES false
+/* Added in v0.112, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_PREIMAGES true
 bool EnablePreImages = DEFAULT_ENABLE_PREIMAGES;
 
 /*
