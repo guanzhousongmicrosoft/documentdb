@@ -1,5 +1,7 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * Licensed under the MIT License. See LICENSE in the project root for license information.
+ * SPDX-License-Identifier: MIT
  *
  * src/sharding.c
  *
@@ -1544,8 +1546,7 @@ ShardCollectionCore(ShardCollectionArgs *args)
 	/*
 	 * Planner statistics are intentionally not touched here. The statsEnabled
 	 * collection metadata is left enabled throughout, so this flow performs no
-	 * options update on the collections reference table (which would otherwise
-	 * deadlock against the commutative shard_key update above). The statistics
+	 * options update on the collections reference table. The statistics
 	 * objects on the old data table are dropped when that table is dropped, and
 	 * the index recreation below recreates them on the rebuilt table because the
 	 * collection still has statistics enabled.
@@ -1558,6 +1559,15 @@ ShardCollectionCore(ShardCollectionArgs *args)
 					 "CREATE TABLE %s (LIKE %s INCLUDING ALL EXCLUDING INDEXES EXCLUDING STATISTICS)",
 					 tmpDataTableName, qualifiedDataTableName);
 	ExtensionExecuteQueryViaSPI(queryInfo->data, readOnly, SPI_OK_UTILITY, &isNull);
+
+	/* LIKE does not copy replica identity; restore it before creating the shards. */
+	if (collection->options.changeStreamPreAndPostImagesEnabled)
+	{
+		resetStringInfo(queryInfo);
+		appendStringInfo(queryInfo,
+						 "ALTER TABLE %s REPLICA IDENTITY FULL", tmpDataTableName);
+		ExtensionExecuteQueryViaSPI(queryInfo->data, readOnly, SPI_OK_UTILITY, &isNull);
+	}
 
 	/* change the shard_key_value constraint */
 	resetStringInfo(queryInfo);
