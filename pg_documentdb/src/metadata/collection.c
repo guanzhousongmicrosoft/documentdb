@@ -2572,7 +2572,6 @@ static void
 UpdateCollectionOptions(MongoCollection *collection, const pgbson *updateSpec)
 {
 	bool isNull = false;
-	bool readOnly = false;
 	int numArgs = 2;
 	char isNulls[2] = { ' ', ' ' };
 	Datum datum[2];
@@ -2607,9 +2606,10 @@ UpdateCollectionOptions(MongoCollection *collection, const pgbson *updateSpec)
 					 ApiCatalogSchemaName, CoreSchemaName,
 					 CoreSchemaName, collection->collectionId);
 
-	ExtensionExecuteQueryWithArgsViaSPI(updateOptionQuery->data, numArgs,
-										argOid, datum, isNulls, readOnly,
-										SPI_OK_UPDATE, &isNull);
+	/* A primary-key update of one collection is safe with commutative writes. */
+	RunQueryWithCommutativeWrites(updateOptionQuery->data, numArgs,
+								  argOid, datum, isNulls,
+								  SPI_OK_UPDATE, &isNull);
 }
 
 
@@ -2622,7 +2622,6 @@ static void
 RemoveCollectionOptions(MongoCollection *collection, const pgbson *removeArraySpec)
 {
 	bool isNull = false;
-	bool readOnly = false;
 	int numArgs = 2;
 	char isNulls[2] = { ' ', ' ' };
 	Datum datum[2];
@@ -2657,9 +2656,10 @@ RemoveCollectionOptions(MongoCollection *collection, const pgbson *removeArraySp
 					 ApiCatalogSchemaName, CoreSchemaName,
 					 CoreSchemaName, collection->collectionId);
 
-	ExtensionExecuteQueryWithArgsViaSPI(updateOptionQuery->data, numArgs,
-										argOid, datum, isNulls, readOnly,
-										SPI_OK_UPDATE, &isNull);
+	/* A primary-key update of one collection is safe with commutative writes. */
+	RunQueryWithCommutativeWrites(updateOptionQuery->data, numArgs,
+								  argOid, datum, isNulls,
+								  SPI_OK_UPDATE, &isNull);
 }
 
 
