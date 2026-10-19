@@ -61,20 +61,38 @@ fn parse_session_id_document(session_doc: &RawDocument) -> Result<LogicalSession
     }
 }
 
-fn parse_logical_session_ids(sessions_field: &RawArray) -> Result<Vec<LogicalSessionId>> {
+fn parse_logical_session_ids(
+    sessions_field: &RawArray,
+    strict: bool,
+) -> Result<Vec<LogicalSessionId>> {
     let mut logical_session_ids = Vec::new();
     for session in sessions_field {
-        match session? {
-            // Null array elements are accepted and contribute no session id.
-            RawBsonRef::Null => {}
-            RawBsonRef::Document(session_doc) => {
-                logical_session_ids.push(parse_session_id_document(session_doc)?);
+        if strict {
+            match session? {
+                // Null array elements are accepted and contribute no session id.
+                RawBsonRef::Null => {}
+                RawBsonRef::Document(session_doc) => {
+                    logical_session_ids.push(parse_session_id_document(session_doc)?);
+                }
+                _ => {
+                    return Err(DocumentDBError::type_mismatch(
+                        "Session id entry must be a document".to_owned(),
+                    ))
+                }
             }
-            _ => {
-                return Err(DocumentDBError::type_mismatch(
-                    "Session id entry must be a document".to_owned(),
-                ))
-            }
+        } else {
+            let session_doc = session?.as_document().ok_or_else(|| {
+                DocumentDBError::bad_value("Session should be a document".to_owned())
+            })?;
+
+            let lsid = LogicalSessionId::from(
+                session_doc
+                    .get_binary("id")
+                    .map_err(DocumentDBError::parse_failure())?
+                    .bytes,
+            );
+
+            logical_session_ids.push(lsid);
         }
     }
     Ok(logical_session_ids)
@@ -85,8 +103,9 @@ async fn terminate_sessions(
     connection_context: &ConnectionContext,
     pg_data_client: &impl PgDataClient,
     sessions_field: &RawArray,
+    strict: bool,
 ) -> Result<()> {
-    let logical_session_ids = parse_logical_session_ids(sessions_field)?;
+    let logical_session_ids = parse_logical_session_ids(sessions_field, strict)?;
     let caller = connection_context.user().principal()?;
     let transaction_store = connection_context.service_context.transaction_store();
     let is_replica_cluster = connection_context
@@ -127,25 +146,37 @@ pub async fn end_or_kill_sessions(
 ) -> Result<Response> {
     let request = request_context.request();
 
+    // Disabling shape validation must not disable authorization or termination.
+    let strict = connection_context
+        .dynamic_configuration()
+        .enable_session_argument_validation();
+
     let key = if request_context.request_type() == RequestType::KillSessions {
         "killSessions"
     } else {
         "endSessions"
     };
 
-    let command_value = request
-        .document()
-        .get(key)?
-        .ok_or_else(|| session_command_missing_field(key))?;
+    let sessions_field = if strict {
+        let command_value = request
+            .document()
+            .get(key)?
+            .ok_or_else(|| session_command_missing_field(key))?;
 
-    let sessions_field = match command_value {
-        RawBsonRef::Null => return Err(session_command_missing_field(key)),
-        RawBsonRef::Array(sessions_field) => sessions_field,
-        _ => {
-            return Err(DocumentDBError::type_mismatch(format!(
-                "BSON field '{key}' is the wrong type, expected type 'array'"
-            )))
+        match command_value {
+            RawBsonRef::Null => return Err(session_command_missing_field(key)),
+            RawBsonRef::Array(sessions_field) => sessions_field,
+            _ => {
+                return Err(DocumentDBError::type_mismatch(format!(
+                    "BSON field '{key}' is the wrong type, expected type 'array'"
+                )))
+            }
         }
+    } else {
+        request
+            .document()
+            .get_array(key)
+            .map_err(DocumentDBError::parse_failure())?
     };
 
     terminate_sessions(
@@ -153,6 +184,7 @@ pub async fn end_or_kill_sessions(
         connection_context,
         pg_data_client,
         sessions_field,
+        strict,
     )
     .await?;
 
@@ -202,19 +234,28 @@ pub async fn kill_all_sessions(
     const AUTHENTICATION_DATABASE: &str = "admin";
     let request = request_context.request();
 
-    let command_value = request
-        .document()
-        .get(KEY)?
-        .ok_or_else(|| session_command_missing_field(KEY))?;
-
-    let entries = match command_value {
-        RawBsonRef::Null => return Err(session_command_missing_field(KEY)),
-        RawBsonRef::Array(entries) => entries,
-        _ => {
-            return Err(DocumentDBError::type_mismatch(format!(
-                "BSON field '{KEY}' is the wrong type, expected type 'array'"
-            )))
+    let strict = connection_context
+        .dynamic_configuration()
+        .enable_session_argument_validation();
+    let entries = if strict {
+        let command_value = request
+            .document()
+            .get(KEY)?
+            .ok_or_else(|| session_command_missing_field(KEY))?;
+        match command_value {
+            RawBsonRef::Null => return Err(session_command_missing_field(KEY)),
+            RawBsonRef::Array(entries) => entries,
+            _ => {
+                return Err(DocumentDBError::type_mismatch(format!(
+                    "BSON field '{KEY}' is the wrong type, expected type 'array'"
+                )))
+            }
         }
+    } else {
+        request
+            .document()
+            .get_array(KEY)
+            .map_err(DocumentDBError::parse_failure())?
     };
 
     let caller = connection_context.user().principal()?;
@@ -228,7 +269,18 @@ pub async fn kill_all_sessions(
             RawBsonRef::Null => {}
             RawBsonRef::Document(entry_doc) => {
                 has_entries = true;
-                let (user, db) = validate_kill_all_sessions_entry(entry_doc)?;
+                let (user, db) = if strict {
+                    validate_kill_all_sessions_entry(entry_doc)?
+                } else {
+                    (
+                        entry_doc
+                            .get_str("user")
+                            .map_err(DocumentDBError::parse_failure())?,
+                        entry_doc
+                            .get_str("db")
+                            .map_err(DocumentDBError::parse_failure())?,
+                    )
+                };
                 // A supported user lives in the `admin` database, so only
                 // `admin` entries can select a live session.
                 let matches_live_principal = db == AUTHENTICATION_DATABASE;
@@ -508,21 +560,21 @@ mod tests {
         let mut arr = RawArrayBuf::new();
         arr.push(RawBson::Null);
         arr.push(rawdoc! { "id": uuid_binary() });
-        let ids = parse_logical_session_ids(&arr).unwrap();
+        let ids = parse_logical_session_ids(&arr, true).unwrap();
         assert_eq!(ids.len(), 1);
     }
 
     #[test]
     fn logical_session_ids_empty_ok() {
         let arr = RawArrayBuf::new();
-        assert!(parse_logical_session_ids(&arr).unwrap().is_empty());
+        assert!(parse_logical_session_ids(&arr, true).unwrap().is_empty());
     }
 
     #[test]
     fn logical_session_ids_rejects_non_document_element() {
         let mut arr = RawArrayBuf::new();
         arr.push(1_i32);
-        let err = parse_logical_session_ids(&arr).unwrap_err();
+        let err = parse_logical_session_ids(&arr, true).unwrap_err();
         assert_eq!(err.error_code(), ErrorCode::TypeMismatch);
     }
 

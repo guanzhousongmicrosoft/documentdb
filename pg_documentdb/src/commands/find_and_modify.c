@@ -138,6 +138,7 @@ static pgbson * BuildResponseMessage(FindAndModifyResult *result);
 extern bool SkipFailOnCollation;
 extern bool EnableBypassDocumentValidation;
 extern bool EnableSchemaValidation;
+extern bool EnableBsonTypeArgumentValidation;
 
 
 Query *
@@ -271,7 +272,9 @@ ParseFindAndModifyMessage(pgbson *message, Datum *databaseNameDatum)
 		{
 			if (!BSON_ITER_HOLDS_UTF8(&messageIter))
 			{
-				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_INVALIDNAMESPACE),
+				ereport(ERROR, (errcode(EnableBsonTypeArgumentValidation ?
+										ERRCODE_DOCUMENTDB_INVALIDNAMESPACE :
+										ERRCODE_DOCUMENTDB_BADVALUE),
 								errmsg("Collection name contains an invalid data type %s",
 									   BsonIterTypeName(&messageIter))));
 			}
@@ -405,14 +408,28 @@ ParseFindAndModifyMessage(pgbson *message, Datum *databaseNameDatum)
 		else if (strcmp(key, "let") == 0)
 		{
 			ReportFeatureUsage(FEATURE_LET_TOP_LEVEL);
-			if (EnsureTopLevelFieldTypeNullOk("findAndModify.let", &messageIter,
-											  BSON_TYPE_DOCUMENT))
+			if (EnableBsonTypeArgumentValidation)
 			{
+				if (EnsureTopLevelFieldTypeNullOk("findAndModify.let", &messageIter,
+												  BSON_TYPE_DOCUMENT))
+				{
+					let = *bson_iter_value(&messageIter);
+				}
+			}
+			else
+			{
+				EnsureTopLevelFieldType("findAndModify.let", &messageIter,
+										BSON_TYPE_DOCUMENT);
 				let = *bson_iter_value(&messageIter);
 			}
 		}
 		else if (strcmp(key, "hint") == 0)
 		{
+			if (!EnableBsonTypeArgumentValidation)
+			{
+				ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+								errmsg("findAndModify.hint is not implemented yet")));
+			}
 			if (!BSON_ITER_HOLDS_DOCUMENT(&messageIter) &&
 				!BSON_ITER_HOLDS_UTF8(&messageIter))
 			{

@@ -40,6 +40,37 @@ bool EnableBypassDocumentValidation =
 bool EnableNullCollectionValidation = DEFAULT_ENABLE_NULL_COLLECTION_VALIDATION;
 
 /*
+ * SECTION: Command validation flags
+ */
+
+/* Added in v1.2, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_BSON_TYPE_ARGUMENT_VALIDATION true
+bool EnableBsonTypeArgumentValidation =
+	DEFAULT_ENABLE_BSON_TYPE_ARGUMENT_VALIDATION;
+
+/*
+ * The following flags gate validation and command behavior that is enforced in
+ * the gateways. They are consumed by the gateways through pg_settings; the
+ * backend only registers them so they can be toggled as kill-switches.
+ */
+
+/* Added in v1.2, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_READ_CONCERN_VALIDATION true
+bool EnableReadConcernValidation = DEFAULT_ENABLE_READ_CONCERN_VALIDATION;
+
+/* Added in v1.2, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_SESSION_ARGUMENT_VALIDATION true
+bool EnableSessionArgumentValidation = DEFAULT_ENABLE_SESSION_ARGUMENT_VALIDATION;
+
+/* Added in v1.2, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_GETMORE_ARGUMENT_VALIDATION true
+bool EnableGetMoreArgumentValidation = DEFAULT_ENABLE_GETMORE_ARGUMENT_VALIDATION;
+
+/* Added in v1.2, enabled in v1.2, remove after v1.4 */
+#define DEFAULT_ENABLE_SERVER_STATUS_COMMAND true
+bool EnableServerStatusCommand = DEFAULT_ENABLE_SERVER_STATUS_COMMAND;
+
+/*
  * SECTION: Text search flags
  */
 
@@ -745,6 +776,61 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 		NULL,
 		&EnableSchemaValidation,
 		DEFAULT_ENABLE_SCHEMA_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_bson_type_argument_validation", prefix),
+		gettext_noop(
+			"Whether or not to enforce BSON argument type validation for findAndModify, $jsonSchema, getParameter, listIndexes, and dropIndexes."),
+		NULL,
+		&EnableBsonTypeArgumentValidation,
+		DEFAULT_ENABLE_BSON_TYPE_ARGUMENT_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_read_concern_validation", prefix),
+		gettext_noop(
+			"Whether or not to enforce readConcern field and sub-field validation in the gateways."),
+		NULL,
+		&EnableReadConcernValidation,
+		DEFAULT_ENABLE_READ_CONCERN_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_session_argument_validation", prefix),
+		gettext_noop(
+			"Whether or not to enforce session command argument-shape validation in the gateways. Authorization and session termination remain active when disabled."),
+		NULL,
+		&EnableSessionArgumentValidation,
+		DEFAULT_ENABLE_SESSION_ARGUMENT_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_getmore_argument_validation", prefix),
+		gettext_noop(
+			"Whether or not to enforce getMore command argument validation in the gateways."),
+		NULL,
+		&EnableGetMoreArgumentValidation,
+		DEFAULT_ENABLE_GETMORE_ARGUMENT_VALIDATION,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_server_status_command", prefix),
+		gettext_noop(
+			"Whether or not the gateways handle the serverStatus command. When disabled the command is reported as unsupported."),
+		NULL,
+		&EnableServerStatusCommand,
+		DEFAULT_ENABLE_SERVER_STATUS_COMMAND,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
