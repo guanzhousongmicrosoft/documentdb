@@ -192,7 +192,7 @@ async fn sasl_start_clears_authenticated_user_and_pool_settings() {
         .expect("test scheme should register");
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -259,7 +259,7 @@ async fn authentication_can_switch_principal() {
 
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -317,7 +317,7 @@ async fn reauthentication_requires_the_same_principal() {
         .expect("test scheme should register");
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -366,7 +366,7 @@ async fn reauthentication_accepts_the_same_principal() {
         .expect("test scheme should register");
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -412,7 +412,7 @@ async fn terminal_failure_clears_mechanism_state() {
     .await;
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -512,7 +512,7 @@ async fn authentication_rejects_a_disabled_handler() {
         .expect("test scheme should register");
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();
@@ -590,7 +590,7 @@ async fn disabled_reauthentication_scheme_preserves_expired_principal() {
     ));
     let request = authentication_request();
     let request_info = request
-        .extract_common()
+        .extract_common(true)
         .expect("saslStart request should have valid common fields");
     let wire_request = WireRequest::from_request_and_info(&request, request_info);
     let request_tracker = RequestTracker::new();

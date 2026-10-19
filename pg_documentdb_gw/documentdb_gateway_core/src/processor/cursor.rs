@@ -111,6 +111,25 @@ fn validate_get_more_arguments(request: &WireRequest) -> Result<i64> {
     Ok(cursor_id)
 }
 
+/// Extracts the getMore cursor id without argument validation, preserving the
+/// behavior used before getMore argument validation was introduced. The cursor
+/// id must be an int64 and must be present; all other fields are ignored.
+fn extract_get_more_cursor_id_legacy(request: &WireRequest) -> Result<i64> {
+    let mut id = None;
+    request.extract_fields(|k, v| {
+        if k == "getMore" {
+            id = Some(v.as_i64().ok_or(DocumentDBError::bad_value(
+                "getMore value should be an i64".to_owned(),
+            ))?);
+        }
+        Ok(())
+    })?;
+
+    id.ok_or(DocumentDBError::bad_value(
+        "getMore not present in document".to_owned(),
+    ))
+}
+
 /// Validates the getMore `batchSize` argument. Only numeric types (int32,
 /// int64, double, Decimal128) and null are accepted; any other type is a type
 /// mismatch. A value that coerces to a negative integer is rejected as out of
@@ -509,7 +528,15 @@ pub async fn process_get_more(
 ) -> Result<Response> {
     let request = request_context.request();
 
-    let id = validate_get_more_arguments(request)?;
+    let id = if connection_context
+        .service_context
+        .dynamic_configuration()
+        .enable_getmore_argument_validation()
+    {
+        validate_get_more_arguments(request)?
+    } else {
+        extract_get_more_cursor_id_legacy(request)?
+    };
 
     let caller = connection_context.user().principal()?;
 
