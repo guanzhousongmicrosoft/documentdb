@@ -1,13 +1,28 @@
+-- Copyright (c) Microsoft Corporation. All rights reserved.
+-- SPDX-License-Identifier: MIT
+
 SET search_path TO documentdb_api_catalog, documentdb_api, documentdb_core, documentdb_api_internal, public;
 SET documentdb.next_collection_id TO 6400;
 SET documentdb.next_collection_index_id TO 6400;
+SET documentdb.enablePerCollectionPlannerStatistics TO on;
+SET documentdb.enablePlannerStatisticsNewCollections TO off;
 
 -- create a collection
 SELECT documentdb_api.create_collection('stats_db', 'planner_stats');
 
 \d documentdb_data.documents_6401
 
+-- Legacy true must not enable statistics when the collection flag is absent.
+UPDATE documentdb_api_catalog.collection_indexes
+SET index_spec.index_options = '{"statsEnabled":true}'::documentdb_core.bson
+WHERE collection_id = 6401 AND (index_spec).index_name = '_id_';
 SELECT documentdb_api_internal.create_indexes_non_concurrently('stats_db', '{ "createIndexes": "planner_stats", "indexes": [ { "key": { "b": 1, "c": 1 }, "name": "b_c_1" } ] }', TRUE);
+SELECT count(*) AS stats_with_legacy_true
+FROM pg_statistic_ext
+WHERE stxrelid = 'documentdb_data.documents_6401'::regclass;
+UPDATE documentdb_api_catalog.collection_indexes
+SET index_spec.index_options = NULL
+WHERE collection_id = 6401 AND (index_spec).index_name = '_id_';
 
 -- enable planner statistics for the collection (should fail)
 set documentdb.enablePerCollectionPlannerStatistics to off;
@@ -22,7 +37,17 @@ SELECT options FROM documentdb_api_catalog.collections WHERE collection_id = 640
 SELECT documentdb_api_catalog.bson_dollar_unwind(cursorpage, '$cursor.firstBatch') FROM documentdb_api.list_indexes_cursor_first_page('stats_db', '{ "listIndexes": "planner_stats" }') ORDER BY 1;
 
 -- now create an index on the collection and verify that the planner statistics are updated for the index
+-- Legacy false must not override the enabled collection flag.
+UPDATE documentdb_api_catalog.collection_indexes
+SET index_spec.index_options = '{"statsEnabled":false}'::documentdb_core.bson
+WHERE collection_id = 6401 AND (index_spec).index_name = '_id_';
 SELECT documentdb_api_internal.create_indexes_non_concurrently('stats_db', '{ "createIndexes": "planner_stats", "indexes": [ { "key": { "a": 1 }, "name": "a_1" } ] }', TRUE);
+SELECT count(*) AS stats_with_legacy_false
+FROM pg_statistic_ext
+WHERE stxrelid = 'documentdb_data.documents_6401'::regclass;
+UPDATE documentdb_api_catalog.collection_indexes
+SET index_spec.index_options = NULL
+WHERE collection_id = 6401 AND (index_spec).index_name = '_id_';
 
 \d documentdb_data.documents_6401
 

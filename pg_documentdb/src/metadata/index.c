@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/metadata/index.c
  *
@@ -51,7 +52,6 @@
 extern int MaxNumActiveUsersIndexBuilds;
 extern int IndexBuildScheduleInSec;
 extern bool EmitEnableOrderedIndexFalseInResponse;
-extern bool SkipLegacyIdIndexStatsCheck;
 
 /* --------------------------------------------------------- */
 /* Forward declaration */
@@ -3090,61 +3090,19 @@ GetOptionsEquivalencyFromIndexOptions(HTAB *bsonElementHash,
 
 
 /*
- * Checks if a collection has extended stats enabled. We do this by checking the index option
- * for the primary key index in the index catalog.
+ * Checks whether planner statistics are enabled in the collection options.
  */
 bool
 CollectionHasStatisticsEnabled(uint64 collectionId)
 {
-	/* Check the cached collection options, which are the source of truth for
-	 * whether planner statistics are enabled for a collection.
-	 */
 	MongoCollection *collection = GetMongoCollectionByColId(collectionId, NoLock);
 
-	/* Return false if the collection is not found, let the caller handle non existent collections. */
 	if (collection == NULL)
 	{
 		return false;
 	}
 
-	if (collection->options.statsEnabled)
-	{
-		return true;
-	}
-
-	/*
-	 * Legacy fallback: older collections tracked stats via the _id_ index
-	 * options before the collections.options column was used. Skipping this
-	 * check is the default because querying the index catalog here runs
-	 * index_build_is_in_progress against the index queue, which cannot be
-	 * executed from within a nested distributed context (e.g. shard_collection).
-	 * This fallback is retained only for backward compatibility and will be
-	 * retired.
-	 */
-	if (SkipLegacyIdIndexStatsCheck)
-	{
-		return false;
-	}
-
-	IndexDetails *details = IndexNameGetIndexDetails(collectionId, "_id_");
-	if (details == NULL)
-	{
-		return false;
-	}
-
-	pgbson *indexOptions = details->indexSpec.indexOptions;
-	if (indexOptions == NULL)
-	{
-		return false;
-	}
-
-	bson_iter_t iter;
-	if (!PgbsonInitIteratorAtPath(indexOptions, "statsEnabled", &iter))
-	{
-		return false;
-	}
-
-	return bson_iter_as_bool(&iter);
+	return collection->options.statsEnabled;
 }
 
 
