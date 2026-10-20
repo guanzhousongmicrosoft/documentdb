@@ -85,14 +85,14 @@ typedef struct CompositeTermGenerateState
 	/* The set of index paths for a composite index */
 	const char *indexPaths[INDEX_MAX_KEYS];
 
+	/* the set of index path lengths for a composite index */
+	uint32_t indexPathLengths[INDEX_MAX_KEYS];
+
 	/* The sort orders for each of the paths above. */
 	int8_t sortOrders[INDEX_MAX_KEYS];
 
 	/* the path term metadata per path declared above. */
 	GinEntryPathData pathData[INDEX_MAX_KEYS];
-
-	/* The options on a per path basis for single path terms */
-	BsonGinSinglePathOptions *pathOptions[INDEX_MAX_KEYS];
 
 	/* The current status for index paths per path */
 	IndexTraverseOption matchStatus[INDEX_MAX_KEYS];
@@ -100,8 +100,18 @@ typedef struct CompositeTermGenerateState
 	/* The total number of actual paths */
 	uint32_t pathCount;
 
+	int32_t wildCardIndex;
+
 	List *correlatedTerms;
 } CompositeTermGenerateState;
+
+struct CompositeTermGenerationState
+{
+	BsonGinCompositePathOptions *options;
+	CompositeTermGenerateState termState;
+	IndexTermCreateMetadata overallMetadata;
+	bool enableValueOnlyIndexTerms;
+};
 
 
 typedef struct
@@ -210,14 +220,19 @@ extern bool EnableDynamicCursorDedupTracking;
 extern bool EnableCompositeSecondaryPathOrderPushdown;
 extern bool EnableOrderedSaopMultiRangeSkipAdvance;
 extern bool EnableUniqueNullMissingSemantics;
+extern bool EnableValueOnlyIndexTerms;
 
+static void InitializeCompositeTermGenerateState(CompositeTermGenerateState *termState,
+												 BsonGinCompositePathOptions *options);
 static void ValidateCompositePathSpec(const char *prefix);
 static Size FillCompositePathSpec(const char *prefix, void *buffer);
 static Size FillCompositePathSpecFromBson(pgbson *bson, void *buffer, bool isIndexSpec);
 static Datum * GenerateCompositeTermsCore(pgbson *doc,
 										  BsonGinCompositePathOptions *options,
 										  int32_t *nentries, bool addMetadataTerms,
-										  uint64_t *termBlobMetadata);
+										  uint64_t *termBlobMetadata,
+										  const CompositeTermGenerationState *
+										  preparedState);
 static int32_t GetIndexPathsFromOptions(BsonGinCompositePathOptions *options,
 										const char **indexPaths,
 										int8_t *sortOrders);
@@ -401,7 +416,7 @@ gin_bson_composite_path_extract_value(PG_FUNCTION_ARGS)
 	bool addMetadataTerms = true;
 	Datum *indexEntries = GenerateCompositeTermsCore(bson, options, nentries,
 													 addMetadataTerms,
-													 termBlobMetadata);
+													 termBlobMetadata, NULL);
 	PG_RETURN_POINTER(indexEntries);
 }
 
@@ -2457,9 +2472,9 @@ gin_bson_composite_path_consistent(PG_FUNCTION_ARGS)
 }
 
 
-Datum *
-GenerateCompositeTermsFromIndexSpec(pgbson *document, pgbson *keySpec, uint32_t *numTerms,
-									const StringView *collationStringView)
+BsonGinCompositePathOptions *
+BuildCompositeOptionsFromIndexSpec(pgbson *keySpec,
+								   const StringView *collationStringView)
 {
 	bool isIndexSpec = true;
 	Size compositeKeySpecLength = FillCompositePathSpecFromBson(keySpec, NULL,
@@ -2502,15 +2517,39 @@ GenerateCompositeTermsFromIndexSpec(pgbson *document, pgbson *keySpec, uint32_t 
 						  ((char *) options) + options->base.collation);
 	}
 
+	return options;
+}
+
+
+CompositeTermGenerationState *
+PrepareCompositeTermGeneration(BsonGinCompositePathOptions *options)
+{
+	CompositeTermGenerationState *state = palloc0(sizeof(CompositeTermGenerationState));
+	state->options = options;
+	state->overallMetadata = GetCompositeIndexTermMetadata(options);
+	state->enableValueOnlyIndexTerms = EnableValueOnlyIndexTerms;
+	InitializeCompositeTermGenerateState(&state->termState, options);
+	return state;
+}
+
+
+Datum *
+GenerateCompositeTermsFromOptions(pgbson *document, CompositeTermGenerationState *state,
+								  uint32_t *numTerms)
+{
 	GinEntryPathData pathData = { 0 };
 	bool addMetadataTerms = false;
 	uint64_t termBlobMetadataIgnore = 0;
-	pathData.terms.entries = GenerateCompositeTermsCore(document, options,
+
+	/* A volatile expression can change the term format within an execution. */
+	const CompositeTermGenerationState *preparedState =
+		state->enableValueOnlyIndexTerms == EnableValueOnlyIndexTerms ? state : NULL;
+	pathData.terms.entries = GenerateCompositeTermsCore(document, state->options,
 														&pathData.terms.index,
 														addMetadataTerms,
-														&termBlobMetadataIgnore);
+														&termBlobMetadataIgnore,
+														preparedState);
 	*numTerms = pathData.terms.index;
-	pfree(options);
 	return pathData.terms.entries;
 }
 
@@ -2575,7 +2614,7 @@ gin_bson_get_composite_path_generated_terms(PG_FUNCTION_ARGS)
 															 &pathData->
 															 terms.index,
 															 addMetadataTerms,
-															 &termBlobMetadata);
+															 &termBlobMetadata, NULL);
 		pathData->terms.entryCapacity = pathData->terms.index;
 		pathData->terms.index = 0;
 		if (termBlobMetadata != 0)
@@ -5376,10 +5415,10 @@ GetCompositePathGenerateTraverseOption(void *contextOptions,
 	IndexTraverseOption overallMatchStatus = IndexTraverse_Invalid;
 	for (uint32 i = 0; i < state->pathCount; i++)
 	{
-		int32_t pathIndexInnerIgnore = 0;
-		state->matchStatus[i] = GetSinglePathIndexTraverseOption(
-			state->pathOptions[i], currentPath, currentPathLength, valueType,
-			&pathIndexInnerIgnore);
+		state->matchStatus[i] = GetSinglePathIndexTraverseOptionCore(
+			state->indexPaths[i], state->indexPathLengths[i],
+			currentPath, currentPathLength,
+			(int32_t) i == state->wildCardIndex);
 		if (state->matchStatus[i] >= IndexTraverse_Match)
 		{
 			/* TODO: Revisit this with wildcard term generation */
@@ -5467,11 +5506,22 @@ SetGenerateTermsContextFlags(GenerateTermsContext *context)
 static void
 UpdateCompositePathData(GinEntryPathData *pathData,
 						BsonGinSinglePathOptions *singlePathOptions,
+						const char *indexPath, const char *collation,
 						bool allowValueOnly, int8_t sortOrder)
 {
 	pathData->termMetadata = GetIndexTermMetadata(singlePathOptions);
 	pathData->termMetadata.isDescending = sortOrder < 0;
 	pathData->termMetadata.allowValueOnly = allowValueOnly;
+
+	/* Metadata must borrow storage from the longer-lived composite options. */
+	if (pathData->termMetadata.pathPrefix.string != NULL)
+	{
+		pathData->termMetadata.pathPrefix.string = indexPath;
+	}
+	if (pathData->termMetadata.collation != NULL)
+	{
+		pathData->termMetadata.collation = collation;
+	}
 
 	/* Non wildcard indexes generate path based undefined terms */
 	pathData->generatePathBasedUndefinedTerms = !singlePathOptions->isWildcard;
@@ -5484,6 +5534,35 @@ UpdateCompositePathData(GinEntryPathData *pathData,
 }
 
 
+static void
+InitializeCompositeTermGenerateState(CompositeTermGenerateState *termState,
+									 BsonGinCompositePathOptions *options)
+{
+	StringView collation = { 0 };
+	Get_Index_Collation_Option((&options->base), collation,
+							   collation.string, collation.length);
+
+	termState->pathCount = (uint32_t) GetIndexPathsFromOptionsWithLength(
+		options, termState->indexPaths, termState->indexPathLengths,
+		termState->sortOrders);
+
+	termState->correlatedTerms = NIL;
+	termState->wildCardIndex = options->wildcardPathIndex;
+	for (uint32_t i = 0; i < termState->pathCount; i++)
+	{
+		bool allowValueOnly = false;
+		BsonGinSinglePathOptions *singlePathOptions;
+		singlePathOptions = CreateSinglePathOptions(
+			termState->indexPaths[i], i, termState->pathCount, options,
+			&allowValueOnly);
+		UpdateCompositePathData(&termState->pathData[i], singlePathOptions,
+								termState->indexPaths[i], collation.string,
+								allowValueOnly, termState->sortOrders[i]);
+		pfree(singlePathOptions);
+	}
+}
+
+
 static uint32_t
 BuildSinglePathTermsForCompositeTerms(pgbson *bson,
 									  BsonGinCompositePathOptions *options,
@@ -5493,22 +5572,31 @@ BuildSinglePathTermsForCompositeTerms(pgbson *bson,
 									  uint32_t *pathCountOut,
 									  uint32_t *pathMultiKeyBitMask,
 									  uint32_t *pathTruncationBitMask,
-									  List **correlatedTerms)
+									  List **correlatedTerms,
+									  const CompositeTermGenerationState *preparedState)
 {
-	termState->pathCount = (uint32_t) GetIndexPathsFromOptions(options,
-															   termState->indexPaths,
-															   termState->sortOrders);
-	*pathCountOut = termState->pathCount;
-
-	termState->correlatedTerms = NIL;
-	for (uint32_t i = 0; i < termState->pathCount; i++)
+	if (preparedState != NULL)
 	{
-		bool allowValueOnly = false;
-		termState->pathOptions[i] = CreateSinglePathOptions(
-			termState->indexPaths[i], i, termState->pathCount, options, &allowValueOnly);
-		UpdateCompositePathData(&termState->pathData[i], termState->pathOptions[i],
-								allowValueOnly, termState->sortOrders[i]);
+		/* Copy immutable path inputs and reset active traversal state. */
+		termState->pathCount = preparedState->termState.pathCount;
+		termState->wildCardIndex = preparedState->termState.wildCardIndex;
+		termState->correlatedTerms = NIL;
+		for (uint32_t i = 0; i < termState->pathCount; i++)
+		{
+			termState->indexPaths[i] = preparedState->termState.indexPaths[i];
+			termState->indexPathLengths[i] =
+				preparedState->termState.indexPathLengths[i];
+			termState->pathData[i] = preparedState->termState.pathData[i];
+			termState->matchStatus[i] = IndexTraverse_Invalid;
+		}
 	}
+	else
+	{
+		memset(termState, 0, sizeof(*termState));
+		InitializeCompositeTermGenerateState(termState, options);
+	}
+
+	*pathCountOut = termState->pathCount;
 
 	GenerateTermsContext context = { 0 };
 	context.pathDataState = (void *) termState;
@@ -5565,8 +5653,6 @@ BuildSinglePathTermsForCompositeTerms(pgbson *bson,
 							  termState->pathData[i].hasTruncatedTerms;
 
 		totalTermCount = totalTermCount * termState->pathData[i].terms.index;
-		pfree(termState->pathOptions[i]);
-		termState->pathOptions[i] = NULL;
 	}
 
 	*correlatedTerms = termState->correlatedTerms;
@@ -5763,13 +5849,16 @@ BuildCurrentEntrySetFromMergedSet(MergedTermSet *mergedSet, GinEntrySet *current
 static Datum *
 GenerateCompositeTermsCore(pgbson *bson, BsonGinCompositePathOptions *options,
 						   int32_t *nentries, bool addMetadataTerms,
-						   uint64_t *termBlobMetadata)
+						   uint64_t *termBlobMetadata,
+						   const CompositeTermGenerationState *preparedState)
 {
-	CompositeTermGenerateState termState = { 0 };
-	GinEntrySet entrySet[INDEX_MAX_KEYS] = { 0 };
+	CompositeTermGenerateState termState;
+	GinEntrySet entrySet[INDEX_MAX_KEYS];
 	bool entryHasTruncation = false;
 	bool considerMultiTermAsMultiKey = options->wildcardPathIndex < 0;
-	IndexTermCreateMetadata overallMetadata = GetCompositeIndexTermMetadata(options);
+	IndexTermCreateMetadata overallMetadata = preparedState != NULL ?
+											  preparedState->overallMetadata :
+											  GetCompositeIndexTermMetadata(options);
 	uint32_t totalTermCount;
 	uint32_t pathCount;
 	uint32_t pathMultiKeyBitMask = 0;
@@ -5782,7 +5871,8 @@ GenerateCompositeTermsCore(pgbson *bson, BsonGinCompositePathOptions *options,
 														   &pathCount,
 														   &pathMultiKeyBitMask,
 														   &pathTruncationBitMask,
-														   &correlatedTerms);
+														   &correlatedTerms,
+														   preparedState);
 
 	if (pathCount == 1)
 	{
@@ -6041,7 +6131,7 @@ GenerateCompositeExtractQueryUniqueEqual(pgbson *bson,
 										 CompositeQueryRunData *runData)
 {
 	uint32_t pathCount;
-	CompositeTermGenerateState termState = { 0 };
+	CompositeTermGenerateState termState;
 	GinEntrySet entrySet[INDEX_MAX_KEYS] = { 0 };
 	bool hasTruncation = false;
 	uint32_t totalTermCount;
@@ -6056,7 +6146,7 @@ GenerateCompositeExtractQueryUniqueEqual(pgbson *bson,
 														   &pathCount,
 														   &pathMultiKeyBitMask,
 														   &pathTruncationBitMask,
-														   &correlatedTerms);
+														   &correlatedTerms, NULL);
 
 	/* Now that we have the per term counts, generate the overall terms */
 	/* Add an additional one in case we need a truncated term */
