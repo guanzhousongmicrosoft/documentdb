@@ -193,6 +193,19 @@ SET local enable_seqscan = off;
 SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorIndexCollFC", "pipeline": [ { "$search": { "cosmosSearch": { "vector": [ 3.0, 4.9, 1.0, 1.0 ], "k": 2, "path": "vector_hnsw", "efSearch": 5, "filter": { "elem": { "$gt": "some p" } }  }}} ], "cursor": {} }');
 ROLLBACK;
 
+BEGIN;
+SET LOCAL documentdb.enableVectorPreFilter = on;
+SET LOCAL documentdb.vector_auto_filter_selectivity_threshold = 1.0;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorIndexCollFC", "pipeline": [ { "$search": { "cosmosSearch": { "vector": [ 3.0, 4.9, 1.0 ], "k": 2, "path": "vector_ivf", "nProbes": 10, "filter": { "elem": { "$gt": "some p" } }, "filterMode": "autoSelect" } } } ], "cursor": {} }');
+ROLLBACK;
+
+BEGIN;
+SET LOCAL documentdb.enableVectorPreFilter = on;
+SET LOCAL default_statistics_target = 10000;
+SET LOCAL documentdb.vector_auto_filter_selectivity_threshold = 0;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorIndexCollFC", "pipeline": [ { "$search": { "cosmosSearch": { "vector": [ 3.0, 4.9, 1.0 ], "k": 2, "path": "vector_ivf", "nProbes": 10, "filter": { "elem": { "$gt": "some p" } }, "filterMode": "autoSelect" } } } ], "cursor": {} }');
+ROLLBACK;
+
 SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
 
 -- aggregation operators counters

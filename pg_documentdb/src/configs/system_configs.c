@@ -180,6 +180,10 @@ bool IsNativeAuthEnabled = DEFAULT_ENABLE_NATIVE_AUTHENTICATION;
 #define DEFAULT_VECTOR_ITERATIVE_SCAN_MODE VectorIterativeScan_RELAXED_ORDER
 int VectorPreFilterIterativeScanMode = DEFAULT_VECTOR_ITERATIVE_SCAN_MODE;
 
+#define DEFAULT_VECTOR_AUTO_FILTER_SELECTIVITY_THRESHOLD 0.01
+double VectorAutoFilterSelectivityThreshold =
+	DEFAULT_VECTOR_AUTO_FILTER_SELECTIVITY_THRESHOLD;
+
 #define DEFAULT_ENABLE_GEONEAR_FORCE_INDEX_PUSHDOWN true
 bool EnableGeonearForceIndexPushdown = DEFAULT_ENABLE_GEONEAR_FORCE_INDEX_PUSHDOWN;
 
@@ -544,6 +548,21 @@ InitializeSystemConfigurations(const char *prefix, const char *newGucPrefix)
 			"Strict order ensures results are in the exact order by distance"),
 		NULL, &VectorPreFilterIterativeScanMode, DEFAULT_VECTOR_ITERATIVE_SCAN_MODE,
 		VECTOR_ITERATIVE_SCAN_OPTIONS,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomRealVariable(
+		psprintf("%s.vector_auto_filter_selectivity_threshold", newGucPrefix),
+		gettext_noop(
+			"The estimated filter selectivity threshold for pre-filtered vector "
+			"search with filterMode 'autoSelect'. Estimates at or below the larger "
+			"of this threshold and 1/default_statistics_target use the filter path; "
+			"estimates above both use the vector path. "
+			"The value is a fraction from 0 to 1, with 0.01 representing 1 percent. "
+			"Zero retains the estimated statistics floor; 1 keeps all "
+			"estimates on the filter path."),
+		NULL, &VectorAutoFilterSelectivityThreshold,
+		DEFAULT_VECTOR_AUTO_FILTER_SELECTIVITY_THRESHOLD,
+		0.0, 1.0,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
