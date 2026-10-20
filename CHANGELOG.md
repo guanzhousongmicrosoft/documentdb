@@ -1,4 +1,5 @@
 ### documentdb v1.3-0 (Unreleased) ###
+* Reuse constant sort specifications and collation options across rows when producing index sort keys. *[Perf]*
 * Prevent high-key optimization from ending compound-index scans early when a range predicate precedes a suffix filter. *[Bugfix]*
 * Prevent high-key optimization from skipping page-level filter checks when an `$exists` predicate is combined with other predicates (such as `$mod`, `$ne`, or `$nin`) on the same indexed path. *[Bugfix]*
 * Prevent lock-upgrade deadlocks during concurrent collection creation with pre-image or update-description options, and preserve pre-image replica identity when sharding, resharding, redistributing, or unsharding collections. *[Bugfix]*
