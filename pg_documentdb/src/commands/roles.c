@@ -2431,6 +2431,10 @@ GetPrivilegeAction(const char *action)
 	{
 		return CustomPrivilegeAction_Remove;
 	}
+	else if (strcmp(action, "changeStream") == 0)
+	{
+		return CustomPrivilegeAction_ChangeStream;
+	}
 
 	ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_BADVALUE),
 					errmsg("Unsupported action '%s'.", action)));
