@@ -59,6 +59,12 @@
  */
 #define RUM_ORDERED_ANY_SCAN 6
 
+/* Opaque page-level state passed from the high-key check to compare_partial. */
+#define HIGH_KEY_PRECHECKED_PATHS_MASK 0xFF
+#define HIGH_KEY_PRIOR_MATCHES_EQUALITY (1U << 8)
+#define HIGH_KEY_HAS_EQUALITY_PREFIX (1U << 9)
+#define HIGH_KEY_ALLOW_SKIP_SCAN_BOUNDARIES (1U << 10)
+
 typedef enum RumIndexTransformOperation
 {
 	RumIndexTransform_IndexGenerateSkipBound = 1,
@@ -308,6 +314,7 @@ static Datum * ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *
 static int RunCompareOnStandardIndexSet(CompositeQueryRunData *runData,
 										SerializedCompositeTermPair *serializedTermsSet,
 										int32_t precheckedPaths,
+										uint32_t highKeyMatchState,
 										bool *hasTruncation);
 
 inline static IndexTermCreateMetadata
@@ -1174,7 +1181,8 @@ gin_bson_composite_path_compare_partial(PG_FUNCTION_ARGS)
 	Pointer extraData = PG_GETARG_POINTER(3);
 
 	bool *recheckEntry = PG_NARGS() > 4 ? (bool *) PG_GETARG_POINTER(4) : NULL;
-	int32_t precheckedPaths = PG_NARGS() > 5 ? PG_GETARG_INT32(5) : 0;
+	uint32_t highKeyMatchState = PG_NARGS() > 5 ? PG_GETARG_UINT32(5) : 0;
+	int32_t precheckedPaths = highKeyMatchState & HIGH_KEY_PRECHECKED_PATHS_MASK;
 
 	CompositeQueryRunData *runData = (CompositeQueryRunData *) extraData;
 	SerializedCompositeTermPair serializedTerms[INDEX_MAX_KEYS] = { 0 };
@@ -1295,6 +1303,7 @@ gin_bson_composite_path_compare_partial(PG_FUNCTION_ARGS)
 	{
 		compareResult = RunCompareOnStandardIndexSet(runData, serializedTerms,
 													 precheckedPaths,
+													 highKeyMatchState,
 													 &hasTruncation);
 	}
 	else
@@ -1364,13 +1373,22 @@ static int
 RunCompareOnStandardIndexSet(CompositeQueryRunData *runData,
 							 SerializedCompositeTermPair *serializedTerms,
 							 int32_t precheckedPaths,
+							 uint32_t highKeyMatchState,
 							 bool *hasTruncation)
 {
 	bool priorMatchesEquality = true;
 	bool hasEqualityPrefix = true;
 	bool allowSkipScanBoundaries = false;
-	int32_t compareIndex = (EnableHighKeyOptimization && precheckedPaths >= 0) ?
-						   precheckedPaths : 0;
+	int32_t compareIndex = 0;
+	if (EnableHighKeyOptimization && precheckedPaths > 0)
+	{
+		compareIndex = precheckedPaths;
+		priorMatchesEquality = (highKeyMatchState & HIGH_KEY_PRIOR_MATCHES_EQUALITY) != 0;
+		hasEqualityPrefix = (highKeyMatchState & HIGH_KEY_HAS_EQUALITY_PREFIX) != 0;
+		allowSkipScanBoundaries = (highKeyMatchState &
+								   HIGH_KEY_ALLOW_SKIP_SCAN_BOUNDARIES) != 0;
+	}
+
 	for (; compareIndex < runData->metaInfo->numIndexPaths; compareIndex++)
 	{
 		bool hasUnspecifiedPrefix = false;
@@ -3052,8 +3070,10 @@ RecheckFunctionsCompatibleWithHighKey(List *recheckFunctions,
 				return false;
 			}
 
-			/* Type is larger than null - exists check is valid */
-			return true;
+			/* Type is larger than null - this exists check is valid, but any
+			 * remaining rechecks on the path must also be compatible.
+			 */
+			continue;
 		}
 
 		return false;
@@ -3110,6 +3130,7 @@ PageLevelStatsScalarCheck(PG_FUNCTION_ARGS, bool pageIsolated)
 	}
 
 	int32_t precheckedPaths = 0;
+	uint32_t highKeyMatchState = 0;
 	bool priorMatchesEquality = true;
 	bool hasEqualityPrefix = true;
 	bool lowPriorMatchesEquality = true;
@@ -3177,6 +3198,14 @@ PageLevelStatsScalarCheck(PG_FUNCTION_ARGS, bool pageIsolated)
 		}
 
 		precheckedPaths++;
+		allowSkipScanBoundaries = allowSkipScanBoundaries || hasUnspecifiedPrefix;
+
+		/* Cache only the state of the prefix that passed every page-level check. */
+		highKeyMatchState = precheckedPaths |
+							(priorMatchesEquality ? HIGH_KEY_PRIOR_MATCHES_EQUALITY : 0) |
+							(hasEqualityPrefix ? HIGH_KEY_HAS_EQUALITY_PREFIX : 0) |
+							(allowSkipScanBoundaries ?
+							 HIGH_KEY_ALLOW_SKIP_SCAN_BOUNDARIES : 0);
 	}
 
 	PG_FREE_IF_COPY(highKeyValue, 0);
@@ -3185,7 +3214,7 @@ PageLevelStatsScalarCheck(PG_FUNCTION_ARGS, bool pageIsolated)
 	{
 		PG_FREE_IF_COPY(lowKeyValue, 4);
 	}
-	return Int32GetDatum(precheckedPaths);
+	return UInt32GetDatum(highKeyMatchState);
 }
 
 

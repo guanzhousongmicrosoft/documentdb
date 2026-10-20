@@ -1,4 +1,6 @@
 ### documentdb v1.3-0 (Unreleased) ###
+* Prevent high-key optimization from ending compound-index scans early when a range predicate precedes a suffix filter. *[Bugfix]*
+* Prevent high-key optimization from skipping page-level filter checks when an `$exists` predicate is combined with other predicates (such as `$mod`, `$ne`, or `$nin`) on the same indexed path. *[Bugfix]*
 * Prevent lock-upgrade deadlocks during concurrent collection creation with pre-image or update-description options, and preserve pre-image replica identity when sharding, resharding, redistributing, or unsharding collections. *[Bugfix]*
 * Build text indexes specified with the `{ _fts: "text", _ftsx: 1 }` key format as text indexes when ordered indexes are enabled by default, so `$text` queries work on them. *[Bugfix]*
 * Preserve ordered `_id` scan candidates and range bounds when filters are present, and enable cost-time ordering when collection or native btree statistics are enabled. Controlled by the default-on `documentdb.enable_btree_order_by_with_filters` and `documentdb.enable_order_by_id_on_cost_function_with_stats` settings. *[Bugfix]*
