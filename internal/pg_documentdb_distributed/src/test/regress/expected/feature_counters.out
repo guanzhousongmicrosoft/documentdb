@@ -506,10 +506,31 @@ SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorInde
 (1 row)
 
 ROLLBACK;
-SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
-                                                                                                                                                                                                                                                                                                get_feature_counter_pretty                                                                                                                                                                                                                                                                                                
+BEGIN;
+SET LOCAL documentdb.enableVectorPreFilter = on;
+SET LOCAL documentdb.vector_auto_filter_selectivity_threshold = 1.0;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorIndexCollFC", "pipeline": [ { "$search": { "cosmosSearch": { "vector": [ 3.0, 4.9, 1.0 ], "k": 2, "path": "vector_ivf", "nProbes": 10, "filter": { "elem": { "$gt": "some p" } }, "filterMode": "autoSelect" } } } ], "cursor": {} }');
+                                                                                                                          document                                                                                                                           
 ---------------------------------------------------------------------
- {"Feature_usage":[{"command_insert" : 2}, {"command_insert_one" : 2}, {"create_index_vector" : 4}, {"create_index_vector_compression_half" : 2}, {"create_index_vector_cos" : 2}, {"create_index_vector_l2" : 2}, {"create_index_vector_type_hnsw" : 2}, {"create_index_vector_type_ivfflat" : 2}, {"query_operator_gt" : 2}, {"search_operator_cosmos_search" : 6}, {"match" : 2}, {"search" : 6}, {"search_vector_compression_half" : 2}, {"search_vector_default_efsearch" : 1}, {"search_vector_default_nprobes" : 1}, {"search_vector_hnsw" : 3}, {"search_vector_ivfflat" : 3}, {"search_vector_pre_filter" : 2}]}
+ { "_id" : { "$numberInt" : "1" }, "elem" : "some sentence ivf", "vector_ivf" : [ { "$numberDouble" : "8.0" }, { "$numberDouble" : "1.0" }, { "$numberDouble" : "9.0" } ], "__cosmos_meta__" : { "score" : { "$numberDouble" : "10.208329887130052072" } } }
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL documentdb.enableVectorPreFilter = on;
+SET LOCAL default_statistics_target = 10000;
+SET LOCAL documentdb.vector_auto_filter_selectivity_threshold = 0;
+SELECT document FROM bson_aggregation_pipeline('db', '{ "aggregate": "vectorIndexCollFC", "pipeline": [ { "$search": { "cosmosSearch": { "vector": [ 3.0, 4.9, 1.0 ], "k": 2, "path": "vector_ivf", "nProbes": 10, "filter": { "elem": { "$gt": "some p" } }, "filterMode": "autoSelect" } } } ], "cursor": {} }');
+                                                                                                                          document                                                                                                                           
+---------------------------------------------------------------------
+ { "_id" : { "$numberInt" : "1" }, "elem" : "some sentence ivf", "vector_ivf" : [ { "$numberDouble" : "8.0" }, { "$numberDouble" : "1.0" }, { "$numberDouble" : "9.0" } ], "__cosmos_meta__" : { "score" : { "$numberDouble" : "10.208329887130052072" } } }
+(1 row)
+
+ROLLBACK;
+SELECT documentdb_distributed_test_helpers.get_feature_counter_pretty(true);
+                                                                                                                                                                                                                                                                                                                                                    get_feature_counter_pretty                                                                                                                                                                                                                                                                                                                                                    
+---------------------------------------------------------------------
+ {"Feature_usage":[{"command_insert" : 2}, {"command_insert_one" : 2}, {"create_index_vector" : 4}, {"create_index_vector_compression_half" : 2}, {"create_index_vector_cos" : 2}, {"create_index_vector_l2" : 2}, {"create_index_vector_type_hnsw" : 2}, {"create_index_vector_type_ivfflat" : 2}, {"query_operator_gt" : 4}, {"search_operator_cosmos_search" : 8}, {"match" : 4}, {"search" : 8}, {"search_vector_compression_half" : 2}, {"search_vector_default_efsearch" : 1}, {"search_vector_default_nprobes" : 1}, {"search_vector_hnsw" : 3}, {"search_vector_ivfflat" : 5}, {"search_vector_pre_filter" : 4}, {"search_vector_pre_filter_autoselect_filter" : 1}, {"search_vector_pre_filter_autoselect_vector" : 1}]}
 (1 row)
 
 -- aggregation operators counters
