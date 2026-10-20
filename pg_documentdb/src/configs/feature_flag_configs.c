@@ -597,6 +597,11 @@ bool SkipFailOnCollation = DEFAULT_SKIP_FAIL_ON_COLLATION;
 bool EnableCollationWithNonUniqueOrderedIndexes =
 	DEFAULT_ENABLE_COLLATION_WITH_NON_UNIQUE_ORDERED_INDEXES;
 
+/* Added on v1.3, pending stabilization, enable on v1.5 */
+#define DEFAULT_ENABLE_COLLATION_WITH_CREATE_COLLECTION false
+bool EnableCollationWithCreateCollection =
+	DEFAULT_ENABLE_COLLATION_WITH_CREATE_COLLECTION;
+
 /* Added on v1.2, enabled on v1.2, remove after v1.4 */
 #define DEFAULT_FAIL_ON_COLLATED_INDEX_TERM_TRUNCATION true
 bool FailOnCollatedIndexTermTruncation =
@@ -892,6 +897,14 @@ InitializeFeatureFlagConfigurations(const char *prefix, const char *newGucPrefix
 			"Determines whether collation is supported for non-unique ordered/composite indexes."),
 		NULL, &EnableCollationWithNonUniqueOrderedIndexes,
 		DEFAULT_ENABLE_COLLATION_WITH_NON_UNIQUE_ORDERED_INDEXES,
+		PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		psprintf("%s.enable_collation_with_create_collection", newGucPrefix),
+		gettext_noop(
+			"Whether collation can be specified when creating an unsharded collection."),
+		NULL, &EnableCollationWithCreateCollection,
+		DEFAULT_ENABLE_COLLATION_WITH_CREATE_COLLECTION,
 		PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

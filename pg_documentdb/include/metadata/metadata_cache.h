@@ -519,6 +519,7 @@ Oid CursorGetMoreFunctionOid(void);
 
 /* DDL Functions */
 Oid ApiCreateCollectionFunctionId(void);
+Oid ApiCreateCollectionWithOptionsFunctionId(void);
 Oid ApiCreateIndexesDispatchFunctionId(void);
 
 /* Compat functions*/

@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/rbac_hooks.c
  *
@@ -58,13 +59,16 @@ typedef struct PrivilegedFunctionData
  * identity is resolved lazily, because the catalog it reads is not available
  * while the library is being loaded.
  *
- * Creating a namespace is the only one this layer defines. Anything else has
- * to be registered while the library is loading, which is what keeps the list
- * fixed for the life of the backend.
+ * Additional functions must be registered while the library is loading,
+ * which keeps the list fixed for the life of the backend.
  */
 static PrivilegedFunctionData PrivilegedFunctions[MAX_ALLOWED_PRIVILEGED_FUNCTIONS] = {
 	{
 		.functionIdentityFunc = ApiCreateCollectionFunctionId,
+		.functionNameInfo = { },
+	},
+	{
+		.functionIdentityFunc = ApiCreateCollectionWithOptionsFunctionId,
 		.functionNameInfo = { },
 	},
 	{
@@ -73,7 +77,7 @@ static PrivilegedFunctionData PrivilegedFunctions[MAX_ALLOWED_PRIVILEGED_FUNCTIO
 	},
 };
 
-static int NumPrivilegedFunctions = 2;
+static int NumPrivilegedFunctions = 3;
 
 
 void

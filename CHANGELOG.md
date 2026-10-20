@@ -6,6 +6,7 @@
 * Preserve ordered `_id` scan candidates and range bounds when filters are present, and enable cost-time ordering when collection or native btree statistics are enabled. Controlled by the default-on `documentdb.enable_btree_order_by_with_filters` and `documentdb.enable_order_by_id_on_cost_function_with_stats` settings. *[Bugfix]*
 * Preserve released schema definitions when introducing the change-stream heartbeat task. *[Bugfix]* (work item 5713030)
 * Retire `skip_legacy_id_index_stats_check` and always read planner-statistics enablement from collection options instead of legacy index metadata. *[Refactor]*
+* Support create collection with collation on unsharded collections when `documentdb.enable_collation_with_create_collection` is enabled. *[Feature]*
 
 ### documentdb v1.2-0 (Unreleased) ###
 * Use PostgreSQL `date_bin` for `$dateTrunc` with `unit: "day"`, preserving exact calendar days, reference-aligned bins, and timezone boundaries. Reject strides and results outside PostgreSQL's supported range. Controlled by the default-on `documentdb.enable_date_trunc_day_with_pg_bin` setting; turn it off to restore legacy interval-based behavior. *[Bugfix]*
