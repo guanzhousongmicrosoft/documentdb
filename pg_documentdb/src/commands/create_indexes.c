@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/commands/create_indexes.c
  *
@@ -250,8 +251,6 @@ static void EnsureIndexDefDocFieldType(const bson_iter_t *indexDefDocIter,
 static void EnsureIndexDefDocFieldConvertibleToBool(bson_iter_t *indexDefDocIter);
 static bool IsSupportedIndexVersion(int indexVersion);
 static void ThrowIndexDefDocMissingFieldError(const char *fieldName);
-static void UpdateIndexStatsForPostgresIndexCore(uint64 collectionId,
-												 List *indexIdList);
 static IndexDefKey * ParseIndexDefKeyDocument(const bson_iter_t *indexDefDocIter);
 static CosmosSearchOptions * ParseCosmosSearchOptionsDoc(const bson_iter_t *optsIter);
 static BsonIntermediatePathNode * ParseIndexDefWildcardProjDoc(const bson_iter_t *
@@ -318,6 +317,7 @@ static void TryDropFailedCollectionIndexesAfterReIndex(uint64 collectionId,
 static void CreatePostgresIndex(uint64 collectionId, IndexDef *indexDef, int indexId,
 								bool concurrently, bool isTempCollection,
 								bool isUnsharded);
+static void UpdateIndexStatsForPostgresIndexCore(uint64 collectionId, List *indexIdList);
 static void ReIndexPostgresIndex(uint64 collectionId, IndexDetails *indexDetail,
 								 bool concurrently);
 static WildcardProjectionPathOps * ResolveWPPathOpsFromTree(const
@@ -1550,21 +1550,10 @@ create_indexes_non_concurrently(Datum dbNameDatum, CreateIndexesArg createIndexe
 			continue;
 		}
 
-		/*
-		 * Record the index as valid since we will anyway rollback the
-		 * transaction in case of an error.
-		 */
 		const IndexSpec indexSpec = MakeIndexSpecForIndexDef(indexDef);
-		bool indexIsValid = true;
-		int indexId = RecordCollectionIndex(collectionId, &indexSpec, indexIsValid);
-
-		bool createIndexesConcurrently = false;
-		bool isTempCollection = false;
-		CreatePostgresIndex(collectionId, indexDef, indexId, createIndexesConcurrently,
-							isTempCollection, isUnsharded);
-
-		/* Set statistics for the created indexes */
-		UpdateIndexStatsForPostgresIndex(collectionId, list_make1_int(indexId));
+		bool updatePlannerStatistics = true;
+		CreatePostgresIndexWithMetadata(collectionId, indexDef, &indexSpec, isUnsharded,
+										updatePlannerStatistics);
 	}
 
 	/*
@@ -4872,6 +4861,12 @@ CheckForConflictsAndPruneExistingIndexes(uint64 collectionId, List *indexDefList
 	{
 		IndexDef *indexDef = lfirst(indexDefCell);
 
+		/*
+		 * TODO_COLLATION: _id index requests on a collection created with a
+		 * collation are not yet reconciled with its collated _id_ index (no-op
+		 * recreation, collation, version and key restrictions, and secondary
+		 * _id indexes).
+		 */
 		IndexSpec indexSpec = MakeIndexSpecForIndexDef(indexDef);
 
 		int32_t inBuildIndexId = -1;
@@ -5633,6 +5628,56 @@ TryReIndexCollectionIndexesConcurrently(uint64 collectionId,
 
 
 /*
+ * Build a unique ordered _id_ backing and its logical metadata specification.
+ * Reuse the shared parser and capability checks; the caller creates the backing.
+ */
+IndexDef *
+MakeCollatedBuiltinIdIndexDef(const bson_value_t *collation, IndexSpec *indexSpec)
+{
+	if (!EnableCollationWithNonUniqueOrderedIndexes ||
+		!EnableCompositeUniqueOptionalKey)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg(
+							"Collated collection creation requires collated unique ordered indexes")));
+	}
+
+	*indexSpec = MakeIndexSpecForBuiltinIdIndex();
+	indexSpec->indexUnique = BoolIndexOption_True;
+	pgbson_writer writer;
+	PgbsonWriterInit(&writer);
+	PgbsonWriterAppendInt32(&writer, "enableOrderedIndex", 18,
+							(int32_t) CustomIndexOption_True);
+	PgbsonWriterAppendValue(&writer, "collation", 9, collation);
+	indexSpec->indexOptions = PgbsonWriterGetPgbson(&writer);
+
+	pgbson *spec = IndexSpecAsBson(indexSpec);
+	bson_iter_t iter;
+	PgbsonInitIterator(spec, &iter);
+	bool ignoreUnknownIndexOptions = false;
+	bool buildAsUniqueForPrepareUnique = false;
+	bool useTTLIndexInvalidOptionsError = false;
+	const bson_value_t *defaultCollation = NULL;
+	IndexDef *definition = ParseIndexDefDocumentInternal(&iter,
+														 PgbsonToJsonForLogging(spec),
+														 ignoreUnknownIndexOptions,
+														 buildAsUniqueForPrepareUnique,
+														 useTTLIndexInvalidOptionsError,
+														 defaultCollation);
+	if (!GetIndexAmHandlerByName(definition)->supports_optional_key)
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg(
+							"The selected index access method does not support collated collection uniqueness")));
+	}
+
+	/* Built-in uniqueness stays implicit in public metadata. */
+	indexSpec->indexUnique = BoolIndexOption_Undefined;
+	return definition;
+}
+
+
+/*
  * MakeIndexSpecForIndexDef creates an IndexSpec object based on given IndexDef.
  */
 IndexSpec
@@ -5781,6 +5826,35 @@ MakeIndexSpecForIndexDef(IndexDef *indexDef)
 	}
 
 	return indexSpec;
+}
+
+
+/*
+ * Record and create an index in the caller's transaction.
+ * Built-in backings skip collection planner-statistics updates.
+ */
+void
+CreatePostgresIndexWithMetadata(uint64 collectionId, IndexDef *indexDef,
+								const IndexSpec *indexSpec, bool isUnsharded,
+								bool updatePlannerStatistics)
+{
+	/* An error rolls back both the metadata and the physical index. */
+	bool indexIsValid = true;
+	int indexId = RecordCollectionIndex(collectionId, indexSpec, indexIsValid);
+
+	bool concurrently = false;
+	bool isTempCollection = false;
+	CreatePostgresIndex(collectionId, indexDef, indexId, concurrently, isTempCollection,
+						isUnsharded);
+
+	if (updatePlannerStatistics)
+	{
+		UpdateIndexStatsForPostgresIndex(collectionId, list_make1_int(indexId));
+	}
+	else
+	{
+		UpdateIndexStatsForPostgresIndexCore(collectionId, list_make1_int(indexId));
+	}
 }
 
 
@@ -6260,6 +6334,11 @@ ReIndexPostgresIndex(uint64 collectionId, IndexDetails *indexDetail, bool concur
 	bool isIdIndex = (strncmp(indexDetail->indexSpec.indexName,
 							  ID_INDEX_NAME, strlen(ID_INDEX_NAME)) == 0);
 
+	/*
+	 * TODO_COLLATION: reindexing _id_ rebuilds only the primary key; the
+	 * collated unique index of a collection created with a collation is not
+	 * rebuilt.
+	 */
 	StringInfo cmdStr = makeStringInfo();
 	if (indexDetail->indexSpec.indexUnique == BoolIndexOption_True || !concurrently)
 	{
@@ -7789,6 +7868,10 @@ GenerateUniqueProjectionSpec(IndexDefKey *indexDefKey)
 }
 
 
+/*
+ * Set physical index expression statistics targets to zero. Collection-level
+ * planner statistics remain the responsibility of the outer wrapper.
+ */
 static void
 UpdateIndexStatsForPostgresIndexCore(uint64 collectionId, List *indexIdList)
 {

@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * include/metadata/collection.h
  *
@@ -262,6 +263,8 @@ Oid GetRelationIdForCollectionId(uint64 collectionId, LOCKMODE lockMode);
  * Only a caller that can tolerate that may pass true.
  */
 bool CreateCollection(Datum dbNameDatum, Datum collectionNameDatum, bool canUseLibPq);
+bool CreateCollectionWithOptions(Datum dbNameDatum, Datum collectionNameDatum,
+								 pgbson *options);
 
 /* c-wrapper for rename_collection() */
 void RenameCollection(Datum dbNameDatum, Datum srcCollectionNameDatum, Datum

@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/metadata/collection.c
  *
@@ -46,6 +47,7 @@
 #include "jsonschema/bson_json_schema_tree.h"
 
 #define CREATE_COLLECTION_FUNC_NARGS 2
+#define CREATE_COLLECTION_WITH_OPTIONS_FUNC_NARGS 3
 
 
 /*
@@ -123,6 +125,9 @@ PG_FUNCTION_INFO_V1(validate_collection_cache_entry);
 PG_FUNCTION_INFO_V1(validate_try_copy_collection_by_id);
 
 /* forward declarations */
+static bool CreateCollectionWithOptionsInternal(Datum dbNameDatum,
+												Datum collectionNameDatum,
+												bool canUseLibPq, pgbson *options);
 static void InitializeCollectionsHash(void);
 static bool GetMongoCollectionFromCatalogById(uint64 collectionId, Oid relationId,
 											  MongoCollection *collection);
@@ -1820,6 +1825,43 @@ GetCollectionOrViewCore(PG_FUNCTION_ARGS, bool allowViews)
 bool
 CreateCollection(Datum dbNameDatum, Datum collectionNameDatum, bool canUseLibPq)
 {
+	pgbson *options = NULL;
+	return CreateCollectionWithOptionsInternal(dbNameDatum, collectionNameDatum,
+											   canUseLibPq, options);
+}
+
+
+/*
+ * Require the options-aware SQL schema and keep local creation in the caller's
+ * transaction. Return whether a new collection was created.
+ */
+bool
+CreateCollectionWithOptions(Datum dbNameDatum, Datum collectionNameDatum, pgbson *options)
+{
+	if (!IsClusterVersionAtleast(DocDB_V1, 3, 0))
+	{
+		ereport(ERROR, (errcode(ERRCODE_DOCUMENTDB_COMMANDNOTSUPPORTED),
+						errmsg("Collection collation is not supported yet")));
+	}
+
+	/*
+	 * A separate connection would commit creation independently.
+	 * Use the caller's transaction so an error rolls back the collection too.
+	 */
+	bool canUseLibPq = false;
+	return CreateCollectionWithOptionsInternal(dbNameDatum, collectionNameDatum,
+											   canUseLibPq, options);
+}
+
+
+/*
+ * Dispatch legacy or options-aware creation through privilege checks.
+ * Preserve optional libpq dispatch for legacy creation and return its result.
+ */
+static bool
+CreateCollectionWithOptionsInternal(Datum dbNameDatum, Datum collectionNameDatum,
+									bool canUseLibPq, pgbson *options)
+{
 	char *collectionNameStr = TextDatumGetCString(collectionNameDatum);
 	if (collectionNameStr != NULL && strlen(collectionNameStr) == 0)
 	{
@@ -1827,11 +1869,25 @@ CreateCollection(Datum dbNameDatum, Datum collectionNameDatum, bool canUseLibPq)
 						errmsg("An invalid and empty namespace has been specified")));
 	}
 
-	Oid argTypes[CREATE_COLLECTION_FUNC_NARGS] = { TEXTOID, TEXTOID };
-	Datum argValues[CREATE_COLLECTION_FUNC_NARGS] = {
+	Oid argTypes[CREATE_COLLECTION_WITH_OPTIONS_FUNC_NARGS] = {
+		TEXTOID, TEXTOID, InvalidOid
+	};
+	Datum argValues[CREATE_COLLECTION_WITH_OPTIONS_FUNC_NARGS] = {
 		dbNameDatum,
 		collectionNameDatum,
+		(Datum) 0
 	};
+	int nargs = CREATE_COLLECTION_FUNC_NARGS;
+	const char *schemaName = ApiSchemaName;
+	const char *functionName = "create_collection";
+
+	if (options != NULL)
+	{
+		nargs = CREATE_COLLECTION_WITH_OPTIONS_FUNC_NARGS;
+		functionName = "create_collection_with_options";
+		argValues[2] = PointerGetDatum(options);
+		argTypes[2] = BsonTypeId();
+	}
 
 	/* all args are non-null */
 	char *argNulls = NULL;
@@ -1839,12 +1895,11 @@ CreateCollection(Datum dbNameDatum, Datum collectionNameDatum, bool canUseLibPq)
 	bool isNull = true;
 	bool readOnly = false;
 	Datum resultDatum = RunCollectionLevelFunctionWithPrivilegeChecks(
-		ApiSchemaName, "create_collection", argValues, argTypes, argNulls,
-		CREATE_COLLECTION_FUNC_NARGS, readOnly, canUseLibPq, &isNull);
+		schemaName, functionName, argValues, argTypes, argNulls,
+		nargs, readOnly, canUseLibPq, &isNull);
 	if (isNull)
 	{
-		ereport(ERROR, (errmsg("create_collection unexpectedly "
-							   "returned NULL datum")));
+		ereport(ERROR, (errmsg("%s unexpectedly returned NULL datum", functionName)));
 	}
 
 	return DatumGetBool(resultDatum);

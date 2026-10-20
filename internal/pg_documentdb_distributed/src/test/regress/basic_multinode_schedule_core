@@ -1,4 +1,5 @@
 test: multinode/basic_crud
+test: multinode/bson_collation_collection_create_tests_mn
 test: multinode/roles_reference_table
 test: multinode/schema_validation_update_multi
 test: multinode/bson_collation_write_multinode

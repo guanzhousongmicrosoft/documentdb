@@ -1342,6 +1342,8 @@ typedef struct DocumentDBApiOidCacheData
 	/* OID of the ApiSchemaName.create_collection function */
 	Oid ApiCreateCollectionFunctionId;
 
+	Oid ApiCreateCollectionWithOptionsFunctionId;
+
 	/* OID of the ApiInternalSchemaName.create_indexes_dispatch function */
 	Oid ApiCreateIndexesDispatchFunctionId;
 
@@ -3642,6 +3644,21 @@ ApiCreateCollectionFunctionId(void)
 	return GetSchemaFunctionIdWithNargs(&Cache.ApiCreateCollectionFunctionId,
 										ApiSchemaName, "create_collection", nargs,
 										argTypes, missingOk);
+}
+
+
+Oid
+ApiCreateCollectionWithOptionsFunctionId(void)
+{
+	int nargs = 3;
+	Oid argTypes[3] = { TEXTOID, TEXTOID, BsonTypeId() };
+
+	/* Legacy dispatch must also work before this function is installed. */
+	bool missingOk = true;
+
+	return GetSchemaFunctionIdWithNargs(&Cache.ApiCreateCollectionWithOptionsFunctionId,
+										ApiSchemaName, "create_collection_with_options",
+										nargs, argTypes, missingOk);
 }
 
 

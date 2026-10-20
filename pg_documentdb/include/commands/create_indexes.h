@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * include/commands/create_indexes.h
  *
@@ -311,6 +312,9 @@ bool CheckIndexSpecConflictWithExistingIndexes(uint64 collectionId,
 											   const IndexSpec *indexSpec,
 											   int *inBuildIndexId,
 											   int excludedIndexId);
+void CreatePostgresIndexWithMetadata(uint64 collectionId, IndexDef *indexDef,
+									 const IndexSpec *indexSpec, bool isUnsharded,
+									 bool updatePlannerStatistics);
 char * CreatePostgresIndexCreationCmd(uint64 collectionId, IndexDef *indexDef, int
 									  indexId,
 									  bool concurrently, bool isTempCollection,
@@ -319,6 +323,8 @@ char * CreatePostgresIndexCreationCmd(uint64 collectionId, IndexDef *indexDef, i
 void ExecuteCreatePostgresIndexCmd(char *cmd, bool concurrently, const Oid userOid,
 								   bool useSerialExecution);
 void UpdateIndexStatsForPostgresIndex(uint64 collectionId, List *indexIdList);
+IndexDef * MakeCollatedBuiltinIdIndexDef(const bson_value_t *collation,
+										 IndexSpec *indexSpec);
 void AcquireAdvisoryExclusiveLockForCreateIndexes(uint64 collectionId);
 IndexSpec MakeIndexSpecForIndexDef(IndexDef *indexDef);
 pgbson * MakeCreateIndexesMsg(CreateIndexesResult *result);

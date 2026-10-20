@@ -1,5 +1,6 @@
 /*-------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation.  All rights reserved.
+ * SPDX-License-Identifier: MIT
  *
  * src/commands/create_indexes_background.c
  *
@@ -1086,6 +1087,12 @@ command_reindex_index_background_internal(PG_FUNCTION_ARGS)
 		}
 
 		StringInfo cmdStr = makeStringInfo();
+
+		/*
+		 * TODO_COLLATION: reindexing _id_ rebuilds only the primary key; the
+		 * collated unique index of a collection created with a collation is not
+		 * rebuilt, and updateOptions for it is only rejected through collMod.
+		 */
 		if (indexDef->indexSpec.indexUnique == BoolIndexOption_True)
 		{
 			if (!EnableUniqueReindex)

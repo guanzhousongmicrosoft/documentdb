@@ -48,6 +48,7 @@
 #include "utils/error_utils.h"
 #include "index_am/index_am_extend_create.h"
 #include "metadata/collection.h"
+#include "collation/collation.h"
 
 extern int MaxNumActiveUsersIndexBuilds;
 extern int IndexBuildScheduleInSec;
@@ -1295,6 +1296,33 @@ MakeIndexSpecForBuiltinIdIndex(void)
 	};
 
 	return idIndexSpec;
+}
+
+
+/*
+ * Identify _id_ with a stored non-simple collation, regardless of runtime flags.
+ * Existing collated backings must remain recognizable when those flags are off.
+ */
+bool
+IsCollatedBuiltinIdIndex(const IndexSpec *indexSpec)
+{
+	if (strcmp(indexSpec->indexName, ID_INDEX_NAME) != 0 ||
+		indexSpec->indexOptions == NULL)
+	{
+		return false;
+	}
+
+	bson_iter_t iter;
+	PgbsonInitIterator(indexSpec->indexOptions, &iter);
+	if (!bson_iter_find(&iter, "collation"))
+	{
+		return false;
+	}
+
+	char collationString[MAX_ICU_COLLATION_LENGTH] = { 0 };
+	ParseAndGetCollationString(bson_iter_value(&iter), collationString);
+
+	return IsCollationValid(collationString);
 }
 
 
@@ -2762,6 +2790,12 @@ SerializeIndexSpec(const IndexSpec *indexSpec, bool isGetIndexes,
 				}
 				else if (IsOptionsKeyOrderedIndex(keyView.string))
 				{
+					if (IsCollatedBuiltinIdIndex(indexSpec))
+					{
+						/* Ordered storage is a backing detail, not a public _id_ option. */
+						continue;
+					}
+
 					/* TODO: We should just write this if the value is != ShouldUseCompositeOpClassByDefault
 					 * but we're leaving it here during the transition period of this being enabled by default in
 					 * some cases.*/
