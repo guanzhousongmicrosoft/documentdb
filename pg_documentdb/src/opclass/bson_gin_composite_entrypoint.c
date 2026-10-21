@@ -1025,7 +1025,7 @@ ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *singlePathMetadata,
 			   sizeof(CompositeIndexBounds) * runData->metaInfo->numIndexPaths);
 
 		/* duplicate the index recheck functions so that runData can be reset */
-		for (int i = 0; i < runData->metaInfo->numScanKeys; i++)
+		for (int i = 0; i < runData->metaInfo->numIndexPaths; i++)
 		{
 			if (data->baseIndexBounds[i].indexRecheckFunctions != NIL)
 			{
