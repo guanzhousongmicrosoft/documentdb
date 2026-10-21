@@ -632,7 +632,9 @@ SET documentdb.enableExtendedExplainPlans TO on;
 CREATE SCHEMA range_selectivity_helpers;
 CREATE FUNCTION range_selectivity_helpers.classify_index_selectivity(
     p_filter text,
-    p_index text)
+    p_index text,
+    p_collation text DEFAULT NULL,
+    p_boundary boolean DEFAULT false)
 RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -643,11 +645,14 @@ BEGIN
         'EXPLAIN (COSTS OFF) SELECT document '
         'FROM documentdb_api_catalog.bson_aggregation_find(%L, %L)',
         'stats_db',
-        format('{ "find": "range_selectivity", "filter": %s }', p_filter))
+        format('{ "find": "range_selectivity", "filter": %s%s }', p_filter,
+               CASE WHEN p_collation IS NULL THEN ''
+                    ELSE ', "collation": ' || p_collation END))
     LOOP
         IF v_row LIKE '%' || p_index || ': (%startup cost=%selectivity=%' THEN
-            v_selectivity :=
-                substring(v_row from 'selectivity=([0-9.eE+-]+)')::numeric;
+            v_selectivity := substring(v_row from
+                CASE WHEN p_boundary THEN 'boundary selectivity=([0-9.eE+-]+)'
+                     ELSE 'selectivity=([0-9.eE+-]+)' END)::numeric;
 
             IF v_selectivity < 0.1 THEN
                 RETURN 'combined range selectivity < 10%';
@@ -712,6 +717,9 @@ WHERE document OPERATOR(documentdb_api_catalog.@@)
 SET documentdb.enable_composite_range_selectivity TO off;
 SELECT range_selectivity_helpers.classify_index_selectivity(
     '{ "a": { "$gt": 45, "$lt": 55 } }', 'a_1');
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gt": 45, "$lt": 55 } }', 'a_1', NULL, true)
+    AS boundary_without_native_ranges;
 
 SET documentdb.enable_composite_range_selectivity TO on;
 
@@ -719,6 +727,9 @@ SET documentdb.enable_composite_range_selectivity TO on;
 -- 9% bounded interval.
 SELECT range_selectivity_helpers.classify_index_selectivity(
     '{ "a": { "$gt": 45, "$lt": 55 } }', 'a_1');
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gt": 45, "$lt": 55 } }', 'a_1', NULL, true)
+    AS boundary_with_native_ranges;
 
 -- Cover inclusive and mixed bounds, an empty interval, one-sided inequality,
 -- and redundant same-direction bounds.
@@ -726,7 +737,9 @@ SELECT scenario,
        range_selectivity_helpers.count_matching_rows(filter)
            AS actual_matching_rows,
        range_selectivity_helpers.classify_index_selectivity(filter, 'a_1')
-           AS estimated_selectivity
+           AS estimated_selectivity,
+       range_selectivity_helpers.classify_index_selectivity(
+           filter, 'a_1', NULL, true) AS boundary_selectivity
 FROM (VALUES
     ('empty_gt_lt', '{ "a": { "$gt": 55, "$lt": 45 } }'),
     ('gt_lte', '{ "a": { "$gt": 45, "$lte": 55 } }'),
@@ -777,7 +790,9 @@ SELECT scenario,
        range_selectivity_helpers.count_matching_rows(filter)
            AS actual_matching_rows,
        range_selectivity_helpers.classify_index_selectivity(filter, 'a_1')
-           AS estimated_selectivity
+           AS estimated_selectivity,
+       range_selectivity_helpers.classify_index_selectivity(
+           filter, 'a_1', NULL, true) AS boundary_selectivity
 FROM (VALUES
     ('empty_gt_lt', '{ "a": { "$gt": 55, "$lt": 45 } }'),
     ('gt_lte', '{ "a": { "$gt": 45, "$lte": 55 } }'),
@@ -791,7 +806,81 @@ FROM (VALUES
 ) AS scenarios(scenario, filter)
 ORDER BY scenario;
 
+-- A MinKey lower bound excludes missing paths, unlike a native comparison
+-- against their projected null values. Keep the sparse predicate when another
+-- indexed path has a two-sided range.
+SET documentdb_core.enableCollation TO on;
+SET documentdb.enableCollationWithNonUniqueOrderedIndexes TO on;
+SELECT documentdb_api_internal.create_indexes_non_concurrently(
+    'stats_db',
+    '{ "createIndexes": "range_selectivity", "indexes": [ { "key": { "a": 1, "b": 1 }, "name": "a_b_1" }, { "key": { "a": 1, "b": 1 }, "name": "a_b_ci_1", "collation": { "locale": "en", "strength": 2 } } ] }',
+    TRUE);
+SELECT COUNT(documentdb_api.insert_one(
+    'stats_db', 'range_selectivity', document::documentdb_core.bson))
+FROM (VALUES
+    ('{ "_id": 201, "a": 50, "b": { "$minKey": 1 } }'),
+    ('{ "_id": 202, "a": 50, "b": null }'),
+    ('{ "_id": 203, "a": 50, "b": 42 }'),
+    ('{ "_id": 204, "a": 50, "b": "Score" }')
+) AS documents(document);
+ANALYZE documentdb_data.documents_6411;
+
+SET documentdb.enable_composite_range_selectivity TO off;
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gte": 1, "$lte": 100 }, "b": { "$exists": true } }', 'a_b_1')
+    AS sparse_exists_without_native_ranges;
+
+SET documentdb.enable_composite_range_selectivity TO on;
+SELECT scenario,
+       range_selectivity_helpers.count_matching_rows(filter)
+           AS actual_matching_rows,
+       range_selectivity_helpers.classify_index_selectivity(filter, 'a_b_1')
+           AS estimated_selectivity,
+       range_selectivity_helpers.classify_index_selectivity(
+           filter, 'a_b_1', NULL, true) AS boundary_selectivity
+FROM (VALUES
+    ('exists_true',
+     '{ "a": { "$gte": 1, "$lte": 100 }, "b": { "$exists": true } }'),
+    ('gte_minkey',
+     '{ "a": { "$gte": 1, "$lte": 100 }, "b": { "$gte": { "$minKey": 1 } } }'),
+    ('gt_minkey',
+     '{ "a": { "$gte": 1, "$lte": 100 }, "b": { "$gt": { "$minKey": 1 } } }')
+) AS scenarios(scenario, filter)
+ORDER BY scenario;
+
+-- Exercise the same rewrite with collation-bearing index bounds.
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gte": 1, "$lte": 100 }, "b": { "$exists": true } }',
+    'a_b_ci_1', '{ "locale": "en", "strength": 2 }')
+    AS sparse_exists_with_collation;
+SELECT document
+FROM documentdb_api_catalog.bson_aggregation_find(
+    'stats_db',
+    '{ "find": "range_selectivity", "filter": { "a": { "$gte": 1, "$lte": 100 }, "b": { "$exists": true } }, "sort": { "_id": 1 }, "collation": { "locale": "en", "strength": 2 } }');
+
+-- Traverse only the bounded leading range, regardless of a trailing sparse
+-- predicate. Cover scalar and multikey trailing paths with the same range.
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gt": 45, "$lt": 55 }, "b": { "$exists": true } }',
+    'a_b_1', NULL, true) AS scalar_compound_boundary;
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gt": 45, "$lt": 55 }, "b": { "$exists": true } }',
+    'a_b_ci_1', '{ "locale": "en", "strength": 2 }', true)
+    AS collated_compound_boundary;
+
+SELECT documentdb_api.insert_one(
+    'stats_db', 'range_selectivity', '{ "_id": 205, "a": 50, "b": [42, 43, 44] }');
+ANALYZE documentdb_data.documents_6411;
+SELECT range_selectivity_helpers.count_matching_rows(
+    '{ "a": { "$gt": 45, "$lt": 55 }, "b": { "$exists": true } }')
+    AS multikey_actual_matching_rows;
+SELECT range_selectivity_helpers.classify_index_selectivity(
+    '{ "a": { "$gt": 45, "$lt": 55 }, "b": { "$exists": true } }',
+    'a_b_1', NULL, true) AS multikey_compound_boundary;
+
 DROP SCHEMA range_selectivity_helpers CASCADE;
+RESET documentdb_core.enableCollation;
+RESET documentdb.enableCollationWithNonUniqueOrderedIndexes;
 RESET documentdb.enable_composite_range_selectivity;
 RESET documentdb.enablePerCollectionPlannerStatistics;
 RESET documentdb.enablePlannerStatisticsNewCollections;

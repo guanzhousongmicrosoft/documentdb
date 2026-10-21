@@ -9,6 +9,8 @@
 * Preserve released schema definitions when introducing the change-stream heartbeat task. *[Bugfix]* (work item 5713030)
 * Retire `skip_legacy_id_index_stats_check` and always read planner-statistics enablement from collection options instead of legacy index metadata. *[Refactor]*
 * Support create collection with collation on unsharded collections when `documentdb.enable_collation_with_create_collection` is enabled. *[Feature]*
+* Preserve MinKey lower-bound predicates during native range selectivity estimation so sparse existence predicates retain their custom selectivity. *[Bugfix]*
+* Apply native range selectivity to ordered-index traversal boundaries as well as returned-row estimates, without treating trailing filters as traversal bounds. *[Bugfix]*
 
 ### documentdb v1.2-0 (Unreleased) ###
 * Use PostgreSQL `date_bin` for `$dateTrunc` with `unit: "day"`, preserving exact calendar days, reference-aligned bins, and timezone boundaries. Reject strides and results outside PostgreSQL's supported range. Controlled by the default-on `documentdb.enable_date_trunc_day_with_pg_bin` setting; turn it off to restore legacy interval-based behavior. *[Bugfix]*
