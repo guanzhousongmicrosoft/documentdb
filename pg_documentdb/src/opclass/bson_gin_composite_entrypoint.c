@@ -891,19 +891,21 @@ ProcessStandardCompositeQueryEntries(int32_t totalPathTerms,
 
 static int
 CompareCompositeIndexBoundsForOrderedScan(const void *a, const void *b,
-										  void *backwardScanVoid)
+										  void *compareMetadataVoid)
 {
 	CompositeIndexBounds *boundA = (CompositeIndexBounds *) a;
 	CompositeIndexBounds *boundB = (CompositeIndexBounds *) b;
-	bool isBackwardScan = *((bool *) backwardScanVoid);
+	const CompareMetadata *compareMetadata = compareMetadataVoid;
+	bool isBackwardScan = compareMetadata->isBackwardScan;
 	bool isComparisonValidIgnore = false;
 	int cmp;
 	if (isBackwardScan)
 	{
 		/* For a backward scan, compare by upperbound first */
-		cmp = CompareBsonValueAndType(&boundA->upperBound.bound,
-									  &boundB->upperBound.bound,
-									  &isComparisonValidIgnore);
+		cmp = CompareBsonValueAndTypeWithCollation(&boundA->upperBound.bound,
+												   &boundB->upperBound.bound,
+												   &isComparisonValidIgnore,
+												   compareMetadata->collation);
 		if (cmp != 0)
 		{
 			/* return upperBound by max first (descending order) */
@@ -911,26 +913,29 @@ CompareCompositeIndexBoundsForOrderedScan(const void *a, const void *b,
 		}
 
 		/* If upper bounds are equal then compare by lower bound */
-		cmp = CompareBsonValueAndType(&boundA->lowerBound.bound,
-									  &boundB->lowerBound.bound,
-									  &isComparisonValidIgnore);
+		cmp = CompareBsonValueAndTypeWithCollation(&boundA->lowerBound.bound,
+												   &boundB->lowerBound.bound,
+												   &isComparisonValidIgnore,
+												   compareMetadata->collation);
 		return -cmp;
 	}
 	else
 	{
 		/* in forward scans sort by minBound ascending order */
-		cmp = CompareBsonValueAndType(&boundA->lowerBound.bound,
-									  &boundB->lowerBound.bound,
-									  &isComparisonValidIgnore);
+		cmp = CompareBsonValueAndTypeWithCollation(&boundA->lowerBound.bound,
+												   &boundB->lowerBound.bound,
+												   &isComparisonValidIgnore,
+												   compareMetadata->collation);
 		if (cmp != 0)
 		{
 			return cmp;
 		}
 
 		/* If lower bounds are equal then compare by upper bound */
-		cmp = CompareBsonValueAndType(&boundA->upperBound.bound,
-									  &boundB->upperBound.bound,
-									  &isComparisonValidIgnore);
+		cmp = CompareBsonValueAndTypeWithCollation(&boundA->upperBound.bound,
+												   &boundB->upperBound.bound,
+												   &isComparisonValidIgnore,
+												   compareMetadata->collation);
 		return cmp;
 	}
 }
@@ -1044,9 +1049,14 @@ ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *singlePathMetadata,
 			entry->boundsSet = set;
 			entry->currentOperatorIndex = 0;
 
+			CompareMetadata compareMetadata = {
+				.isBackwardScan = data->perPathEntries[set->indexAttribute].
+								  isEntryScanBackwards,
+				.collation = metadata[set->indexAttribute].collation
+			};
 			qsort_arg(&set->bounds[0], set->numBounds, sizeof(CompositeIndexBounds),
 					  CompareCompositeIndexBoundsForOrderedScan,
-					  &data->perPathEntries[set->indexAttribute].isEntryScanBackwards);
+					  &compareMetadata);
 			data->perPathEntries[set->indexAttribute].entries =
 				lappend(data->perPathEntries[set->indexAttribute].entries, entry);
 
@@ -1062,9 +1072,10 @@ ProcessOrderedCompositeQueryEntries(IndexTermCreateMetadata *singlePathMetadata,
 				if (bound->lowerBound.isBoundInclusive &&
 					bound->upperBound.isBoundInclusive &&
 					bound->lowerBound.bound.value_type != BSON_TYPE_EOD &&
-					CompareBsonValueAndType(&bound->lowerBound.bound,
-											&bound->upperBound.bound,
-											&isComparisonValidIgnore) == 0)
+					CompareBsonValueAndTypeWithCollation(&bound->lowerBound.bound,
+														 &bound->upperBound.bound,
+														 &isComparisonValidIgnore,
+														 compareMetadata.collation) == 0)
 				{
 					bound->isEqualityBound = true;
 				}
@@ -1137,7 +1148,8 @@ OptimizeVariableBoundsForQuery(CompositeQueryRunData *runData,
 		if (!hasArrayPaths)
 		{
 			variableBounds->variableBoundsList =
-				MergeWildCardSingleVariableBounds(variableBounds->variableBoundsList);
+				MergeWildCardSingleVariableBounds(variableBounds->variableBoundsList,
+												  runData->metaInfo->collation);
 		}
 	}
 	else
@@ -1488,10 +1500,10 @@ PinEqualityBoundForRange(CompositeQueryRunData *runData,
 		 * This can happen when we have multiple bounds on the same path and we advance the bounds but not the equality term.
 		 */
 		bool isCompareisonValid = false;
-		const char *collationString = NULL;
+		const char *indexCollation = runData->metaInfo->collation;
 		if (CompareBsonIndexTerm(&entries->currentPathEqualityTermValue,
 								 &serializedTerms[compareIndex].term,
-								 &isCompareisonValid, collationString) == 0)
+								 &isCompareisonValid, indexCollation) == 0)
 		{
 			return;
 		}
@@ -1659,6 +1671,7 @@ MoveUnsatisfiableBoundForward(CompositeQueryRunData *runData, int compareIndex)
 	ListCell *pathCell;
 
 	bool isBackwardScan = entryData->perPathEntries[compareIndex].isEntryScanBackwards;
+	const char *indexCollation = runData->metaInfo->collation;
 
 	/* The current mininum of the upper bound is in runData */
 	CompositeSingleBound currentMax = isBackwardScan ?
@@ -1670,9 +1683,9 @@ MoveUnsatisfiableBoundForward(CompositeQueryRunData *runData, int compareIndex)
 			pathCell);
 
 		/* Rev by equality on the most extreme bound */
-		if (BsonValueEquals(
+		if (BsonValueEqualsWithCollation(
 				&entry->boundsSet->bounds[entry->currentOperatorIndex].upperBound.bound,
-				&currentMax.bound) &&
+				&currentMax.bound, indexCollation) &&
 			entry->boundsSet->bounds[entry->currentOperatorIndex].upperBound.
 			isBoundInclusive == currentMax.isBoundInclusive)
 		{
@@ -1706,9 +1719,9 @@ MoveUnsatisfiableBoundForward(CompositeQueryRunData *runData, int compareIndex)
 			CompositeSingleBound *currentBound =
 				&entry->boundsSet->bounds[entry->currentOperatorIndex].upperBound;
 			bool isComparisonValidIgnore = false;
-			int cmp = CompareBsonValueAndType(&currentBound->bound,
-											  &currentMax.bound,
-											  &isComparisonValidIgnore);
+			int cmp = CompareBsonValueAndTypeWithCollation(
+				&currentBound->bound, &currentMax.bound,
+				&isComparisonValidIgnore, indexCollation);
 
 
 			if (cmp < 0 || (cmp == 0 && !currentBound->isBoundInclusive))
@@ -1730,9 +1743,9 @@ MoveUnsatisfiableBoundForward(CompositeQueryRunData *runData, int compareIndex)
 			CompositeSingleBound *currentBound =
 				&entry->boundsSet->bounds[entry->currentOperatorIndex].lowerBound;
 			bool isComparisonValidIgnore = false;
-			int cmp = CompareBsonValueAndType(&currentBound->bound,
-											  &currentMax.bound,
-											  &isComparisonValidIgnore);
+			int cmp = CompareBsonValueAndTypeWithCollation(
+				&currentBound->bound, &currentMax.bound,
+				&isComparisonValidIgnore, indexCollation);
 
 
 			if (cmp > 0 || (cmp == 0 && !currentBound->isBoundInclusive))
