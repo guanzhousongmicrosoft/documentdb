@@ -21,6 +21,7 @@
 * Compress eligible remote single-document and batch inserts on the shard before storing them, preserving every document in partial batches and accurate insert counts. *[Bugfix]*
 * Apply the configured inline document compression threshold to multi-document updates. *[Bugfix]*
 * Enforce null/missing conflicts in descending unique indexes by starting conflict probes at the correct bound, including compound keys and collated indexes. Controlled by the default-on `documentdb.enable_unique_null_missing_semantics` setting. *[Bugfix]*
+* Filter the full internal RBAC role-name prefix from client-facing role metadata. *[Bugfix]* (PR 2319746)
 * Estimate direct equality, range, and regular-expression children and pushed index bounds for `$elemMatch` from per-path statistics instead of using a fixed fallback. Controlled by the default-on `documentdb.enable_elem_match_selectivity_from_stats` setting, with compound-index selection regression coverage. *[Bugfix/Perf]* ([#405](https://github.com/documentdb/documentdb/issues/405))
 * Reject collation-aware values that require truncation on both writes and indexed reads by default through the `documentdb.fail_on_collated_index_term_truncation` feature flag. *[Bugfix]* (work item 5643482)
 * Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
@@ -33,6 +34,8 @@
 
 ### documentdb v1.1-0 (Unreleased) ###
 * Remove gateway SQLCommenter injection and its build feature while preserving gateway spans and incoming trace context. *[Refactor]*
+* Preserve backward-compatible `connectionStatus` role reporting through PostgreSQL membership catalogs, filter helper roles, and emit each client-facing role once. *[Bugfix]* (PR 2319746)
+* Return supported built-in role definitions from `rolesInfo`, restricting each definition to callers that inherit the role or can view all roles, and preserve built-in memberships alongside custom roles in `usersInfo` and `connectionStatus`. *[Bugfix]*
 * Add a default-on `documentdb.enable_full_scan_cost_and_selectivity` setting to control full-scan planner estimates and synthetic execution cost. *[Perf]*
 * Allow `collMod` to rename an index when its key pattern and current name both match the catalog entry. *[Feature]*
 * Preserve `admin.system.users` system-catalog permission checks while filtering memberships to catalog-backed custom roles. *[Bugfix]*
