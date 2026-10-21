@@ -232,6 +232,34 @@ subtest 'promotion barrier defaults off' => sub
 	$standby->stop;
 };
 
+subtest 'promotion barrier diagnostics default off' => sub
+{
+	my $standby = PostgreSQL::Test::Cluster->new('bgworker_replica_diagnostics_off');
+	$standby->init_from_backup($primary, $backup_name, has_streaming => 1);
+	append_replica_config($standby, 'on');
+	$standby->append_conf(
+		'postgresql.conf',
+		qq{
+documentdb.enable_bgworker_promotion_barrier = on
+documentdb.bg_worker_enable_diagnostics_log = off
+});
+	$standby->start;
+
+	my $recovery_leader_pid = wait_for_leader($standby);
+	cmp_ok($recovery_leader_pid, '>', 0, 'leader starts in recovery');
+
+	$standby->promote;
+
+	ok(
+		wait_for_job_stats_success($standby, 90),
+		'primary-only job runs after promotion');
+	unlike(
+		slurp_file($standby->logfile),
+		qr/BGW_PROMOTION_BARRIER_(?:ENTERED|PASS|COMPLETED)/,
+		'promotion barrier diagnostics remain disabled');
+	$standby->stop;
+};
+
 subtest 'promotion barrier drains recovery work' => sub
 {
 	my $standby = PostgreSQL::Test::Cluster->new('bgworker_replica_promotion_drain');
