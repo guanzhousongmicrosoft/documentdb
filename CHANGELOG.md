@@ -1,12 +1,6 @@
 ### documentdb v1.1-0 (Unreleased) ###
-* Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
-* Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
 * Preserve `admin.system.users` system-catalog permission checks while filtering memberships to catalog-backed custom roles. *[Bugfix]*
 * Return custom-role metadata from `admin.system.roles` in `rolesInfo` and from `admin.system.users` in `usersInfo` and `connectionStatus`. Admin- and root-role users can list or inspect every catalog role, while other users can list or inspect roles they inherit directly or transitively; built-in roles remain excluded. *[Bugfix]*
-* Derive `$merge` target permissions from its configured actions instead of unconditionally requiring read, insert, and update, and avoid requiring update permission for `$out`'s insert-only query. *[Bugfix]*
-* Preserve UTF-8 string boundaries in trim expressions and string-to-binData conversions. *[Bugfix]*
-* Limit result string size for `$concat`. *[Bugfix]*
-* Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
 * Allow unfiltered `$sample` queries to be pushed down to a `Sample Scan` when a dynamic cursor marker is present. Guarded by the `enable_sample_scan_pushdown_for_dynamic_cursor` feature flag. *[Bugfix/Perf]*
 * Treat an explicit `simple` collation as no collation, emitting no collation tag so it uses binary comparison on every query and index path. *[Bugfix]*
 * Prevent low-fill-factor rightmost RUM leaf splits from overflowing the right page when large index terms leave too little space under the requested split target. *[Bugfix]*
@@ -16,11 +10,8 @@
 * Enable order-by pushdown for `$group` over multi-key composite ordered indexes by default when per-path metadata proves the grouped and ordered columns are scalar. *[Perf]*
 * Generate single bound for $nin and use an HTAB for index recheck for ordered indexes. *[Perf]*
 * Enable the field-pruning `$project` injection before `$unwind` (the `enableProjectPushUpBeforeUnwindWithGroup` feature flag) by default now that it has stabilized. *[Perf]*
-* Fall back to a logical posting-tree sweep when inline RUM vacuum observes a concurrent root split, ensuring dead TIDs are removed from leaves allocated behind the disk-order cursor. *[Bugfix]*
 * Support collation with `distinct` command *[Feature]*
 * Apply per-update collation when selecting documents to update, including sharded routing and update-worker execution, while retaining binary comparison semantics inside update expressions. *[Feature]*
-* Prevent a backend crash by rejecting `$documents` directly inside a `$facet` sub-pipeline. *[Bugfix]*
-* Enforce `$facet` restrictions on `$collStats`, `$facet`, `$geoNear`, `$indexStats`, and `$planCacheStats` in nested `$lookup` and `$unionWith` pipelines while preserving parent-stage validation and valid collectionless pipelines. *[Bugfix]*
 * Reduce lock-manager pressure for dynamic cursor queries on heavily indexed collections by releasing planner-acquired `AccessShareLock`s for indexes not referenced by the final streamable plan immediately after planning. Guarded by the default-off `documentdb.enable_dynamic_cursor_early_index_lock_release` setting. *[Perf]*
 
 ### documentdb v1.0-0 (October 19, 2026) ###
@@ -44,6 +35,26 @@
 * Support collation with `count` command *[Feature]*
 * Persist and manage custom roles through the data plane: `createRole`/`dropRole`/`rolesInfo` are backed by the roles catalog (keyed by role name). Guarded by `documentdb.enableRoleCrud` feature flag, disabled by default. *[Feature]*
 * Report `compact`'s `bytesFreed` as the measured reduction in on-disk size across the VACUUM instead of a statistics-based bloat estimate, and stop running the expensive bloat estimate query when no `freeSpaceTargetMB` was requested. *[Bugfix/Perf]*
+* Fix an internal error for `$group` over a `$sort` whose trailing key opposes the composite index direction. Guarded by the default-on `documentdb.enable_skip_setting_order_scan_direction_for_full_scan_expr` setting. *[Bugfix]*
+* Fix a gateway panic when the system connection budget exceeds the configured maximum connections. *[Bugfix]*
+* Fall back to a logical posting-tree sweep when inline RUM vacuum observes a concurrent root split, ensuring dead TIDs are removed from leaves allocated behind the disk-order cursor. *[Bugfix]*
+* Run the permission check for `find` and `aggregate` with `batchSize: 0`, which returned a cursor on collections the caller could not read. *[Bugfix/Security]*
+* Fix a crash or wrong results in the no-sort `$firstN`/`$lastN` accumulators when a value's size is a multiple of 64 bytes. *[Bugfix]*
+* Prevent a backend crash by rejecting `$documents` directly inside a `$facet` sub-pipeline. *[Bugfix]*
+* Enforce `$facet` restrictions on `$collStats`, `$facet`, `$geoNear`, `$indexStats`, and `$planCacheStats` in nested `$lookup` and `$unionWith` pipelines while preserving parent-stage validation and valid collectionless pipelines. *[Bugfix]*
+* Keep ordered RUM scans reading a posting tree past a singleton leaf so visible matches in later leaves are not skipped. *[Bugfix]*
+* Fix ordered scalar-array (`$in`) index scans across multiple unsatisfiable ranges. Guarded by the default-on `documentdb.enable_ordered_saop_multi_range_skip_advance` setting. *[Bugfix]*
+* Exit the gateway with an error instead of panicking when PostgreSQL is unreachable at startup, and stop the background-worker gateway instead of leaving it idle. *[Bugfix]*
+* Preserve UTF-8 string boundaries in trim expressions and string-to-binData conversions. *[Bugfix]*
+* Return retryable or specific error codes from the gateway for backend connection, transport, and pool failures and for malformed legacy wire-protocol requests instead of `InternalError`. *[Bugfix]*
+* Require insert and/or update permission on a `$merge` or `$out` target collection according to the stage's configured actions, instead of only read permission, so a read-only user can no longer write through these stages. *[Bugfix/Security]*
+* Limit result string size for `$concat`. *[Bugfix]*
+* Write the same generated `_id` to the document and its stored object ID in `$merge`/`$out`, so inserted documents without `_id` are found by `_id` lookups. Guarded by the default-on `documentdb.enable_merge_generated_id_consistency` setting. *[Bugfix]*
+* Harden ordered RUM index scans against an emptied leftmost posting-tree leaf and set the recheck flag on the correct bound. *[Bugfix]*
+* Apply find, count, and distinct command stages after a view's terminal aggregation stage, preventing grouped views from producing invalid aggregate plans. *[Bugfix]*
+* Fix a one-byte heap overflow when parsing a `bsonsequence` from JSON. *[Bugfix]*
+* Reject non-string values resolved by `$meta` before accessing string data. *[Bugfix]*
+* Reject passwords that fail SASLprep in `createUser` and `updateUser` before creating or changing native users. *[Bugfix]* ([#765](https://github.com/documentdb/documentdb/issues/765))
 
 ### documentdb v0.117-0 (September 10, 2026) ###
 * Keep let-only single-document update selection stable when a cached candidate plan switches to generic execution. *[Bugfix]*
