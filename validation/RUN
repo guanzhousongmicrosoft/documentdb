@@ -1,5 +1,5 @@
 # name | arches | timeout-min | command
-g4-image-pg17 | amd64,arm64 | 60 | validation/g4_image.sh 17
-g4-image-pg15 | amd64 | 60 | validation/g4_image.sh 15
-g4-image-pg16 | amd64 | 60 | validation/g4_image.sh 16
-g4-image-pg18 | amd64,arm64 | 60 | validation/g4_image.sh 18
+g4-deb-pg17 | amd64,arm64 | 60 | validation/g4_pkg.sh deb 17
+g4-deb-pg18 | amd64,arm64 | 60 | validation/g4_pkg.sh deb 18
+g4-rpm-pg17 | amd64,arm64 | 60 | validation/g4_pkg.sh rpm 17
+g4-rpm-pg18 | amd64,arm64 | 60 | validation/g4_pkg.sh rpm 18

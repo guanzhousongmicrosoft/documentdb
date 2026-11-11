@@ -7,9 +7,6 @@ permissions:
   contents: read
   actions: read
   packages: read
-concurrency:
-  group: validate-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   plan:
     runs-on: ubuntu-24.04
