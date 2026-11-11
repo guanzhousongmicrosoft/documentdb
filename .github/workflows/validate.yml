@@ -1,0 +1,52 @@
+# Scratch workflow for release validation; lives only on validate/** branches.
+name: Validate release
+on:
+  push:
+    branches: ['validate/**']
+permissions:
+  contents: read
+  actions: read
+  packages: read
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: m
+        run: python3 validation/plan.py >> "$GITHUB_OUTPUT"
+  run:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      JOB_NAME: ${{ matrix.name }}
+      DOCUMENTDB_USAGE_TELEMETRY: 'false'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run
+        run: |
+          mkdir -p validation-out
+          ${{ matrix.cmd }} 2>&1 | tee validation-out/console.log
+          exit "${PIPESTATUS[0]}"
+      - name: Results
+        if: always()
+        run: |
+          [ -f validation-out/results.tsv ] && column -t -s $'\t' validation-out/results.tsv | cut -c1-240 || echo "no results"
+          { echo '```'; cat validation-out/results.tsv 2>/dev/null | cut -c1-300; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ matrix.name }}
+          path: validation-out
+          retention-days: 30
