@@ -1,5 +1,2 @@
 # name | arches | timeout-min | command
-g4-deb-pg17 | amd64,arm64 | 60 | validation/g4_pkg.sh deb 17
-g4-deb-pg18 | amd64,arm64 | 60 | validation/g4_pkg.sh deb 18
-g4-rpm-pg17 | amd64,arm64 | 60 | validation/g4_pkg.sh rpm 17
-g4-rpm-pg18 | amd64,arm64 | 60 | validation/g4_pkg.sh rpm 18
+g2-artifacts | amd64 | 60 | validation/g2_artifacts.sh
