@@ -8,6 +8,11 @@ test -n "$POSTGRES_VERSION" || (echo "POSTGRES_VERSION not set" && false)
 # Change to the build directory
 cd /build
 
+pg_found=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "postgresql${POSTGRES_VERSION}-devel") \
+    || { echo "ERROR: postgresql${POSTGRES_VERSION}-devel is not installed" >&2; exit 1; }
+. /build/packaging/postgres-min-version.sh
+documentdb_check_postgres_version "$POSTGRES_VERSION" "$pg_found" /build/scripts/setup_versions.sh
+
 # Update packaging changelogs from CHANGELOG.md (fail build if this fails)
 if [[ -n "${DOCUMENTDB_VERSION:-}" ]]; then
     echo "DOCUMENTDB_VERSION provided via environment: ${DOCUMENTDB_VERSION}"

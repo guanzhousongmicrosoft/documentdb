@@ -73,6 +73,7 @@ ARG DEB_PACKAGE_REL_PATH
 RUN [ -n "${DEB_PACKAGE_REL_PATH}" ] || (echo "ERROR: DEB_PACKAGE_REL_PATH build-arg is required. Example: --build-arg DEB_PACKAGE_REL_PATH=packaging/packages/ubuntu22.04-postgresql-16-documentdb_1.0.0_amd64.deb" >&2; exit 1)
 
 COPY ${DEB_PACKAGE_REL_PATH} /tmp/install_setup/
+COPY packaging/postgres-min-version.sh scripts/setup_versions.sh /tmp/install_setup/
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -92,6 +93,9 @@ RUN apt-get update && \
     postgresql-${POSTGRES_VERSION}-pgvector \
     postgresql-${POSTGRES_VERSION}-postgis-3 \
     $RUM_PKG && \
+    pg_found="$(dpkg-query -W -f='${Version}' postgresql-${POSTGRES_VERSION})" && \
+    bash -c '. /tmp/install_setup/postgres-min-version.sh && documentdb_check_postgres_version "$@"' \
+        _ "${POSTGRES_VERSION}" "$pg_found" /tmp/install_setup/setup_versions.sh && \
     { gid_owner="$(getent group 103 | cut -d: -f1)"; uid_owner="$(getent passwd 105 | cut -d: -f1)"; \
       if getent passwd postgres >/dev/null 2>&1 && { [ -z "$gid_owner" ] || [ "$gid_owner" = postgres ]; } && { [ -z "$uid_owner" ] || [ "$uid_owner" = postgres ]; }; then \
           groupmod -g 103 postgres && usermod -u 105 -g 103 postgres; \
