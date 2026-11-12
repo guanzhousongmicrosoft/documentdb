@@ -369,6 +369,8 @@ fn map_pg_db_error_fallback<'a>(
                         error_message: "index creation requires resources too large to fit in the resource memory limit, please try creating index with less number of documents or creating index before inserting documents into collection",
                         internal_note: Some(msg),
                     }
+            } else if msg.contains("tsquery is too complex") {
+                text_query_too_deep(activity_id)
             } else {
                 PostgresErrorMappedResult {
                     error_code: ErrorCode::InternalError,
@@ -408,15 +410,7 @@ fn map_pg_db_error_fallback<'a>(
         }
         SqlState::INTERNAL_ERROR => {
             if msg.contains("tsquery stack too small") {
-                // When the search terms have more than 32 nested levels, tsquery raises the PG internal error with message "tsquery stack too small".
-                // This can happen in find commands or $match aggregation stages with $text filter.
-                let error_message = "$text query is exceeding the maximum allowed depth(32), please simplify the query";
-                tracing::error!(activity_id = activity_id, "{error_message}");
-                PostgresErrorMappedResult {
-                    error_code: ErrorCode::BadValue,
-                    error_message,
-                    internal_note: Some(error_message),
-                }
+                text_query_too_deep(activity_id)
             } else if msg.contains("EXPLAIN ANALYZE is currently not supported for MERGE INTO") {
                 PostgresErrorMappedResult::new(
                     ErrorCode::IllegalOperation,
@@ -609,6 +603,15 @@ fn map_pg_db_error_fallback<'a>(
             internal_note: Some(msg),
         },
     }
+}
+
+/// `$text` nested over 32 levels overflows the tsquery stack: 54000 "tsquery is too complex" on
+/// `PostgreSQL` 16.16, 17.12, 18.7 and later; XX000 "tsquery stack too small" on older releases.
+fn text_query_too_deep(activity_id: &str) -> PostgresErrorMappedResult<'static> {
+    let error_message =
+        "$text query is exceeding the maximum allowed depth(32), please simplify the query";
+    tracing::error!(activity_id = activity_id, "{error_message}");
+    PostgresErrorMappedResult::new(ErrorCode::BadValue, error_message, Some(error_message))
 }
 
 fn transform_error(
@@ -1271,19 +1274,40 @@ mod tests {
     }
 
     #[test]
-    fn test_map_with_internal_error_tsquery_stack_returns_bad_value() {
+    fn test_map_with_tsquery_too_deep_returns_bad_value() {
+        for (state, msg) in [
+            (&SqlState::INTERNAL_ERROR, "tsquery stack too small"),
+            (&SqlState::PROGRAM_LIMIT_EXCEEDED, "tsquery is too complex"),
+        ] {
+            let result = map_pg_db_error(false, false, state, msg, "test-activity");
+
+            assert_eq!(
+                result.error_code(),
+                ErrorCode::BadValue,
+                "unexpected code for {}",
+                state.code()
+            );
+            assert_eq!(
+                result.error_message(),
+                "$text query is exceeding the maximum allowed depth(32), please simplify the query",
+                "unexpected message for {}",
+                state.code()
+            );
+        }
+    }
+
+    #[test]
+    fn test_map_with_program_limit_exceeded_other_tsquery_message_returns_internal_error() {
         let result = map_pg_db_error(
             false,
             false,
-            &SqlState::INTERNAL_ERROR,
-            "tsquery stack too small",
+            &SqlState::PROGRAM_LIMIT_EXCEEDED,
+            "tsquery is too large",
             "test-activity",
         );
 
-        assert_eq!(result.error_code(), ErrorCode::BadValue);
-        assert!(result
-            .error_message()
-            .contains("$text query is exceeding the maximum allowed depth"));
+        assert_eq!(result.error_code(), ErrorCode::InternalError);
+        assert_eq!(result.error_message(), "tsquery is too large");
     }
 
     #[test]

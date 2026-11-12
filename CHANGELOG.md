@@ -25,6 +25,7 @@
 * Allow scalar leading-key distinct pushdown on multikey reduced-correlated indexes when `documentdb.enable_distinct_multi_key_sort_pushdown` is enabled. *[Perf]*
 * Support explicit command collation for `findAndModify`. *[Feature]*
 * Allow `_id` support-function predicates to prove eligible partial RUM index filters when `documentdb.enable_support_function_id_pushdown` is enabled, with the default-on `documentdb.enable_support_object_id_function_pfe_pushdown` setting independently controlling partial-index implication. *[Bugfix/Perf]*
+* Return `BadValue` again, instead of `InternalError`, for a `$text` query nested more than 32 levels deep on PostgreSQL 16.16, 17.12, 18.7 and later minors. *[Bugfix]*
 
 ### documentdb v1.1-0 (Unreleased) ###
 * Remove gateway SQLCommenter injection and its build feature while preserving gateway spans and incoming trace context. *[Refactor]*
